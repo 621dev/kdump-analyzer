@@ -46,6 +46,39 @@ ui_size() {
     UI_LIST_H=$((UI_H - 8))
 }
 
+# 안내 문구가 화면에서 차지하는 줄 수(긴 줄이 접히는 것 포함). 한글은 wc -L이 두 칸으로 셉니다.
+ui_text_lines() {
+    local width=$((UI_W - 4)) lines=0 line w
+
+    while IFS= read -r line; do
+        w=$(printf '%s' "$line" | wc -L)
+        if [ "$w" -eq 0 ]; then
+            lines=$((lines + 1))
+        else
+            lines=$((lines + (w + width - 1) / width))
+        fi
+    done < <(printf '%b\n' "$1")
+    echo "$lines"
+}
+
+# 메뉴 상자 높이를 안내 문구 줄 수와 항목 수에 맞춥니다.
+# 목록 영역을 고정으로 크게 잡으면 whiptail이 안내 문구를 첫 줄만 남기고 잘라 버립니다.
+ui_fit() {
+    local text="$1" items="$2" text_lines avail max
+
+    ui_size
+    max=$UI_H
+    text_lines=$(ui_text_lines "$text")
+    avail=$((max - 8 - text_lines))
+    UI_LIST_H=$items
+    if [ "$UI_LIST_H" -gt "$avail" ]; then
+        UI_LIST_H=$avail
+    fi
+    [ "$UI_LIST_H" -lt 3 ] && UI_LIST_H=3
+    UI_H=$((text_lines + UI_LIST_H + 8))
+    [ "$UI_H" -gt "$max" ] && UI_H=$max
+}
+
 # 목록 맨 끝에 붙이는 "이전 메뉴로" 항목의 태그
 BACK="<"
 BACK_LABEL="← 이전 메뉴로"
@@ -56,17 +89,17 @@ UI_CANCEL="뒤로"
 ui_menu() {
     local text="$1"
     shift
-    ui_size
+    ui_fit "$text" $(($# / 2))
     "$WHIPTAIL" --title "$TITLE" --ok-button "선택" --cancel-button "$UI_CANCEL" \
         --menu "$text" "$UI_H" "$UI_W" "$UI_LIST_H" "$@" 3>&1 1>&2 2>&3
 }
 
 ui_radio() {
-    local text="$1"
+    local text="$1\n(스페이스: 고르기, Enter: 확인)"
     shift
-    ui_size
+    ui_fit "$text" $(($# / 3))
     "$WHIPTAIL" --title "$TITLE" --ok-button "선택" --cancel-button "$UI_CANCEL" \
-        --radiolist "$text\n(스페이스: 고르기, Enter: 확인)" "$UI_H" "$UI_W" "$UI_LIST_H" "$@" 3>&1 1>&2 2>&3
+        --radiolist "$text" "$UI_H" "$UI_W" "$UI_LIST_H" "$@" 3>&1 1>&2 2>&3
 }
 
 ui_input() {
