@@ -468,9 +468,16 @@ NODENAME_RE = re.compile(r"^\s*NODENAME:\s*(\S+)", re.M)
 
 def mask_text(text):
     for name in set(NODENAME_RE.findall(text)):
-        for value in sorted({name, name.split(".")[0]}, key=len, reverse=True):
+        short = name.split(".")[0]
+        # 호스트명에 쓰이는 문자(영문, 숫자, '-')만 경계로 봅니다. '_'나 '/' 옆도 마스킹됩니다.
+        patterns = {value: r"(?![A-Za-z0-9-])" for value in (name, short)}
+        if "-" in short:
+            # device-mapper 이름(LVM)에서는 '-'가 '--'로 바뀌고 뒤에 VG/LV 구분자 '-'가 붙습니다.
+            # 예: /dev/mapper/rlm_kdump--test-root
+            patterns[short.replace("-", "--")] = r"(?=-(?!-)|[^A-Za-z0-9-]|$)"
+        for value in sorted(patterns, key=len, reverse=True):
             if len(value) >= 3:
-                text = re.sub(r"(?<![\w-])" + re.escape(value) + r"(?![\w-])", "<HOSTNAME>", text)
+                text = re.sub(r"(?<![A-Za-z0-9-])" + re.escape(value) + patterns[value], "<HOSTNAME>", text)
     text = EMAIL_RE.sub("<EMAIL>", text)
     text = MAC_RE.sub("<MAC>", text)
     text = IPV4_RE.sub("<IPV4>", text)
@@ -897,6 +904,9 @@ if [ "$REPORT_MODE" -eq 1 ]; then
     echo "report:  $REPORT_FILE"
     if [ "$CRASH_STATUS" -ne 0 ]; then
         echo "crash 실행이 실패했습니다(exit $CRASH_STATUS). 리포트 끝의 'crash 실행 로그'를 확인해 주세요." >&2
+        if [ "$CRASH_STATUS" -eq 137 ]; then
+            echo "crash가 강제 종료(SIGKILL)됐습니다. 메모리 부족(OOM)일 가능성이 높으니 'dmesg | grep -i oom'으로 확인하고, 메모리를 늘리거나 swap을 추가해 주세요." >&2
+        fi
         if is_enabled "$LLM_ENABLED"; then
             echo "불완전한 리포트이므로 LLM 분석은 건너뜁니다." >&2
         fi

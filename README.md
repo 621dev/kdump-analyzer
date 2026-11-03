@@ -40,6 +40,7 @@
 - 분석 대상 `vmcore`
 - `vmcore`의 커널 버전과 일치하는 `vmlinux`
 - LLM 분석을 쓸 경우 `curl`, `python3`
+- 분석 서버 메모리: `crash`가 커널 디버그 정보를 읽을 때 RHEL 9 커널 기준 약 1.5GB를 사용합니다. 메모리가 2GB 이하인 서버나 VM에서는 swap을 추가합니다. 메모리가 부족하면 `crash`가 OOM으로 강제 종료되고 종료 코드 `2`가 반환됩니다.
 
 RHEL 계열 시스템에서는 보통 `crash`와 `debuginfo-install`을 사용할 수 있어야 합니다.
 
@@ -293,6 +294,18 @@ log
 ```
 
 hung task 패닉을 분석할 때는 D 상태 프로세스의 스택이 핵심이므로 `foreach UN bt`를 추가하는 것을 권장합니다.
+
+## 테스트 VM에서 검증하기
+
+`tests/vm/kdump-vm-test.sh`는 테스트용 RHEL 계열 VM에서 실제 vmcore를 만들어 `analyze-kdump`를 검증합니다. **운영 서버에서는 실행하지 않습니다.** `panic` 단계는 커널을 즉시 패닉시킵니다.
+
+```bash
+sudo ./tests/vm/kdump-vm-test.sh setup    # kdump 설정. crashkernel이 새로 잡히면 재부팅 후 다시 실행
+sudo ./tests/vm/kdump-vm-test.sh panic    # sysrq 패닉 -> 재부팅 후 /var/crash에 vmcore 생성
+sudo ./tests/vm/kdump-vm-test.sh verify   # debuginfo 설치, analyze-kdump -r 실행, 섹션별 출력 점검
+```
+
+`verify --llm`을 쓰면 `LLM_API_KEY` 등 LLM 설정으로 분석 파일 생성까지 확인합니다.
 
 ## 로그 디렉터리
 
