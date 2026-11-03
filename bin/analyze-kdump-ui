@@ -1362,13 +1362,16 @@ native_install_claude() {
         rm -f "$script"
         return 1
     fi
-    bash "$script"
+    # 공식 설치 스크립트는 sudo 실행을 막습니다. 분석이 root로 실행되므로 root 설치가 의도된 동작이라
+    # 스크립트가 안내하는 CLAUDE_INSTALL_ALLOW_SUDO=1로 허용합니다.
+    CLAUDE_INSTALL_ALLOW_SUDO=1 bash "$script"
     local status=$?
     rm -f "$script"
     [ "$status" -eq 0 ] || return "$status"
-    INSTALLED_CLI=$(command -v claude 2>/dev/null || true)
-    [ -n "$INSTALLED_CLI" ] || INSTALLED_CLI="$HOME/.local/bin/claude"
-    [ -x "$INSTALLED_CLI" ]
+    # 다른 위치에 예전 claude가 있어도 방금 설치한 것을 쓰도록, 공식 스크립트의 설치 위치를 먼저 봅니다.
+    INSTALLED_CLI="$HOME/.local/bin/claude"
+    [ -x "$INSTALLED_CLI" ] || INSTALLED_CLI=$(command -v claude 2>/dev/null || true)
+    [ -n "$INSTALLED_CLI" ] && [ -x "$INSTALLED_CLI" ]
 }
 
 install_cli() {
@@ -1391,7 +1394,7 @@ install_cli() {
 
     case "$method" in
         native)
-            ui_yesno "다음을 실행합니다.\n\n  curl -fsSL $CLAUDE_INSTALL_URL | bash\n\n($(id -un) 계정의 ~/.local/bin/claude 에 설치)\n\n진행할까요?" || return 1
+            ui_yesno "다음을 실행합니다.\n\n  curl -fsSL $CLAUDE_INSTALL_URL | CLAUDE_INSTALL_ALLOW_SUDO=1 bash\n\n$(id -un) 계정의 ~/.local/bin/claude 에 설치합니다.\n분석이 이 계정으로 실행되므로 이 계정에 설치하는 것이 맞습니다.\n(공식 스크립트는 sudo 실행을 기본으로 막아서, 허용 옵션을 함께 지정합니다)\n\n진행할까요?" || return 1
             ;;
         npm)
             ui_yesno "다음을 실행합니다.\n\n  1. Node.js 확인 (없거나 오래됐으면 패키지 관리자로 Node.js $NODE_STREAM 설치)\n  2. npm install -g $([ "$name" = claude ] && echo @anthropic-ai/claude-code || echo @openai/codex)\n\n진행할까요?" || return 1
