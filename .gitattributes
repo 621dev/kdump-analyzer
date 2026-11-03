@@ -1,2 +1,3 @@
 README.md text eol=lf
 bin/analyze-kdump text eol=lf
+analyze-kdump.conf.sample text eol=lf
