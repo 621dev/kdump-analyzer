@@ -892,10 +892,12 @@ SETTINGS=(
     "REPORT_DIR|리포트 저장 디렉터리|text"
     "DEFAULT_VMCORE|기본 vmcore 또는 crash 디렉터리|text"
     "LLM_PROVIDER|LLM provider|provider"
-    "LLM_MODEL|LLM 모델 (비우면 provider 기본값)|text"
+    "CLI_AUTH|구독 CLI 인증 (로그인·토큰·연결 테스트)|auth"
+    "LLM_MODEL|LLM 모델 (목록에서 선택, 비우면 기본값)|model"
     "LLM_BASE_URL|API 엔드포인트 (비우면 기본값)|text"
     "LLM_API_KEY_FILE|API 키 파일 경로|text"
-    "LLM_CLI_PATH|구독 CLI 경로 (claude-code/codex)|text"
+    "LLM_CLI_PATH|구독 CLI 경로 (자동 탐색)|clipath"
+    "LLM_CLI_TOKEN_FILE|Claude Code 장기 토큰 파일|text"
     "LLM_CLI_ARGS|구독 CLI 추가 인자|text"
     "LLM_MASK_SENSITIVE|LLM 입력 민감정보 마스킹|bool"
     "LLM_MAX_REPORT_CHARS|LLM 입력 최대 문자 수|number"
@@ -926,6 +928,18 @@ edit_setting() {
 
     current=$(conf_get "$key" "$(setting_default "$key")")
     case "$kind" in
+        auth)
+            menu_cli_auth
+            return
+            ;;
+        model)
+            edit_model
+            return
+            ;;
+        clipath)
+            edit_cli_path ""
+            return
+            ;;
         provider)
             local -a items=()
             for p in openai gemini claude claude-code codex; do
@@ -956,11 +970,476 @@ edit_setting() {
             ;;
     esac
 
-    if conf_set "$key" "$value"; then
-        ui_msg "저장했습니다.\n\n$key=\"$value\"\n($CONFIG_FILE)"
+    save_setting "$key" "$value" || return
+    # 구독 CLI provider로 바꾸면 바로 로그인 상태를 확인할 수 있게 합니다.
+    if [ "$kind" = "provider" ] && { [ "$value" = "claude-code" ] || [ "$value" = "codex" ]; }; then
+        if ui_yesno "구독 CLI($value)를 사용하려면 이 서버에서 로그인되어 있어야 합니다.\n\n지금 로그인 상태를 확인하고 인증을 진행할까요?"; then
+            menu_cli_auth
+        fi
+    fi
+}
+
+save_setting() {
+    if conf_set "$1" "$2"; then
+        ui_msg "저장했습니다.\n\n$1=\"$2\"\n($CONFIG_FILE)"
     else
         ui_msg "저장하지 못했습니다. 쓰기 권한을 확인해 주세요.\n\n$CONFIG_FILE"
+        return 1
     fi
+}
+
+# ---------------------------------------------------------------- LLM 모델 목록
+
+ui_password() {
+    ui_size
+    "$WHIPTAIL" --title "$TITLE" --ok-button "확인" --cancel-button "$UI_CANCEL" \
+        --passwordbox "$1" 12 "$UI_W" 3>&1 1>&2 2>&3
+}
+
+trim() {
+    local value="$1"
+    value="${value//$'\r'/}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s' "$value"
+}
+
+# 환경변수 LLM_API_KEY, conf의 LLM_API_KEY, LLM_API_KEY_FILE 순으로 API 키를 찾습니다.
+api_key_for_lookup() {
+    local key key_file
+
+    key="${LLM_API_KEY:-$(conf_get LLM_API_KEY "")}"
+    if [ -z "$key" ]; then
+        key_file=$(conf_get LLM_API_KEY_FILE "")
+        if [ -n "$key_file" ] && [ -r "$key_file" ]; then
+            key=$(sed -n '1p' "$key_file")
+        fi
+    fi
+    trim "$key"
+}
+
+# provider의 모델 목록 API를 호출해 모델 이름을 한 줄에 하나씩 파일에 씁니다. 실패하면 MODEL_ERR에 사유를 둡니다.
+# API 키는 명령줄에 보이지 않도록 curl 설정 파일로 넘깁니다.
+fetch_models() {
+    local provider="$1" out="$2" key base url cfg response err status
+
+    MODEL_ERR=""
+    if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+        MODEL_ERR="curl과 python3가 필요합니다."
+        return 1
+    fi
+    key=$(api_key_for_lookup)
+    base=$(conf_get LLM_BASE_URL "")
+    # 키 없이 쓰는 사내 호환 서버(Ollama 등)를 위해 LLM_BASE_URL이 있으면 키 없이도 시도합니다.
+    if [ -z "$key" ] && { [ "$provider" != "openai" ] || [ -z "$base" ]; }; then
+        MODEL_ERR="API 키가 없습니다. 설정의 LLM_API_KEY_FILE을 먼저 지정해 주세요."
+        return 1
+    fi
+
+    cfg=$(mktemp "${TMPDIR:-/tmp}/kdump-models.XXXXXX")
+    response="$cfg.json"
+    err="$cfg.err"
+    chmod 600 "$cfg"
+    key=$(printf '%s' "$key" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+    case "$provider" in
+        openai)
+            url="${base:-https://api.openai.com/v1/chat/completions}"
+            url="${url%/chat/completions}/models"
+            [ -n "$key" ] && printf 'header = "Authorization: Bearer %s"\n' "$key" > "$cfg"
+            ;;
+        claude)
+            url="${base:-https://api.anthropic.com/v1/messages}"
+            url="${url%/messages}/models?limit=100"
+            {
+                printf 'header = "x-api-key: %s"\n' "$key"
+                printf 'header = "anthropic-version: %s"\n' "$(conf_get LLM_ANTHROPIC_VERSION 2023-06-01)"
+            } > "$cfg"
+            ;;
+        gemini)
+            url="https://generativelanguage.googleapis.com/v1beta/models?pageSize=200"
+            printf 'header = "x-goog-api-key: %s"\n' "$key" > "$cfg"
+            ;;
+        *)
+            MODEL_ERR="이 provider는 모델 목록을 조회할 수 없습니다: $provider"
+            rm -f "$cfg"
+            return 1
+            ;;
+    esac
+
+    curl -fsS --connect-timeout 5 --max-time 15 --config "$cfg" "$url" > "$response" 2> "$err"
+    status=$?
+    rm -f "$cfg"
+    if [ "$status" -ne 0 ]; then
+        MODEL_ERR="모델 목록 API 호출 실패: $(head -c 200 "$err")"
+        rm -f "$response" "$err"
+        return 1
+    fi
+
+    # 공식 OpenAI API는 이미지·음성·임베딩 모델도 함께 주므로 대화용 모델만 남깁니다.
+    PYTHONIOENCODING=utf-8 python3 - "$provider" "$base" "$response" > "$out" 2> "$err" <<'PY'
+import json, re, sys
+
+provider, base, path = sys.argv[1:4]
+with open(path, encoding="utf-8") as f:
+    data = json.load(f)
+
+names = []
+if provider == "gemini":
+    for model in data.get("models", []):
+        if "generateContent" in model.get("supportedGenerationMethods", []):
+            names.append(model.get("name", "").replace("models/", "", 1))
+else:
+    names = [model.get("id", "") for model in data.get("data", [])]
+    if provider == "openai" and not base:
+        skip = re.compile(r"audio|tts|image|embedding|transcribe|realtime|search|moderation|dall-e|whisper")
+        names = sorted(n for n in names if re.match(r"(gpt|o[0-9]|chatgpt)", n) and not skip.search(n))
+
+for name in names:
+    if name:
+        print(name)
+PY
+    status=$?
+    rm -f "$response"
+    if [ "$status" -ne 0 ] || [ ! -s "$out" ]; then
+        MODEL_ERR="모델 목록을 읽지 못했습니다. $(head -c 200 "$err")"
+        rm -f "$err"
+        return 1
+    fi
+    rm -f "$err"
+}
+
+edit_model() {
+    local provider current choice value tmp name i=0 found=0 note=""
+    local -a items models
+
+    provider=$(conf_get LLM_PROVIDER openai)
+    current=$(conf_get LLM_MODEL "")
+    case "$provider" in
+        claude-code)
+            # Claude Code CLI에는 모델 목록 명령이 없어 별칭을 제공합니다.
+            items=(sonnet "Sonnet (최신 Sonnet)" opus "Opus (최신 Opus)" haiku "Haiku (최신 Haiku)")
+            note="Claude Code는 별칭을 받으면 해당 계열의 최신 모델을 씁니다."
+            ;;
+        codex)
+            note="Codex CLI에는 모델 목록 명령이 없습니다. 비워 두면 ~/.codex/config.toml의 모델을 씁니다."
+            ;;
+        *)
+            tmp=$(mktemp "${TMPDIR:-/tmp}/kdump-model-list.XXXXXX")
+            ui_info "모델 목록을 조회하는 중... ($provider)"
+            if fetch_models "$provider" "$tmp"; then
+                while IFS= read -r name; do
+                    i=$((i + 1))
+                    [ "$i" -gt 100 ] && break
+                    models[$i]="$name"
+                    items+=("$i" "$name")
+                done < "$tmp"
+                note="$provider에서 조회한 모델 ${#models[@]}개"
+            else
+                note="모델 목록을 가져오지 못했습니다: $MODEL_ERR"
+            fi
+            rm -f "$tmp"
+            ;;
+    esac
+
+    # 항목의 실제 모델 이름: claude-code는 태그가 곧 별칭이고, API 목록은 태그가 번호(models 배열 인덱스)입니다.
+    model_of() {
+        if [ "$provider" = "claude-code" ]; then
+            printf '%s' "$1"
+        else
+            printf '%s' "${models[$1]}"
+        fi
+    }
+
+    # radiolist 상태(ON/OFF)를 붙이고, 현재 값과 같은 항목을 선택해 둡니다.
+    local -a radio=()
+    local state
+    for ((i = 0; i < ${#items[@]}; i += 2)); do
+        state=OFF
+        if [ -n "$current" ] && [ "$(model_of "${items[i]}")" = "$current" ]; then
+            state=ON
+            found=1
+        fi
+        radio+=("${items[i]}" "${items[i + 1]}" "$state")
+    done
+    radio+=("-" "기본값 사용 (비워 두기)" "$([ -z "$current" ] && echo ON || echo OFF)")
+    radio+=("m" "직접 입력" "$([ -n "$current" ] && [ "$found" -eq 0 ] && echo ON || echo OFF)")
+
+    choice=$(ui_radio "LLM 모델 ($provider)\n현재: ${current:-기본값}\n$note" "${radio[@]}") || return
+    case "$choice" in
+        '') return ;;
+        -) value="" ;;
+        m) value=$(ui_input "모델 이름:" "$current") || return ;;
+        *) value=$(model_of "$choice") ;;
+    esac
+    save_setting LLM_MODEL "$value"
+}
+
+# ---------------------------------------------------------------- 구독 CLI 경로·인증
+
+cli_name() {
+    case "$1" in
+        codex) echo codex ;;
+        *) echo claude ;;
+    esac
+}
+
+# 설정된 경로 또는 PATH의 CLI 실행 파일 경로를 출력합니다.
+cli_resolve() {
+    local path
+    path=$(conf_get LLM_CLI_PATH "")
+    [ -n "$path" ] || path=$(cli_name "$1")
+    command -v "$path" 2>/dev/null
+}
+
+# CLI를 실행합니다. 같은 폴더를 PATH 앞에 붙이고(nvm 설치본의 node), 토큰 파일이 있으면
+# CLAUDE_CODE_OAUTH_TOKEN으로 넘깁니다(명령줄에 보이지 않게 환경변수로). CLI_TIMEOUT을 주면 시간 제한을 둡니다.
+cli_exec() {
+    local cli="$1" token_file token
+    shift
+    token_file=$(conf_get LLM_CLI_TOKEN_FILE "")
+    (
+        export PATH="$(dirname "$cli"):$PATH"
+        if [ -n "$token_file" ] && [ -r "$token_file" ]; then
+            token=$(trim "$(sed -n '1p' "$token_file")")
+            [ -n "$token" ] && export CLAUDE_CODE_OAUTH_TOKEN="$token"
+        fi
+        [ -n "${CLI_CWD:-}" ] && cd "$CLI_CWD"
+        if [ -n "${CLI_TIMEOUT:-}" ]; then
+            timeout "$CLI_TIMEOUT" "$cli" "$@"
+        else
+            "$cli" "$@"
+        fi
+    )
+}
+
+# 흔한 설치 위치에서 CLI를 찾아 "경로|버전"을 출력합니다(중복 제거).
+find_cli_candidates() {
+    local name="$1" path key version seen=" "
+
+    for path in $(command -v "$name" 2>/dev/null) \
+        /usr/local/bin/"$name" /usr/bin/"$name" /opt/*/bin/"$name" \
+        /root/.local/bin/"$name" /root/.npm-global/bin/"$name" /root/.nvm/versions/node/*/bin/"$name" \
+        /home/*/.local/bin/"$name" /home/*/.npm-global/bin/"$name" /home/*/.nvm/versions/node/*/bin/"$name"; do
+        [ -x "$path" ] || continue
+        key=$(readlink -f "$path")
+        case "$seen" in
+            *" $key "*) continue ;;
+        esac
+        seen="$seen$key "
+        version=$(CLI_TIMEOUT=10 cli_exec "$path" --version 2>/dev/null </dev/null | head -n 1)
+        echo "$path|${version:-버전 확인 실패}"
+    done
+}
+
+edit_cli_path() {
+    local provider="$1" name current path version choice value i=0 text
+    local -a radio paths
+
+    [ -n "$provider" ] || provider=$(conf_get LLM_PROVIDER openai)
+    case "$provider" in
+        claude-code|codex) ;;
+        *)
+            provider=$(ui_radio "어떤 구독 CLI의 경로를 찾을까요?" \
+                claude-code "Claude Code (claude)" ON \
+                codex "Codex (codex)" OFF) || return
+            ;;
+    esac
+    name=$(cli_name "$provider")
+    current=$(conf_get LLM_CLI_PATH "")
+
+    ui_info "$name 실행 파일을 찾는 중..."
+    while IFS='|' read -r path version; do
+        [ -n "$path" ] || continue
+        i=$((i + 1))
+        paths[$i]="$path"
+        radio+=("$i" "$path ($version)" "$([ "$path" = "$current" ] && echo ON || echo OFF)")
+    done < <(find_cli_candidates "$name")
+
+    if [ "$i" -eq 0 ]; then
+        text="$name 실행 파일을 찾지 못했습니다.\n설치: npm install -g $([ "$name" = claude ] && echo @anthropic-ai/claude-code || echo @openai/codex)"
+    else
+        text="찾은 $name 실행 파일 ${i}개 (괄호는 버전)"
+    fi
+    text="$text\nsudo로 실행하면 /usr/local/bin이 PATH에 없어 이름만으로는 못 찾을 수 있으니 전체 경로를 고르세요."
+    radio+=("-" "비워 두기 (PATH에서 $name 찾기)" "$([ -z "$current" ] && echo ON || echo OFF)")
+    if [ -n "$current" ] && ! printf '%s\n' "${paths[@]}" | grep -qxF -- "$current"; then
+        radio+=("m" "직접 입력 (현재: $current)" ON)
+    else
+        radio+=("m" "직접 입력" OFF)
+    fi
+
+    choice=$(ui_radio "$text" "${radio[@]}") || return
+    case "$choice" in
+        '') return ;;
+        -) value="" ;;
+        m)
+            value=$(ui_input "$name 실행 파일 전체 경로:" "$current") || return
+            if [ -n "$value" ] && [ ! -x "$value" ]; then
+                ui_msg "실행할 수 없는 경로입니다: $value"
+                return
+            fi
+            ;;
+        *) value="${paths[$choice]}" ;;
+    esac
+    save_setting LLM_CLI_PATH "$value"
+}
+
+cli_auth_status() {
+    local provider="$1" cli="$2"
+
+    case "$provider" in
+        claude-code) CLI_TIMEOUT=20 cli_exec "$cli" auth status --text 2>&1 </dev/null | head -n 8 ;;
+        codex) CLI_TIMEOUT=20 cli_exec "$cli" login status 2>&1 </dev/null | head -n 5 ;;
+    esac
+}
+
+# claude setup-token이 출력한 토큰을 받아 root만 읽을 수 있는 파일에 저장하고, 설정에는 경로만 남깁니다.
+save_cli_token() {
+    local token secrets file
+
+    secrets="$(dirname "$CONFIG_FILE")/secrets"
+    file="$secrets/claude-oauth-token"
+    token=$(ui_password "Claude Code 장기 토큰을 붙여넣으세요. (claude setup-token 출력)\n\n토큰은 $file 에 root만 읽을 수 있게 저장하고,\n설정에는 파일 경로(LLM_CLI_TOKEN_FILE)만 남깁니다.") || return
+    token=$(trim "$token")
+    if [ -z "$token" ]; then
+        ui_msg "토큰이 비어 있어 저장하지 않았습니다."
+        return
+    fi
+    case "$token" in
+        *[[:space:]]*)
+            ui_msg "토큰에 공백이 들어 있습니다. 출력된 토큰 한 줄만 붙여넣어 주세요."
+            return
+            ;;
+    esac
+    install -d -m 700 "$secrets" || return
+    (umask 077 && printf '%s\n' "$token" > "$file") || return
+    chmod 600 "$file"
+    save_setting LLM_CLI_TOKEN_FILE "$file"
+}
+
+# 짧은 요청을 한 번 보내 실제로 응답이 오는지 확인합니다(구독 사용량을 조금 씁니다).
+cli_connection_test() {
+    local provider="$1" cli="$2" model out status dir
+
+    model=$(conf_get LLM_MODEL "")
+    dir=$(mktemp -d "${TMPDIR:-/tmp}/kdump-cli-test.XXXXXX")
+    ui_info "연결 테스트 중... (짧은 요청 1회, 최대 2분)"
+    case "$provider" in
+        claude-code)
+            out=$(CLI_CWD="$dir" CLI_TIMEOUT=120 cli_exec "$cli" -p "Reply with exactly: OK" --output-format text \
+                --tools "" --strict-mcp-config --no-session-persistence ${model:+--model "$model"} 2>&1 </dev/null)
+            status=$?
+            ;;
+        codex)
+            CLI_CWD="$dir" CLI_TIMEOUT=120 cli_exec "$cli" exec --skip-git-repo-check --sandbox read-only --color never \
+                --ephemeral --output-last-message "$dir/out.txt" ${model:+--model "$model"} "Reply with exactly: OK" \
+                > "$dir/log.txt" 2>&1 </dev/null
+            status=$?
+            out=$(cat "$dir/out.txt" 2>/dev/null)
+            [ -n "$out" ] || out=$(tail -n 8 "$dir/log.txt")
+            ;;
+    esac
+    case "$dir" in
+        */kdump-cli-test.*) rm -rf "$dir" ;;
+    esac
+    if [ "$status" -eq 0 ]; then
+        ui_msg "연결 테스트 성공 (${model:-기본 모델})\n\n응답: $(printf '%s' "$out" | tail -n 3)"
+    else
+        ui_msg "연결 테스트 실패 (종료 코드 $status)\n\n$(printf '%s' "$out" | tail -n 8)\n\n로그인 상태와 사용 한도를 확인해 주세요."
+    fi
+}
+
+menu_cli_auth() {
+    local provider name cli status choice token_file
+    local -a items
+
+    provider=$(conf_get LLM_PROVIDER openai)
+    case "$provider" in
+        claude-code|codex) ;;
+        *)
+            provider=$(ui_radio "어떤 구독 CLI를 인증할까요?\n(설정의 LLM_PROVIDER는 바뀌지 않습니다)" \
+                claude-code "Claude Code (Claude Pro/Max 구독)" ON \
+                codex "Codex (ChatGPT 구독)" OFF) || return
+            ;;
+    esac
+    name=$(cli_name "$provider")
+
+    while true; do
+        if ! cli=$(cli_resolve "$provider"); then
+            if ui_yesno "$name 명령을 찾지 못했습니다.\n\n설치: npm install -g $([ "$name" = claude ] && echo @anthropic-ai/claude-code || echo @openai/codex)\nsudo로 실행하면 /usr/local/bin이 PATH에 없어 못 찾을 수 있습니다.\n\n설치된 위치를 찾아 경로를 지정할까요?"; then
+                edit_cli_path "$provider"
+                cli_resolve "$provider" >/dev/null && continue
+            fi
+            return
+        fi
+
+        ui_info "$name 로그인 상태를 확인하는 중..."
+        status=$(cli_auth_status "$provider" "$cli")
+        token_file=$(conf_get LLM_CLI_TOKEN_FILE "")
+        items=()
+        case "$provider" in
+            claude-code)
+                items+=(token "장기 토큰 발급 (claude setup-token) - 화면 없는 서버 권장"
+                    paste "다른 PC에서 발급한 토큰 붙여넣기"
+                    login "브라우저 로그인 (claude auth login)")
+                [ -n "$token_file" ] && items+=(untoken "저장된 토큰 사용 중지 ($token_file)")
+                ;;
+            codex)
+                items+=(device "기기 코드 로그인 (codex login --device-auth) - 화면 없는 서버 권장"
+                    login "브라우저 로그인 (codex login)")
+                ;;
+        esac
+        items+=(test "연결 테스트 (짧은 요청 1회)" "$BACK" "$BACK_LABEL")
+
+        choice=$(ui_menu "구독 CLI 인증: $name\n실행 파일: $cli\n실행 계정: $(id -un) (분석도 이 계정으로 실행됩니다)\n\n현재 상태:\n${status:-상태를 읽지 못했습니다}" "${items[@]}") || return
+        case "$choice" in
+            token)
+                clear
+                echo "===== Claude Code 장기 토큰 발급 ====="
+                echo "1. 표시되는 주소를 브라우저(다른 PC도 가능)에서 열어 Claude 구독 계정으로 로그인합니다."
+                echo "2. 화면에 나오는 코드를 여기에 붙여넣습니다."
+                echo "3. 마지막에 출력되는 토큰(sk-ant-oat...)을 복사해 두세요. 다음 화면에서 붙여넣습니다."
+                echo
+                cli_exec "$cli" setup-token
+                pause
+                save_cli_token
+                ;;
+            paste)
+                save_cli_token
+                ;;
+            login)
+                clear
+                echo "===== $name 브라우저 로그인 ====="
+                echo "표시되는 주소를 브라우저에서 열어 구독 계정으로 로그인하세요."
+                echo
+                if [ "$provider" = "claude-code" ]; then
+                    cli_exec "$cli" auth login --claudeai
+                else
+                    cli_exec "$cli" login
+                fi
+                pause
+                ;;
+            device)
+                clear
+                echo "===== Codex 기기 코드 로그인 ====="
+                echo "표시되는 주소를 아무 기기의 브라우저에서 열고, 화면의 코드를 입력하세요."
+                echo
+                cli_exec "$cli" login --device-auth
+                pause
+                ;;
+            untoken)
+                if ui_yesno "저장된 토큰 파일을 더 이상 사용하지 않을까요?\n(파일은 지우지 않습니다: $token_file)"; then
+                    save_setting LLM_CLI_TOKEN_FILE ""
+                fi
+                ;;
+            test)
+                cli_connection_test "$provider" "$cli"
+                ;;
+            *)
+                return
+                ;;
+        esac
+    done
 }
 
 menu_settings() {
@@ -976,7 +1455,11 @@ menu_settings() {
         items=()
         for entry in "${SETTINGS[@]}"; do
             IFS='|' read -r key desc kind <<< "$entry"
-            items+=("$key" "$desc: $(conf_get "$key" "$(setting_default "$key")")")
+            if [ "$kind" = "auth" ]; then
+                items+=("$key" "$desc")
+            else
+                items+=("$key" "$desc: $(conf_get "$key" "$(setting_default "$key")")")
+            fi
         done
         items+=("$BACK" "$BACK_LABEL")
         choice=$(ui_menu "설정 ($CONFIG_FILE)\n이 서버의 분석과, 원격 서버 리포트의 LLM 분석에 적용됩니다.\nAPI 키는 파일로 관리하고 여기서는 경로만 지정합니다." "${items[@]}") || return
