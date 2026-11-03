@@ -1,0 +1,14 @@
+# analyze-kdump-ui 접속 서버 목록 샘플
+#
+# 실제 목록은 /opt/kdump-tools/servers.conf에 저장됩니다(ANALYZE_KDUMP_SERVERS로 변경 가능).
+# 보통은 analyze-kdump-ui의 "접속 서버 관리" 메뉴에서 추가·수정합니다.
+#
+# 한 줄에 서버 하나:
+#   이름|접속대상(user@host)|포트|sudo 사용(yes/no)|원격 analyze-kdump 경로|crash 디렉터리
+#
+# - 이름: 영문, 숫자, . _ - 만 사용. "local"은 메뉴를 실행한 서버를 뜻하므로 쓸 수 없습니다.
+# - SSH 키 인증으로 비밀번호 없이 접속할 수 있어야 합니다.
+# - sudo=yes이면 원격 서버에 비밀번호 없는 sudo(NOPASSWD)가 필요합니다.
+#
+# db01|ops@10.0.0.11|22|yes|/opt/kdump-tools/bin/analyze-kdump|/var/crash
+# web01|root@web01.example.com|2222|no|/opt/kdump-tools/bin/analyze-kdump|/var/crash
