@@ -25,6 +25,10 @@ CURRENT_SERVER="local"
 
 DEFAULT_REMOTE_TOOL="/opt/kdump-tools/bin/analyze-kdump"
 DEFAULT_CRASH_DIR="/var/crash"
+# install.sh로 설치했다면 bin/의 상위 디렉터리에 설치 정보(.install-info)가 있습니다.
+INSTALL_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+INSTALL_INFO="$INSTALL_DIR/.install-info"
+UPDATE_CACHE="$INSTALL_DIR/.update-check"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10)
 
 # ---------------------------------------------------------------- 화면 helper
@@ -792,7 +796,12 @@ test_server() {
     ui_info "연결 테스트 중...\n\n$(server_label "$name")"
     out=$(remote_run "$name" sh -c '
         echo "접속: OK ($(hostname), $(id -un))"
-        if [ -x "$1" ]; then echo "analyze-kdump: OK ($1)"; else echo "analyze-kdump: 없음 ($1)"; fi
+        if [ -x "$1" ]; then
+            v=$("$1" --version 2>/dev/null | grep "^analyze-kdump " | head -n 1)
+            echo "analyze-kdump: OK ($1, ${v:-버전 정보 없음: 이전 버전})"
+        else
+            echo "analyze-kdump: 없음 ($1)"
+        fi
         if command -v crash >/dev/null 2>&1; then echo "crash: OK ($(crash --version 2>/dev/null | head -n 1))"; else echo "crash: 없음"; fi
         n=$(ls -1 "$2"/*/vmcore 2>/dev/null | wc -l); echo "vmcore: ${n}개 ($2)"
     ' sh "$tool" "$(server_crash_dir "$name")" 2>&1)
@@ -859,6 +868,8 @@ SETTINGS=(
     "LLM_MAX_REPORT_CHARS|LLM 입력 최대 문자 수|number"
     "LLM_MAX_TOKENS|LLM 출력 최대 토큰|number"
     "LLM_TIMEOUT|LLM 호출 제한 시간(초)|number"
+    "KDUMP_TOOLS_REPO|업데이트 저장소 (GitHub owner/repo)|text"
+    "KDUMP_TOOLS_BRANCH|업데이트 브랜치|text"
 )
 
 setting_default() {
@@ -870,6 +881,8 @@ setting_default() {
         LLM_MAX_REPORT_CHARS) echo 60000 ;;
         LLM_MAX_TOKENS) echo 8192 ;;
         LLM_TIMEOUT) echo 120 ;;
+        KDUMP_TOOLS_REPO) echo 621dev/kdump-tools ;;
+        KDUMP_TOOLS_BRANCH) echo main ;;
     esac
 }
 
@@ -942,6 +955,264 @@ menu_settings() {
     done
 }
 
+# ---------------------------------------------------------------- 버전/업데이트
+
+info_get() {
+    sed -n "s/^$1=//p" "$2" 2>/dev/null | head -n 1
+}
+
+# 버전 표시: 값이 없으면 "버전 정보 없음"으로 보여줍니다(VERSION 파일이 없는 이전 버전).
+version_text() {
+    case "$1" in
+        ''|unknown|'?') echo "버전 정보 없음" ;;
+        *) echo "v$1" ;;
+    esac
+}
+
+current_version() {
+    local version
+    version=$(info_get VERSION "$INSTALL_INFO")
+    [ -n "$version" ] || version=$(head -n 1 "$INSTALL_DIR/VERSION" 2>/dev/null | tr -d '[:space:]')
+    printf '%s' "${version:-unknown}"
+}
+
+current_commit() {
+    local commit
+    commit=$(info_get COMMIT "$INSTALL_INFO")
+    if [ -z "$commit" ] && command -v git >/dev/null 2>&1; then
+        commit=$(git -c safe.directory="$INSTALL_DIR" -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null)
+    fi
+    printf '%s' "$commit"
+}
+
+update_repo() {
+    conf_get KDUMP_TOOLS_REPO "$(setting_default KDUMP_TOOLS_REPO)"
+}
+
+update_branch() {
+    conf_get KDUMP_TOOLS_BRANCH "$(setting_default KDUMP_TOOLS_BRANCH)"
+}
+
+# GitHub에서 최신 커밋과 그 커밋의 VERSION을 읽어 LATEST_COMMIT/LATEST_VERSION을 채우고 캐시에 남깁니다.
+check_latest() {
+    local repo branch
+
+    repo=$(update_repo)
+    branch=$(update_branch)
+    LATEST_COMMIT=""
+    LATEST_VERSION=""
+    command -v curl >/dev/null 2>&1 || return 1
+    LATEST_COMMIT=$(curl -fsSL --max-time 10 -H 'Accept: application/vnd.github.sha' \
+        "https://api.github.com/repos/$repo/commits/$branch" 2>/dev/null) || return 1
+    case "$LATEST_COMMIT" in
+        ''|*[!0-9a-f]*)
+            LATEST_COMMIT=""
+            return 1
+            ;;
+    esac
+    LATEST_VERSION=$(curl -fsSL --max-time 10 "https://raw.githubusercontent.com/$repo/$LATEST_COMMIT/VERSION" 2>/dev/null \
+        | head -n 1 | tr -d '[:space:]')
+    {
+        echo "LATEST_VERSION=${LATEST_VERSION:-unknown}"
+        echo "LATEST_COMMIT=$LATEST_COMMIT"
+        echo "CHECKED_AT=$(date '+%Y-%m-%d %H:%M')"
+    } > "$UPDATE_CACHE" 2>/dev/null
+    return 0
+}
+
+# 두 커밋 사이의 변경 내역(커밋 제목)을 파일로 씁니다.
+write_changes() {
+    local base="$1" head="$2" out="$3"
+
+    command -v python3 >/dev/null 2>&1 || return 1
+    curl -fsSL --max-time 10 "https://api.github.com/repos/$(update_repo)/compare/$base...$head" 2>/dev/null \
+        | PYTHONIOENCODING=utf-8 python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+commits = data.get("commits", [])
+print("변경된 커밋 %d개 (최근 순)" % len(commits))
+print()
+for commit in reversed(commits[-30:]):
+    lines = commit["commit"]["message"].splitlines()
+    print("- " + commit.get("sha", "")[:7] + " " + (lines[0] if lines else ""))
+' > "$out"
+}
+
+# 메인 메뉴에 보여줄 "업데이트 가능" 안내. 마지막 확인 결과(캐시)만 보고 네트워크는 쓰지 않습니다.
+update_badge() {
+    local latest current
+
+    [ -f "$UPDATE_CACHE" ] || return 0
+    latest=$(info_get LATEST_COMMIT "$UPDATE_CACHE")
+    current=$(current_commit)
+    if [ -n "$latest" ] && [ -n "$current" ] && [ "$latest" != "$current" ]; then
+        printf '\n▲ 업데이트 가능: %s (%s 확인)' "$(version_text "$(info_get LATEST_VERSION "$UPDATE_CACHE")")" "$(info_get CHECKED_AT "$UPDATE_CACHE")"
+    fi
+}
+
+can_update() {
+    if [ "$(id -u)" -ne 0 ]; then
+        ui_msg "업데이트는 root로 실행해야 합니다. (sudo analyze-kdump-ui)"
+        return 1
+    fi
+    if [ ! -f "$INSTALL_INFO" ]; then
+        ui_msg "install.sh로 설치한 경우에만 메뉴에서 업데이트할 수 있습니다.\n\n현재 실행 위치: $INSTALL_DIR\n\n저장소에서 직접 실행 중이라면 git pull 후 sudo ./install.sh를 실행하세요."
+        return 1
+    fi
+}
+
+# 새 원본의 install.sh로 같은 위치에 다시 설치합니다. 설정·서버 목록·로그·vmlinux는 install.sh가 보존합니다.
+run_install() {
+    local src="$1" commit="$2" label="$3" bin_dir
+    local -a args=(--prefix "$INSTALL_DIR")
+
+    bin_dir=$(info_get BIN_DIR "$INSTALL_INFO")
+    [ -n "$bin_dir" ] && args+=(--bin-dir "$bin_dir")
+    # 이전 버전의 install.sh는 --commit/--source를 모릅니다.
+    if grep -q -- '--commit)' "$src/install.sh"; then
+        [ -n "$commit" ] && args+=(--commit "$commit")
+        args+=(--source "$label")
+    fi
+    bash "$src/install.sh" "${args[@]}"
+}
+
+finish_update() {
+    local status="$1"
+
+    pause
+    # install.sh는 일부 명령 등록을 건너뛰면 2를 반환하지만 설치 자체는 끝난 상태입니다.
+    if [ "$status" -eq 0 ] || [ "$status" -eq 2 ]; then
+        if ui_yesno "업데이트를 마쳤습니다: v$(current_version)\n\n새 버전으로 메뉴를 다시 시작할까요?"; then
+            exec "$INSTALL_DIR/bin/analyze-kdump-ui"
+        fi
+    else
+        ui_msg "업데이트에 실패했습니다 (종료 코드 $status).\n화면에 나온 오류를 확인해 주세요. 기존 설치는 그대로입니다."
+    fi
+}
+
+update_from_github() {
+    local repo branch tmp commit status
+
+    can_update || return
+    repo=$(update_repo)
+    branch=$(update_branch)
+    ui_yesno "GitHub($repo, $branch)에서 최신 버전을 받아 설치할까요?\n\n현재: v$(current_version)\n최신: $(version_text "$LATEST_VERSION") (${LATEST_COMMIT:0:7})\n\n설정, 접속 서버 목록, 로그, vmlinux는 유지됩니다." || return
+
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/kdump-tools-update.XXXXXX") || return
+    clear
+    echo "===== kdump-tools 업데이트 ====="
+    echo "[1/2] 최신 코드 받는 중: $repo ($branch)"
+    if command -v git >/dev/null 2>&1; then
+        git clone -q --depth 1 --branch "$branch" "https://github.com/$repo.git" "$tmp/src"
+        status=$?
+    elif command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+        mkdir -p "$tmp/src" &&
+            curl -fsSL "https://codeload.github.com/$repo/tar.gz/refs/heads/$branch" | tar xz -C "$tmp/src" --strip-components=1
+        status=$?
+    else
+        echo "git 또는 curl과 tar가 필요합니다."
+        status=1
+    fi
+
+    if [ "$status" -eq 0 ] && [ -f "$tmp/src/install.sh" ]; then
+        commit=$(git -c safe.directory="$tmp/src" -C "$tmp/src" rev-parse HEAD 2>/dev/null || printf '%s' "$LATEST_COMMIT")
+        echo "[2/2] 설치 중: $(version_text "$(head -n 1 "$tmp/src/VERSION" 2>/dev/null | tr -d '[:space:]')") (${commit:0:7})"
+        echo
+        run_install "$tmp/src" "$commit" "github:$repo@$branch"
+        status=$?
+    else
+        echo "최신 코드를 받지 못했습니다."
+        [ "$status" -eq 0 ] && status=1
+    fi
+    case "$tmp" in
+        */kdump-tools-update.*) rm -rf "$tmp" ;;
+    esac
+    finish_update "$status"
+}
+
+# 인터넷이 막힌 서버용: 다른 곳에서 받아 서버에 복사해 둔 저장소 디렉터리로 업데이트합니다.
+update_from_dir() {
+    local dir version
+
+    can_update || return
+    dir=$(ui_input "업데이트할 kdump-tools 디렉터리 (install.sh가 있는 위치):" "/tmp/kdump-tools") || return
+    if [ ! -f "$dir/install.sh" ] || [ ! -f "$dir/bin/analyze-kdump" ]; then
+        ui_msg "kdump-tools 디렉터리가 아닙니다: $dir\n(install.sh와 bin/analyze-kdump가 있어야 합니다)"
+        return
+    fi
+    dir=$(cd "$dir" && pwd)
+    version=$(head -n 1 "$dir/VERSION" 2>/dev/null | tr -d '[:space:]')
+    ui_yesno "다음 디렉터리에서 설치할까요?\n\n$dir\n현재: $(version_text "$(current_version)") → 설치: $(version_text "$version")\n\n설정, 접속 서버 목록, 로그, vmlinux는 유지됩니다." || return
+
+    clear
+    echo "===== kdump-tools 업데이트 ====="
+    echo "설치 중: $dir ($(version_text "$version"))"
+    echo
+    run_install "$dir" "" "$dir"
+    finish_update "$?"
+}
+
+menu_update() {
+    local cur_v cur_c latest_text status choice installed changes
+    local -a items
+
+    cur_v=$(current_version)
+    cur_c=$(current_commit)
+    installed=$(info_get INSTALLED_AT "$INSTALL_INFO")
+    ui_info "최신 버전을 확인하는 중...\n\n$(update_repo) ($(update_branch))"
+    if check_latest; then
+        latest_text="$(version_text "$LATEST_VERSION") (${LATEST_COMMIT:0:7})"
+        if [ -z "$cur_c" ]; then
+            status="현재 설치본의 커밋 정보가 없어 비교할 수 없습니다.\n업데이트하면 최신 버전으로 다시 설치합니다."
+        elif [ "$cur_c" = "$LATEST_COMMIT" ]; then
+            status="최신 버전을 사용 중입니다."
+        else
+            status="업데이트가 있습니다."
+        fi
+    else
+        latest_text="확인 실패"
+        status="GitHub에 접속하지 못했습니다(인터넷 차단 또는 curl 없음).\n폐쇄망이라면 저장소를 서버에 복사한 뒤 '디렉터리에서 업데이트'를 사용하세요."
+    fi
+
+    while true; do
+        items=()
+        if [ -n "$LATEST_COMMIT" ] && [ -n "$cur_c" ] && [ "$cur_c" != "$LATEST_COMMIT" ]; then
+            items+=(changes "변경 내역 보기")
+        fi
+        if [ -n "$LATEST_COMMIT" ]; then
+            items+=(github "GitHub에서 업데이트 ($(update_repo), $(update_branch))")
+        fi
+        items+=(local "서버의 디렉터리에서 업데이트 (폐쇄망)" "$BACK" "$BACK_LABEL")
+
+        choice=$(ui_menu "현재 버전: v$cur_v${cur_c:+ (${cur_c:0:7})}${installed:+, 설치 $installed}\n최신 버전: $latest_text\n\n$status" "${items[@]}") || return
+        case "$choice" in
+            changes)
+                changes=$(mktemp "${TMPDIR:-/tmp}/kdump-changes.XXXXXX")
+                if write_changes "$cur_c" "$LATEST_COMMIT" "$changes"; then
+                    view_file "$changes"
+                else
+                    ui_msg "변경 내역을 가져오지 못했습니다."
+                fi
+                rm -f "$changes"
+                ;;
+            github)
+                update_from_github
+                return
+                ;;
+            local)
+                update_from_dir
+                return
+                ;;
+            *)
+                return
+                ;;
+        esac
+    done
+}
+
 # ---------------------------------------------------------------- 중앙 분석 서버 안내
 
 # 운영 서버의 kdump가 vmcore를 이 서버로 바로 보내게 하는 설정을 이 서버 주소로 채워 보여줍니다.
@@ -999,13 +1270,14 @@ main_menu() {
     local choice
 
     while true; do
-        choice=$(UI_CANCEL="종료" ui_menu "현재 서버: $(server_label "$CURRENT_SERVER")" \
+        choice=$(UI_CANCEL="종료" ui_menu "현재 서버: $(server_label "$CURRENT_SERVER")\n버전: v$(current_version)$(c=$(current_commit); [ -n "$c" ] && printf ' (%s)' "${c:0:7}")$(update_badge)" \
             analyze "vmcore 분석" \
             results "분석 결과 보기" \
             server "접속 서버 선택" \
             servers "접속 서버 관리" \
             settings "설정" \
             guide "kdump 원격 전송 안내 (중앙 분석 서버 구성)" \
+            update "버전 확인 / 업데이트" \
             quit "종료") || return 0
         case "$choice" in
             analyze) menu_analyze ;;
@@ -1014,6 +1286,7 @@ main_menu() {
             servers) menu_servers ;;
             settings) menu_settings ;;
             guide) menu_kdump_guide ;;
+            update) menu_update ;;
             quit) return 0 ;;
         esac
     done
@@ -1035,6 +1308,7 @@ main() {
     esac
     # analyze-kdump 출력을 tee로 받아도 진행 표시가 나오도록 합니다.
     export ANALYZE_KDUMP_PROGRESS=1
+    TITLE="analyze-kdump v$(current_version)"
     if [ "$(id -u)" -ne 0 ]; then
         ui_msg "root가 아닌 계정으로 실행 중입니다.\n이 서버의 vmcore를 읽거나 설정을 저장하지 못할 수 있습니다."
     fi

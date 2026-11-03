@@ -4,3 +4,4 @@ analyze-kdump.conf.sample text eol=lf
 *.sh text eol=lf
 servers.conf.sample text eol=lf
 completion/* text eol=lf
+VERSION text eol=lf
