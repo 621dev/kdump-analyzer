@@ -3,8 +3,11 @@
 #
 # 장애 현장에서 SSH나 콘솔로 접속한 서버에서 메뉴로 vmcore를 분석합니다.
 #   - 이 서버(local): 이 서버에서 analyze-kdump를 실행합니다.
-#   - 원격 서버: SSH로 원격 서버에서 crash 리포트를 만들고, 리포트를 가져와
-#     LLM 분석은 이 서버의 설정으로 실행합니다(API 키/구독 로그인을 원격 서버에 둘 필요 없음).
+#   - 원격 서버: 서버 상태에 맞춰 세 가지 방식 중 하나로 분석합니다.
+#       installed  원격에 설치된 analyze-kdump로 리포트 생성
+#       upload     스크립트를 원격 임시 디렉터리로 보내 실행 (원격에는 crash와 vmlinux만 필요)
+#       fetch      vmcore를 이 서버로 가져와서 분석 (원격에는 SSH 접속만 필요)
+#     어느 방식이든 LLM 분석은 이 서버의 설정으로 실행합니다(API 키/구독 로그인을 원격에 둘 필요 없음).
 #
 # 환경변수:
 #   ANALYZE_KDUMP_CONF     설정 파일 (기본 /opt/kdump-tools/analyze-kdump.conf)
@@ -173,7 +176,7 @@ servers_write() {
     tmp=$(mktemp "$SERVERS_FILE.XXXXXX") || return 1
     {
         echo "# analyze-kdump-ui 접속 서버 목록"
-        echo "# 이름|접속대상(user@host)|포트|sudo 사용(yes/no)|원격 analyze-kdump 경로|crash 디렉터리"
+        echo "# 이름|접속대상(user@host)|포트|sudo 사용(yes/no)|원격 analyze-kdump 경로|crash 디렉터리|분석 방식(auto/installed/upload/fetch)"
         cat
     } > "$tmp"
     chmod 644 "$tmp"
@@ -201,6 +204,67 @@ remote_run() {
         quoted="sudo -n $quoted"
     fi
     ssh "${SSH_OPTS[@]}" -p "${port:-22}" "$target" "$quoted"
+}
+
+# crash 셸처럼 터미널이 필요한 원격 명령을 실행합니다. sudo 비밀번호를 입력할 수 있습니다.
+remote_tty() {
+    local name="$1" target port sudo quoted
+    shift
+    target=$(server_field "$name" 2)
+    port=$(server_field "$name" 3)
+    sudo=$(server_field "$name" 4)
+    printf -v quoted '%q ' "$@"
+    if [ "$sudo" = "yes" ]; then
+        quoted="sudo $quoted"
+    fi
+    ssh -t -p "${port:-22}" "$target" "$quoted"
+}
+
+server_method() {
+    local method
+    method=$(server_field "$1" 7)
+    printf '%s' "${method:-auto}"
+}
+
+method_label() {
+    case "$1" in
+        auto) echo "자동 선택" ;;
+        installed) echo "원격 설치본 실행" ;;
+        upload) echo "무설치 실행 (스크립트를 임시로 보내 실행)" ;;
+        fetch) echo "vmcore 가져와서 이 서버에서 분석" ;;
+    esac
+}
+
+# 원격 서버 상태를 보고 분석 방식을 고릅니다: 설치본 > 무설치(crash 있음) > vmcore 가져오기
+probe_method() {
+    local out
+    out=$(remote_run "$1" sh -c '
+        if [ -x "$1" ]; then echo installed
+        elif command -v crash >/dev/null 2>&1; then echo upload
+        else echo fetch
+        fi' sh "$(remote_tool "$1")" 2>/dev/null)
+    case "$out" in
+        installed|upload|fetch) printf '%s' "$out" ;;
+        *) return 1 ;;
+    esac
+}
+
+# 이 서버의 analyze-kdump를 원격 임시 디렉터리로 보냅니다. 출력: 원격 임시 디렉터리
+upload_tool() {
+    local dir
+    dir=$(remote_run "$1" mktemp -d /tmp/kdump-tools.XXXXXX) || return 1
+    case "$dir" in
+        /tmp/kdump-tools.*) ;;
+        *) return 1 ;;
+    esac
+    remote_run "$1" sh -c 'cat > "$1/analyze-kdump" && chmod 700 "$1/analyze-kdump"' sh "$dir" < "$TOOL" || return 1
+    printf '%s' "$dir"
+}
+
+cleanup_upload() {
+    case "$2" in
+        /tmp/kdump-tools.*) remote_run "$1" rm -rf "$2" ;;
+    esac
 }
 
 remote_tool() {
@@ -301,42 +365,35 @@ run_logged() {
     return "$status"
 }
 
+# 넷째 인자로 리포트 저장 디렉터리를 주면 설정의 REPORT_DIR 대신 씁니다(가져온 vmcore를 서버별로 모을 때).
 analyze_local() {
-    local vmcore="$1" mode="$2" log="$3"
+    local vmcore="$1" mode="$2" log="$3" report_dir="${4:-}"
+    local -a tool=("$TOOL")
 
+    if [ -n "$report_dir" ]; then
+        tool=(env "REPORT_DIR=$report_dir" "$TOOL")
+    fi
     case "$mode" in
         shell)
-            "$TOOL" "$vmcore"
+            "${tool[@]}" "$vmcore"
             ;;
         report)
-            run_logged "$log" "$TOOL" -r "$vmcore"
+            run_logged "$log" "${tool[@]}" -r "$vmcore"
             ;;
         llm)
-            run_logged "$log" "$TOOL" -llm "$vmcore"
+            run_logged "$log" "${tool[@]}" -llm "$vmcore"
             ;;
     esac
 }
 
-# 원격 서버에서 리포트를 만들고 가져온 뒤, 필요하면 이 서버에서 LLM 분석을 실행합니다.
-analyze_remote() {
-    local server="$1" vmcore="$2" mode="$3" log="$4"
-    local tool remote_report local_dir local_report status target port sudo
-
-    tool=$(remote_tool "$server")
-    if [ "$mode" = "shell" ]; then
-        target=$(server_field "$server" 2)
-        port=$(server_field "$server" 3)
-        sudo=$(server_field "$server" 4)
-        if [ "$sudo" = "yes" ]; then
-            ssh -t -p "${port:-22}" "$target" "sudo $(printf '%q ' "$tool" "$vmcore")"
-        else
-            ssh -t -p "${port:-22}" "$target" "$(printf '%q ' "$tool" "$vmcore")"
-        fi
-        return
-    fi
+# 원격 서버에서 리포트를 만들고(뒤의 인자가 원격 명령) 가져온 뒤, 필요하면 이 서버에서 LLM 분석을 실행합니다.
+remote_report_flow() {
+    local server="$1" mode="$2" log="$3"
+    local remote_report local_dir local_report status
+    shift 3
 
     echo "[$server] crash 리포트 생성 중..."
-    run_logged "$log" remote_run "$server" "$tool" -r "$vmcore"
+    run_logged "$log" remote_run "$server" "$@"
     status=$?
     remote_report=$(output_path report "$log")
     if [ -z "$remote_report" ]; then
@@ -364,8 +421,140 @@ analyze_remote() {
     return "$status"
 }
 
+analyze_remote_installed() {
+    local server="$1" vmcore="$2" mode="$3" log="$4" tool
+
+    tool=$(remote_tool "$server")
+    if [ "$mode" = "shell" ]; then
+        remote_tty "$server" "$tool" "$vmcore"
+        return
+    fi
+    remote_report_flow "$server" "$mode" "$log" "$tool" -r "$vmcore"
+}
+
+# 원격에 설치하지 않고, 이 서버의 analyze-kdump를 원격 임시 디렉터리로 보내 실행한 뒤 지웁니다.
+# 원격 설정 파일은 읽지 않고 리포트도 임시 디렉터리에 만듭니다.
+analyze_remote_upload() {
+    local server="$1" vmcore="$2" mode="$3" log="$4" dir status
+
+    echo "[$server] 스크립트를 임시로 보내는 중..."
+    if ! dir=$(upload_tool "$server"); then
+        echo "원격 임시 디렉터리에 스크립트를 보내지 못했습니다." | tee -a "$log"
+        return 255
+    fi
+
+    if [ "$mode" = "shell" ]; then
+        remote_tty "$server" "$dir/analyze-kdump" "$vmcore"
+        status=$?
+    else
+        remote_report_flow "$server" "$mode" "$log" \
+            env "REPORT_DIR=$dir/logs" "ANALYZE_KDUMP_CONF=$dir/none.conf" "$dir/analyze-kdump" -r "$vmcore"
+        status=$?
+    fi
+    cleanup_upload "$server" "$dir"
+    echo "[$server] 임시 파일 정리: $dir"
+    return "$status"
+}
+
+# vmcore를 이 서버의 crash 디렉터리(<서버 이름>-<원래 디렉터리 이름>/)로 가져와 이 서버에서 분석합니다.
+# 이미 같은 크기로 가져온 vmcore가 있으면 다시 받지 않습니다.
+analyze_remote_fetch() {
+    local server="$1" vmcore="$2" mode="$3" log="$4"
+    local local_crash dest_dir dest size free dmesg
+
+    local_crash=$(server_crash_dir local)
+    dest_dir="$local_crash/$server-$(basename "$(dirname "$vmcore")")"
+    dest="$dest_dir/vmcore"
+
+    size=$(remote_run "$server" stat -c %s "$vmcore") || {
+        echo "원격 vmcore 정보를 읽지 못했습니다: $vmcore" | tee -a "$log"
+        return 255
+    }
+
+    if [ -f "$dest" ] && [ "$(stat -c %s "$dest")" = "$size" ]; then
+        echo "[$server] 이미 가져온 vmcore를 사용합니다: $dest"
+    else
+        mkdir -p "$dest_dir" || return 1
+        free=$(df -PB1 "$dest_dir" | awk 'NR == 2 { print $4 }')
+        if [ -n "$free" ] && [ "$size" -gt "$free" ]; then
+            echo "디스크 공간이 부족합니다: 필요 $(human_size "$size"), 남은 공간 $(human_size "$free") ($dest_dir)" | tee -a "$log"
+            return 1
+        fi
+        echo "[$server] vmcore 가져오는 중: $vmcore ($(human_size "$size"))"
+        if dd --help 2>&1 | grep -q 'status=progress'; then
+            remote_run "$server" cat "$vmcore" | dd of="$dest.part" bs=4M status=progress
+        else
+            remote_run "$server" cat "$vmcore" > "$dest.part"
+        fi
+        if [ "${PIPESTATUS[0]}" -ne 0 ] || [ "$(stat -c %s "$dest.part" 2>/dev/null)" != "$size" ]; then
+            echo "vmcore를 가져오지 못했습니다." | tee -a "$log"
+            rm -f "$dest.part"
+            return 255
+        fi
+        mv "$dest.part" "$dest"
+        chmod 600 "$dest"
+        dmesg="$(dirname "$vmcore")/vmcore-dmesg.txt"
+        remote_run "$server" cat "$dmesg" > "$dest_dir/vmcore-dmesg.txt" 2>/dev/null || rm -f "$dest_dir/vmcore-dmesg.txt"
+        echo "[$server] 가져오기 완료: $dest"
+    fi
+
+    echo
+    echo "[이 서버] 분석 시작"
+    analyze_local "$dest" "$mode" "$log" "$(server_result_dir "$server")"
+}
+
+analyze_remote() {
+    local server="$1" vmcore="$2" mode="$3" log="$4" method="$5" status
+
+    case "$method" in
+        installed)
+            analyze_remote_installed "$server" "$vmcore" "$mode" "$log"
+            ;;
+        upload)
+            analyze_remote_upload "$server" "$vmcore" "$mode" "$log"
+            status=$?
+            # 원격에 vmlinux가 없으면 vmcore를 가져와 이 서버에서 분석하도록 제안합니다.
+            if [ "$status" -eq 1 ] && grep -q "vmlinux가 없습니다" "$log" && [ "$mode" != "shell" ]; then
+                if ui_yesno "원격 서버에 이 커널의 vmlinux(디버그 심볼)가 없습니다.\n\nvmcore를 이 서버로 가져와서 분석할까요?\n(이 서버에 해당 커널의 vmlinux가 있어야 합니다)"; then
+                    clear
+                    analyze_remote_fetch "$server" "$vmcore" "$mode" "$log"
+                    return
+                fi
+            fi
+            return "$status"
+            ;;
+        fetch)
+            analyze_remote_fetch "$server" "$vmcore" "$mode" "$log"
+            ;;
+    esac
+}
+
+# 원격 서버의 분석 방식을 고릅니다. 서버 설정이 auto이면 원격 상태를 확인해 기본 선택을 정합니다.
+choose_method() {
+    local server="$1" method detected note m
+    local -a items=()
+
+    method=$(server_method "$server")
+    if [ "$method" = "auto" ]; then
+        if detected=$(probe_method "$server"); then
+            method="$detected"
+            note="자동 감지 결과: $(method_label "$detected")"
+        else
+            ui_msg "원격 서버에 접속하지 못했습니다: $(server_label "$server")"
+            return 1
+        fi
+    else
+        note="서버 설정: $(method_label "$method")"
+    fi
+
+    for m in installed upload fetch; do
+        items+=("$m" "$(method_label "$m")" "$([ "$m" = "$method" ] && echo ON || echo OFF)")
+    done
+    ui_radio "분석 방식을 고르세요. ($note)\n\n- 원격 설치본: 원격에 analyze-kdump, crash, vmlinux 필요\n- 무설치 실행: 원격에 crash, vmlinux 필요\n- vmcore 가져오기: 원격에는 SSH만 필요, 이 서버에 vmlinux 필요" "${items[@]}"
+}
+
 menu_analyze() {
-    local vmcore mode log status report analysis choice
+    local vmcore mode log status report analysis choice method=""
 
     vmcore=$(choose_vmcore "$CURRENT_SERVER") || return
     [ -n "$vmcore" ] || return
@@ -375,14 +564,19 @@ menu_analyze() {
         llm "리포트 생성 + LLM 원인 분석" \
         shell "crash 셸 진입 (직접 분석)") || return
 
+    if [ "$CURRENT_SERVER" != "local" ]; then
+        method=$(choose_method "$CURRENT_SERVER") || return
+        [ -n "$method" ] || return
+    fi
+
     log=$(mktemp "${TMPDIR:-/tmp}/analyze-kdump-ui.XXXXXX")
     clear
-    echo "===== $(server_label "$CURRENT_SERVER") : $vmcore ($mode) ====="
+    echo "===== $(server_label "$CURRENT_SERVER") : $vmcore ($mode${method:+, $(method_label "$method")}) ====="
     echo
     if [ "$CURRENT_SERVER" = "local" ]; then
         analyze_local "$vmcore" "$mode" "$log"
     else
-        analyze_remote "$CURRENT_SERVER" "$vmcore" "$mode" "$log"
+        analyze_remote "$CURRENT_SERVER" "$vmcore" "$mode" "$log" "$method"
     fi
     status=$?
 
@@ -485,7 +679,8 @@ valid_field() {
 }
 
 edit_server() {
-    local name="$1" target port sudo tool crash_dir
+    local name="$1" target port sudo tool crash_dir method current m
+    local -a method_items=()
 
     if [ -z "$name" ]; then
         name=$(ui_input "서버 이름 (영문, 숫자, . _ -):" "") || return
@@ -511,6 +706,13 @@ edit_server() {
         sudo=no
     fi
 
+    current=$(server_method "$name")
+    for m in auto installed upload fetch; do
+        method_items+=("$m" "$(method_label "$m")" "$([ "$m" = "$current" ] && echo ON || echo OFF)")
+    done
+    method=$(ui_radio "기본 분석 방식을 고르세요. (분석할 때마다 바꿀 수 있습니다)\n\n자동 선택: 원격 설치본 → 무설치 실행(crash 있음) → vmcore 가져오기 순으로 고릅니다." "${method_items[@]}") || return
+    [ -n "$method" ] || method=auto
+
     for f in "$target" "$port" "$tool" "$crash_dir"; do
         if ! valid_field "$f"; then
             ui_msg "빈 값이나 '|' 문자는 사용할 수 없습니다."
@@ -524,15 +726,15 @@ edit_server() {
             ;;
     esac
 
-    if server_save "$name" "$name|$target|$port|$sudo|$tool|$crash_dir"; then
-        ui_msg "저장했습니다: $name ($target)"
+    if server_save "$name" "$name|$target|$port|$sudo|$tool|$crash_dir|$method"; then
+        ui_msg "저장했습니다: $name ($target, $(method_label "$method"))"
     else
         ui_msg "저장하지 못했습니다: $SERVERS_FILE"
     fi
 }
 
 test_server() {
-    local name="$1" tool out status
+    local name="$1" tool out status detected
 
     tool=$(remote_tool "$name")
     out=$(remote_run "$name" sh -c '
@@ -544,6 +746,8 @@ test_server() {
     status=$?
     if [ "$status" -ne 0 ] && [ -z "$out" ]; then
         out="접속 실패 (종료 코드 $status)"
+    elif detected=$(probe_method "$name"); then
+        out="$out\n\n설정된 분석 방식: $(method_label "$(server_method "$name")")\n자동 선택 시: $(method_label "$detected")"
     fi
     ui_msg "연결 테스트: $(server_label "$name")\n\n$out"
 }
@@ -681,6 +885,57 @@ menu_settings() {
     done
 }
 
+# ---------------------------------------------------------------- 중앙 분석 서버 안내
+
+# 운영 서버의 kdump가 vmcore를 이 서버로 바로 보내게 하는 설정을 이 서버 주소로 채워 보여줍니다.
+menu_kdump_guide() {
+    local addr crash_dir guide
+
+    addr=$(hostname -I 2>/dev/null | awk '{ print $1 }')
+    [ -n "$addr" ] || addr=$(hostname)
+    crash_dir=$(server_crash_dir local)
+    guide=$(mktemp "${TMPDIR:-/tmp}/kdump-guide.XXXXXX")
+    cat > "$guide" <<EOF
+중앙 분석 서버 구성: 운영 서버의 vmcore를 패닉 직후 이 서버로 자동 전송
+=====================================================================
+
+운영 서버에는 analyze-kdump, crash, vmlinux를 설치하지 않아도 됩니다.
+이 서버에 운영 서버 커널 버전별 vmlinux를 모아 두고 '이 서버'에서 분석합니다.
+
+[이 서버] 전송 받을 계정과 디렉터리 준비
+  useradd -m kdump
+  mkdir -p $crash_dir && chown kdump $crash_dir
+
+[운영 서버] /etc/kdump.conf (SSH 전송)
+  ssh kdump@$addr
+  sshkey /root/.ssh/kdump_id_rsa
+  path $crash_dir
+  core_collector makedumpfile -F -l --message-level 7 -d 31
+
+  kdumpctl propagate       # SSH 키를 만들고 이 서버에 등록 (kdump 계정 비밀번호 입력)
+  systemctl restart kdump
+  kdumpctl status          # "Kdump is operational" 확인
+
+[운영 서버] /etc/kdump.conf (NFS 전송을 쓸 경우)
+  nfs <NFS 서버>:/export/crash
+  path /
+  (NFS 공유를 이 서버의 $crash_dir 에 마운트해 두면 바로 목록에 보입니다)
+
+저장 위치
+  $crash_dir/<운영 서버 IP>-<시각>/vmcore
+  SSH 전송은 makedumpfile의 flattened 형식(vmcore.flat)으로 저장될 수 있습니다.
+  이 경우 다음처럼 변환한 뒤 분석합니다.
+    makedumpfile -R $crash_dir/<디렉터리>/vmcore < $crash_dir/<디렉터리>/vmcore.flat
+
+분석
+  메뉴의 '접속 서버 선택'에서 '이 서버'를 고르고 'vmcore 분석'을 실행합니다.
+  운영 서버 커널 버전의 vmlinux가 이 서버에 필요합니다.
+  ($(conf_get VMLINUX_BASE /opt/kdump-tools/vmlinux)/<커널 버전>/vmlinux 또는 debuginfo 설치)
+EOF
+    view_file "$guide"
+    rm -f "$guide"
+}
+
 # ---------------------------------------------------------------- 메인
 
 main_menu() {
@@ -693,6 +948,7 @@ main_menu() {
             server "접속 서버 선택" \
             servers "접속 서버 관리" \
             settings "설정" \
+            guide "kdump 원격 전송 안내 (중앙 분석 서버 구성)" \
             quit "종료") || return 0
         case "$choice" in
             analyze) menu_analyze ;;
@@ -700,6 +956,7 @@ main_menu() {
             server) menu_select_server ;;
             servers) menu_servers ;;
             settings) menu_settings ;;
+            guide) menu_kdump_guide ;;
             quit) return 0 ;;
         esac
     done

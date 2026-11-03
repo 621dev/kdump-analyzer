@@ -23,11 +23,14 @@
 ```text
 /opt/kdump-tools/
 ├── README.md
+├── install.sh                 # 설치·명령 등록 (/usr/sbin)
 ├── analyze-kdump.conf.sample
 ├── servers.conf.sample
 ├── bin/
 │   ├── analyze-kdump
 │   └── analyze-kdump-ui
+├── completion/
+│   └── kdump-tools.bash       # bash 자동완성
 ├── logs/
 │   └── remote/<서버 이름>/   # 메뉴 UI로 분석한 원격 서버의 리포트와 분석
 └── vmlinux/
@@ -52,23 +55,39 @@ RHEL 계열 시스템에서는 보통 `crash`와 `debuginfo-install`을 사용�
 dnf install -y crash dnf-plugins-core
 ```
 
+## 설치
+
+저장소를 받은 뒤 `install.sh`를 root로 실행합니다. 파일을 `/opt/kdump-tools`에 복사하고 모든 명령(`analyze-kdump`, `analyze-kdump-ui`)을 `/usr/sbin`에 등록하므로, 이후에는 어디서나 명령 이름만으로 실행할 수 있습니다.
+
+```bash
+git clone https://github.com/621dev/kdump-tools.git
+sudo ./kdump-tools/install.sh
+```
+
+```bash
+sudo analyze-kdump-ui
+sudo analyze-kdump -r /var/crash
+```
+
+- **설정과 데이터:** 이미 있는 `analyze-kdump.conf`, `servers.conf`, `logs/`, `vmlinux/`는 덮어쓰지 않습니다. 새 버전을 받은 뒤 다시 실행하면 업데이트됩니다.
+- **등록 위치:** `/usr/sbin`에 심볼릭 링크로 등록합니다. RHEL 계열은 sudo의 `secure_path`에 `/usr/local/*`가 없어서, `/usr/local/bin`에 두면 `sudo analyze-kdump-ui`가 명령을 찾지 못합니다. 같은 이름의 일반 파일이 이미 있으면 덮어쓰지 않고 건너뜁니다.
+- **자동완성:** `/etc/bash_completion.d`가 있으면 `analyze-kdump` 옵션과 경로의 Tab 자동완성도 등록합니다. 새 셸부터 적용됩니다.
+- **도구 점검:** 설치가 끝나면 crash, whiptail, python3, curl, ssh가 있는지 보여줍니다.
+- **설치 옵션:** 설치 위치와 등록 위치는 `--prefix`, `--bin-dir`로 바꿀 수 있습니다.
+
+등록을 해제하려면 다음을 실행합니다. 등록한 명령과 자동완성만 지우고, `/opt/kdump-tools`(설정, 서버 목록, 로그, vmlinux)는 남깁니다.
+
+```bash
+sudo /opt/kdump-tools/install.sh --uninstall
+```
+
 ## 사용법
-
-```bash
-/opt/kdump-tools/bin/analyze-kdump /path/to/vmcore
-```
-
-경로를 매번 입력하지 않으려면 `/usr/sbin`에 심볼릭 링크를 만들 수 있습니다.
-
-```bash
-ln -s /opt/kdump-tools/bin/analyze-kdump /usr/sbin/analyze-kdump
-```
-
-이후에는 명령어만으로 실행할 수 있습니다.
 
 ```bash
 analyze-kdump /path/to/vmcore
 ```
+
+`install.sh`를 쓰지 않았다면 `/opt/kdump-tools/bin/analyze-kdump`처럼 전체 경로로 실행합니다.
 
 요약 리포트만 생성하려면 `-report` 또는 `-r` 옵션을 사용합니다.
 
@@ -361,7 +380,7 @@ hung task 패닉을 분석할 때는 D 상태 프로세스의 스택이 핵심�
 `analyze-kdump-ui`는 장애 현장에서 SSH나 서버 콘솔로 접속한 상태로 쓰는 메뉴 화면입니다. 명령 옵션을 외우지 않아도 vmcore 선택부터 결과 확인까지 메뉴로 진행합니다.
 
 ```bash
-sudo /opt/kdump-tools/bin/analyze-kdump-ui
+sudo analyze-kdump-ui
 ```
 
 요구 사항: `whiptail`(RHEL 계열 `newt` 패키지, 최소 설치에도 포함), `less`, 원격 서버를 쓸 경우 `ssh`. 화면 크기는 터미널 크기에 맞춰 조정됩니다.
@@ -371,28 +390,69 @@ sudo /opt/kdump-tools/bin/analyze-kdump-ui
 | vmcore 분석 | 선택한 서버의 crash 디렉터리에서 vmcore를 최근 순으로 보여주고, 리포트 생성 / 리포트 + LLM 분석 / crash 셸 진입 중 하나를 실행합니다. 끝나면 결과(종료 코드 의미 포함)와 리포트·분석 보기를 제공합니다 |
 | 분석 결과 보기 | 선택한 서버의 리포트와 분석 파일을 최근 순으로 보여줍니다. 리포트를 골라 LLM으로 (다시) 분석할 수 있습니다 |
 | 접속 서버 선택 | 분석할 서버를 고릅니다. "이 서버"는 메뉴를 실행한 서버입니다 |
-| 접속 서버 관리 | 원격 서버를 추가·수정·삭제하고 연결 테스트(SSH, analyze-kdump, crash, vmcore 개수)를 합니다 |
+| 접속 서버 관리 | 원격 서버를 추가·수정·삭제하고, 기본 분석 방식을 정하고, 연결 테스트(SSH, analyze-kdump, crash, vmcore 개수, 자동 선택될 분석 방식)를 합니다 |
 | 설정 | `analyze-kdump.conf`의 주요 항목(경로, LLM provider·모델·키 파일·CLI·마스킹·한도)을 바꿉니다. API 키 자체는 저장하지 않고 키 파일 경로만 지정합니다 |
+| kdump 원격 전송 안내 | 운영 서버의 vmcore를 이 서버로 자동 전송하는 `/etc/kdump.conf` 설정을 이 서버 주소로 채워 보여줍니다(중앙 분석 서버 구성) |
 
-### 원격 서버 분석 방식
+### 상황별 사용 방식
 
-```text
-[메뉴를 실행한 서버] ──SSH──▶ [원격 서버: analyze-kdump -r] ── crash 리포트 생성
-        ◀────────── 리포트 가져오기 (logs/remote/<서버 이름>/) ──┘
-        └─▶ LLM 분석 (메뉴를 실행한 서버의 설정 사용)
-```
+| 상황 | 방법 | 운영 서버에 필요한 것 |
+|------|------|------|
+| 장애 서버에 직접 접속해 분석 | 그 서버에서 `analyze-kdump-ui` → "이 서버" | analyze-kdump, crash, vmlinux |
+| 운영 서버에 아무것도 설치하지 않음 | **중앙 분석 서버**: 운영 서버 kdump가 vmcore를 분석 서버로 전송하고, 분석 서버에서 "이 서버"로 분석 | kdump 설정만 |
+| 분석 서버에서 다른 서버의 vmcore를 분석 | 원격 서버로 등록하고 아래 세 가지 분석 방식 중 하나를 사용 | 방식에 따라 다름 |
 
-- crash 리포트는 원격 서버에서 그 서버의 설정으로 만들고, LLM 분석은 메뉴를 실행한 서버에서 합니다. 그래서 API 키나 구독 로그인을 원격 서버마다 둘 필요가 없고, 외부 통신이 막힌 서버의 리포트도 분석할 수 있습니다.
-- 원격 서버에는 `analyze-kdump`와 `crash`가 설치되어 있어야 합니다.
+원격 서버의 분석 방식은 서버마다 기본값을 정해 두고, 분석할 때마다 바꿀 수 있습니다.
+
+| 분석 방식 | 원격 서버에 필요한 것 | 동작 |
+|------|------|------|
+| 원격 설치본 실행 (`installed`) | analyze-kdump, crash, vmlinux | 원격에 설치된 `analyze-kdump -r`로 리포트를 만들어 가져옵니다. 원격 서버의 설정을 따릅니다 |
+| 무설치 실행 (`upload`) | crash, vmlinux | 이 서버의 analyze-kdump를 원격 `/tmp/kdump-tools.XXXXXX`로 보내 실행하고, 리포트를 가져온 뒤 임시 디렉터리를 지웁니다. 원격 설정 파일은 읽지 않습니다 |
+| vmcore 가져오기 (`fetch`) | SSH 접속만 | vmcore(와 `vmcore-dmesg.txt`)를 이 서버의 crash 디렉터리 `<서버 이름>-<원래 디렉터리>/`로 복사해 이 서버에서 분석합니다. 디스크 공간을 먼저 확인하고, 같은 크기로 이미 가져온 vmcore는 다시 받지 않습니다. 이 서버에 해당 커널의 vmlinux가 필요합니다 |
+| 자동 선택 (`auto`, 기본값) | — | 원격 설치본 → 무설치 실행(crash 있음) → vmcore 가져오기 순으로 고릅니다 |
+
+- 무설치 실행이 원격의 vmlinux 부족으로 실패하면 vmcore를 가져와 이 서버에서 분석할지 묻습니다.
+- 어느 방식이든 LLM 분석은 메뉴를 실행한 서버의 설정으로 합니다. 그래서 API 키나 구독 로그인을 원격 서버마다 둘 필요가 없고, 외부 통신이 막힌 서버의 리포트도 분석할 수 있습니다.
+- 원격 서버에서 가져온 리포트와 분석은 `logs/remote/<서버 이름>/`에 모입니다.
 - SSH는 키 인증으로 비밀번호 없이 접속할 수 있어야 합니다(`BatchMode`로 접속).
 - root가 아닌 계정으로 접속하면 서버 설정에서 sudo를 켜고, 원격 서버에 비밀번호 없는 sudo(NOPASSWD)를 허용합니다. crash 셸 진입은 터미널을 연결하므로 sudo 비밀번호를 입력할 수 있습니다.
 
-접속 서버 목록은 `/opt/kdump-tools/servers.conf`에 저장됩니다(`ANALYZE_KDUMP_SERVERS`로 변경 가능). 메뉴에서 관리하면 되고, 직접 편집할 때는 `servers.conf.sample` 형식을 따릅니다.
+접속 서버 목록은 `/opt/kdump-tools/servers.conf`에 저장됩니다(`ANALYZE_KDUMP_SERVERS`로 변경 가능). 메뉴에서 관리하면 되고, 직접 편집할 때는 `servers.conf.sample` 형식을 따릅니다. 7번째 칸(분석 방식)을 생략하면 `auto`로 동작합니다.
 
 ```text
-# 이름|접속대상(user@host)|포트|sudo 사용(yes/no)|원격 analyze-kdump 경로|crash 디렉터리
-db01|ops@10.0.0.11|22|yes|/opt/kdump-tools/bin/analyze-kdump|/var/crash
+# 이름|접속대상(user@host)|포트|sudo 사용(yes/no)|원격 analyze-kdump 경로|crash 디렉터리|분석 방식
+db01|ops@10.0.0.11|22|yes|/opt/kdump-tools/bin/analyze-kdump|/var/crash|auto
 ```
+
+### 중앙 분석 서버 구성 (kdump 원격 전송)
+
+운영 서버에는 아무것도 설치하지 않고, 패닉이 나면 kdump가 vmcore를 분석 서버로 바로 보내게 할 수 있습니다. 메뉴의 "kdump 원격 전송 안내"가 아래 설정을 분석 서버 주소로 채워 보여줍니다.
+
+```bash
+# [분석 서버] 전송 받을 계정과 디렉터리
+useradd -m kdump
+mkdir -p /var/crash && chown kdump /var/crash
+```
+
+```bash
+# [운영 서버] /etc/kdump.conf
+ssh kdump@<분석 서버 주소>
+sshkey /root/.ssh/kdump_id_rsa
+path /var/crash
+core_collector makedumpfile -F -l --message-level 7 -d 31
+```
+
+```bash
+# [운영 서버] SSH 키를 분석 서버에 등록하고 kdump 재시작
+kdumpctl propagate
+systemctl restart kdump
+kdumpctl status
+```
+
+- vmcore는 분석 서버의 `/var/crash/<운영 서버 IP>-<시각>/`에 저장되고, 분석 서버에서 "이 서버"로 분석합니다.
+- SSH 전송은 makedumpfile의 flattened 형식(`vmcore.flat`)으로 저장될 수 있습니다. 이 경우 `makedumpfile -R <디렉터리>/vmcore < <디렉터리>/vmcore.flat`로 변환한 뒤 분석합니다.
+- NFS로 보내려면 `nfs <NFS 서버>:/export/crash`와 `path /`를 쓰고, 공유를 분석 서버의 `/var/crash`에 마운트합니다.
+- 분석 서버의 `VMLINUX_BASE`(`/opt/kdump-tools/vmlinux/<커널 버전>/vmlinux`)에 운영 서버 커널 버전별 vmlinux를 모아 둡니다.
 
 ## 테스트 VM에서 검증하기
 
