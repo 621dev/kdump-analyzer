@@ -1184,10 +1184,14 @@ cli_name() {
 }
 
 # 설정된 경로 또는 PATH의 CLI 실행 파일 경로를 출력합니다.
+# LLM_CLI_PATH는 두 CLI가 함께 쓰므로, 파일 이름이 다른 CLI(claude/codex)를 가리키면 무시합니다.
 cli_resolve() {
-    local path
+    local name path
+    name=$(cli_name "$1")
     path=$(conf_get LLM_CLI_PATH "")
-    [ -n "$path" ] || path=$(cli_name "$1")
+    if [ -z "$path" ] || [ "$(basename "$path")" != "$name" ]; then
+        path="$name"
+    fi
     command -v "$path" 2>/dev/null
 }
 
@@ -1284,6 +1288,150 @@ edit_cli_path() {
     save_setting LLM_CLI_PATH "$value"
 }
 
+# ---------------------------------------------------------------- 구독 CLI 설치
+
+CLAUDE_INSTALL_URL="https://claude.ai/install.sh"
+NODE_STREAM=22
+
+node_major() {
+    command -v node >/dev/null 2>&1 || return 1
+    node --version 2>/dev/null | sed -n 's/^v\([0-9]*\).*/\1/p'
+}
+
+# Node.js가 없거나 너무 오래됐으면 설치합니다. RHEL 계열 기본 nodejs(16)는 Claude Code에 부족해서
+# 모듈 스트림(nodejs:22)을 켜고 설치합니다.
+ensure_nodejs() {
+    local min="$1" major
+
+    major=$(node_major)
+    if [ -n "$major" ] && [ "$major" -ge "$min" ]; then
+        if command -v npm >/dev/null 2>&1; then
+            echo "Node.js v$major 사용 (필요: $min 이상)"
+            return 0
+        fi
+        echo "Node.js v$major는 있지만 npm이 없습니다."
+    elif [ -n "$major" ]; then
+        echo "Node.js $min 이상이 필요합니다. (현재: v$major)"
+    else
+        echo "Node.js $min 이상이 필요합니다. (현재: 설치되어 있지 않음)"
+    fi
+    if command -v dnf >/dev/null 2>&1; then
+        if dnf -q module list nodejs 2>/dev/null | grep -qE "^nodejs[[:space:]]+$NODE_STREAM[[:space:]]"; then
+            echo "dnf로 Node.js $NODE_STREAM 설치 중..."
+            dnf -y module reset nodejs && dnf -y module enable "nodejs:$NODE_STREAM" &&
+                dnf -y install nodejs npm && dnf -y distro-sync nodejs npm
+        else
+            echo "dnf로 nodejs 설치 중..."
+            dnf -y install nodejs npm
+        fi
+    elif command -v apt-get >/dev/null 2>&1; then
+        echo "apt로 nodejs 설치 중..."
+        apt-get update && apt-get install -y nodejs npm
+    else
+        echo "이 시스템의 패키지 관리자를 알 수 없습니다. Node.js $min 이상을 직접 설치해 주세요."
+        return 1
+    fi
+    hash -r
+    major=$(node_major)
+    if [ -z "$major" ] || [ "$major" -lt "$min" ] || ! command -v npm >/dev/null 2>&1; then
+        echo "Node.js $min 이상과 npm을 준비하지 못했습니다. (현재 Node.js: ${major:-없음}, npm: $(command -v npm >/dev/null 2>&1 && echo 있음 || echo 없음))"
+        return 1
+    fi
+    echo "Node.js v$major 설치 완료"
+}
+
+# npm 전역 설치 후 실행 파일 경로를 출력합니다.
+npm_install_cli() {
+    local package="$1" name="$2" prefix
+
+    echo "npm install -g $package"
+    npm install -g "$package" || return 1
+    prefix=$(npm prefix -g 2>/dev/null)
+    [ -x "$prefix/bin/$name" ] || return 1
+    INSTALLED_CLI="$prefix/bin/$name"
+}
+
+# 공식 설치 스크립트를 내려받아 실행합니다(Node.js 불필요). 실행 계정의 ~/.local/bin에 설치됩니다.
+native_install_claude() {
+    local script
+
+    script=$(mktemp "${TMPDIR:-/tmp}/claude-install.XXXXXX.sh")
+    echo "공식 설치 스크립트 받는 중: $CLAUDE_INSTALL_URL"
+    if ! curl -fsSL --connect-timeout 10 --max-time 120 "$CLAUDE_INSTALL_URL" -o "$script"; then
+        echo "설치 스크립트를 받지 못했습니다(인터넷 연결 확인)."
+        rm -f "$script"
+        return 1
+    fi
+    bash "$script"
+    local status=$?
+    rm -f "$script"
+    [ "$status" -eq 0 ] || return "$status"
+    INSTALLED_CLI=$(command -v claude 2>/dev/null || true)
+    [ -n "$INSTALLED_CLI" ] || INSTALLED_CLI="$HOME/.local/bin/claude"
+    [ -x "$INSTALLED_CLI" ]
+}
+
+install_cli() {
+    local provider="$1" name method status version
+
+    name=$(cli_name "$provider")
+    if [ "$(id -u)" -ne 0 ]; then
+        ui_msg "설치는 root로 실행해야 합니다. (sudo analyze-kdump-ui)"
+        return 1
+    fi
+
+    if [ "$provider" = "claude-code" ]; then
+        method=$(ui_radio "Claude Code 설치 방법을 고르세요." \
+            native "공식 설치 스크립트 (권장, Node.js 불필요, ~/.local/bin)" ON \
+            npm "npm 전역 설치 (Node.js $NODE_STREAM 필요, 없으면 함께 설치)" OFF) || return 1
+        [ -n "$method" ] || return 1
+    else
+        method=npm
+    fi
+
+    case "$method" in
+        native)
+            ui_yesno "다음을 실행합니다.\n\n  curl -fsSL $CLAUDE_INSTALL_URL | bash\n\n($(id -un) 계정의 ~/.local/bin/claude 에 설치)\n\n진행할까요?" || return 1
+            ;;
+        npm)
+            ui_yesno "다음을 실행합니다.\n\n  1. Node.js 확인 (없거나 오래됐으면 패키지 관리자로 Node.js $NODE_STREAM 설치)\n  2. npm install -g $([ "$name" = claude ] && echo @anthropic-ai/claude-code || echo @openai/codex)\n\n진행할까요?" || return 1
+            ;;
+    esac
+
+    clear
+    echo "===== $name 설치 ====="
+    INSTALLED_CLI=""
+    case "$method" in
+        native)
+            native_install_claude
+            status=$?
+            ;;
+        npm)
+            if [ "$name" = "claude" ]; then
+                ensure_nodejs 22 && npm_install_cli @anthropic-ai/claude-code claude
+            else
+                ensure_nodejs 16 && npm_install_cli @openai/codex codex
+            fi
+            status=$?
+            ;;
+    esac
+
+    if [ "$status" -eq 0 ] && [ -n "$INSTALLED_CLI" ]; then
+        version=$(CLI_TIMEOUT=20 cli_exec "$INSTALLED_CLI" --version 2>/dev/null </dev/null | head -n 1)
+        echo
+        echo "설치 완료: $INSTALLED_CLI (${version:-버전 확인 실패})"
+        pause
+        # sudo 실행 경로에 없을 수 있으므로 설치된 전체 경로를 설정에 저장합니다.
+        conf_set LLM_CLI_PATH "$INSTALLED_CLI"
+        ui_msg "설치를 마쳤습니다: $name\n\n$INSTALLED_CLI\n${version:-}\n\n설정에 경로를 저장했습니다(LLM_CLI_PATH). 이어서 로그인을 진행합니다."
+        return 0
+    fi
+    echo
+    echo "설치에 실패했습니다. 위의 오류를 확인해 주세요."
+    pause
+    return 1
+}
+
 cli_auth_status() {
     local provider="$1" cli="$2"
 
@@ -1366,10 +1514,16 @@ menu_cli_auth() {
 
     while true; do
         if ! cli=$(cli_resolve "$provider"); then
-            if ui_yesno "$name 명령을 찾지 못했습니다.\n\n설치: npm install -g $([ "$name" = claude ] && echo @anthropic-ai/claude-code || echo @openai/codex)\nsudo로 실행하면 /usr/local/bin이 PATH에 없어 못 찾을 수 있습니다.\n\n설치된 위치를 찾아 경로를 지정할까요?"; then
-                edit_cli_path "$provider"
-                cli_resolve "$provider" >/dev/null && continue
-            fi
+            choice=$(ui_menu "$name 명령을 찾지 못했습니다.\n\n설치되어 있지 않다면 '설치'를 고르세요.\n이미 설치했다면 sudo 실행 경로(/usr/local/bin 없음) 때문일 수 있으니 '설치된 위치 찾기'를 고르세요." \
+                install "$name 설치" \
+                find "설치된 위치 찾기 (경로 지정)" \
+                "$BACK" "$BACK_LABEL") || return
+            case "$choice" in
+                install) install_cli "$provider" ;;
+                find) edit_cli_path "$provider" ;;
+                *) return ;;
+            esac
+            cli_resolve "$provider" >/dev/null && continue
             return
         fi
 

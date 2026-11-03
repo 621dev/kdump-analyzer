@@ -341,6 +341,11 @@ LLM_MODEL=""            # 비우면 Codex 설정(~/.codex/config.toml)의 기본
 
 **메뉴로 설정하기 (권장):** `sudo analyze-kdump-ui` → **설정**에서 진행합니다. `LLM_PROVIDER`를 `claude-code`나 `codex`로 바꾸면 인증을 바로 진행할지 묻습니다.
 
+- **CLI 설치:** CLI를 찾지 못하면 **설치**와 **설치된 위치 찾기**를 고를 수 있습니다. 설치는 root로 실행하고, 끝나면 설치된 전체 경로를 `LLM_CLI_PATH`에 저장한 뒤 로그인 단계로 이어집니다.
+  - Claude Code: **공식 설치 스크립트**(`curl -fsSL https://claude.ai/install.sh | bash`, 권장, Node.js 불필요, 실행 계정의 `~/.local/bin/claude`) 또는 **npm 전역 설치**(`npm install -g @anthropic-ai/claude-code`, Node.js 22 이상)
+  - Codex: npm 전역 설치(`npm install -g @openai/codex`)
+  - **Node.js 자동 준비:** npm 설치에 Node.js가 없거나 버전이 낮으면 패키지 관리자로 설치합니다. RHEL 계열 기본 `nodejs`는 16이라 Claude Code에 부족하므로, `dnf module enable nodejs:22`로 Node.js 22를 설치합니다. Debian/Ubuntu는 `apt-get install nodejs npm`을 씁니다.
+  - 인터넷이 막힌 서버에서는 설치할 수 없으니, 다른 곳에서 설치한 CLI를 복사한 뒤 **설치된 위치 찾기**로 경로를 지정합니다.
 - **구독 CLI 인증:** 현재 로그인 상태를 보여주고, 다음 작업을 메뉴에서 실행합니다.
   - Claude Code: 장기 토큰 발급(`claude setup-token`, 화면 없는 서버 권장), 다른 PC에서 발급한 토큰 붙여넣기, 브라우저 로그인(`claude auth login`), 저장된 토큰 사용 중지
   - Codex: 기기 코드 로그인(`codex login --device-auth`), 브라우저 로그인
