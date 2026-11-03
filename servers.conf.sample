@@ -4,11 +4,16 @@
 # 보통은 analyze-kdump-ui의 "접속 서버 관리" 메뉴에서 추가·수정합니다.
 #
 # 한 줄에 서버 하나:
-#   이름|접속대상(user@host)|포트|sudo 사용(yes/no)|원격 analyze-kdump 경로|crash 디렉터리
+#   이름|접속대상(user@host)|포트|sudo 사용(yes/no)|원격 analyze-kdump 경로|crash 디렉터리|분석 방식
 #
 # - 이름: 영문, 숫자, . _ - 만 사용. "local"은 메뉴를 실행한 서버를 뜻하므로 쓸 수 없습니다.
 # - SSH 키 인증으로 비밀번호 없이 접속할 수 있어야 합니다.
 # - sudo=yes이면 원격 서버에 비밀번호 없는 sudo(NOPASSWD)가 필요합니다.
+# - 분석 방식 (생략하면 auto):
+#     auto       원격 설치본 → 무설치 실행(crash 있음) → vmcore 가져오기 순으로 자동 선택
+#     installed  원격에 설치된 analyze-kdump 실행 (원격에 analyze-kdump, crash, vmlinux 필요)
+#     upload     스크립트를 원격 임시 디렉터리로 보내 실행 (원격에 crash, vmlinux 필요)
+#     fetch      vmcore를 이 서버로 가져와 분석 (원격에는 SSH만 필요)
 #
-# db01|ops@10.0.0.11|22|yes|/opt/kdump-tools/bin/analyze-kdump|/var/crash
-# web01|root@web01.example.com|2222|no|/opt/kdump-tools/bin/analyze-kdump|/var/crash
+# db01|ops@10.0.0.11|22|yes|/opt/kdump-tools/bin/analyze-kdump|/var/crash|auto
+# web01|root@web01.example.com|2222|no|/opt/kdump-tools/bin/analyze-kdump|/var/crash|fetch
