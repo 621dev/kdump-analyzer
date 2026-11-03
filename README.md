@@ -263,8 +263,9 @@ LLM_TIMEOUT=120
 - `LLM_API_KEY_FILE`: API 키를 담은 파일 경로. 첫 줄만 읽고 CR과 앞뒤 공백은 제거합니다. 권한이 `600`보다 넓으면 경고합니다
 - `LLM_PROVIDER`: `openai`, `gemini`, `claude`, `claude-code`, `codex` 중 하나. `openai`는 OpenAI 호환 Chat Completions API도 포함하고, `claude-code`와 `codex`는 구독 계정으로 로그인한 CLI를 사용합니다([구독 계정으로 사용하기](#구독-계정으로-사용하기-claude-code--codex-cli))
 - `LLM_BASE_URL`: provider 기본 엔드포인트 대신 사용할 API 엔드포인트
-- `LLM_MODEL`: 사용할 모델명. 비우면 `openai`는 `gpt-4o-mini`, `claude`는 `claude-sonnet-5-5`, `claude-code`와 `codex`는 CLI 기본 모델을 사용합니다. `gemini`는 반드시 지정합니다
-- `LLM_CLI_PATH`: `claude-code`/`codex` provider에서 실행할 CLI 경로. 기본값은 `claude` 또는 `codex`
+- `LLM_MODEL`: 사용할 모델명. 비우면 `openai`는 `gpt-4o-mini`, `claude`는 `claude-sonnet-5-5`, `claude-code`와 `codex`는 CLI 기본 모델을 사용합니다. `gemini`는 반드시 지정합니다. 메뉴의 설정에서 고르면 API 키 방식(`openai`, `claude`, `gemini`, OpenAI 호환 서버)은 provider의 모델 목록 API로 실제 목록을 받아 보여주고, `claude-code`는 `sonnet`/`opus`/`haiku` 별칭에서 고릅니다. 목록을 받지 못하면 직접 입력합니다
+- `LLM_CLI_PATH`: `claude-code`/`codex` provider에서 실행할 CLI 경로. 기본값은 `claude` 또는 `codex`. 메뉴의 설정에서 설치 위치를 자동으로 찾아 고를 수 있습니다
+- `LLM_CLI_TOKEN_FILE`: `claude-code`에서 쓸 장기 토큰 파일(`claude setup-token`으로 발급, 권한 600). 분석할 때 `CLAUDE_CODE_OAUTH_TOKEN`으로 넘깁니다
 - `LLM_CLI_ARGS`: CLI에 덧붙일 추가 인자. 공백으로 나뉘며 따옴표로 묶은 인자는 지원하지 않습니다. 예: `LLM_CLI_ARGS="--profile kdump"`(Codex)
 - `LLM_MAX_TOKENS`: LLM이 생성할 최대 토큰 수. 기본값 `8192`. Gemini thinking 모델이나 OpenAI reasoning 모델은 내부 추론 토큰도 이 한도에 포함되므로 너무 작게 잡지 않습니다
 - `LLM_OPENAI_TOKEN_PARAM`: OpenAI 요청에 쓸 토큰 한도 필드. `auto`(기본값)는 `LLM_BASE_URL`이 없으면 `max_completion_tokens`, 있으면 `max_tokens`를 사용합니다. `max_tokens`, `max_completion_tokens`, `none`으로 직접 지정할 수 있습니다
@@ -335,21 +336,29 @@ LLM_MODEL=""            # 비우면 Codex 설정(~/.codex/config.toml)의 기본
 
 | CLI | 설치 | 로그인 | 화면 없는 서버 |
 |------|------|------|------|
-| Claude Code | `npm install -g @anthropic-ai/claude-code` | `claude` 실행 후 `/login` | 다른 PC에서 `claude setup-token`으로 장기 토큰을 발급받아 `CLAUDE_CODE_OAUTH_TOKEN` 환경변수로 지정 |
+| Claude Code | `npm install -g @anthropic-ai/claude-code` | `claude auth login` | `claude setup-token`으로 장기 토큰 발급 → `LLM_CLI_TOKEN_FILE` |
 | Codex CLI | `npm install -g @openai/codex` | `codex login` | `codex login --device-auth` (기기 코드 방식) |
 
-로그인 정보는 CLI가 저장하고 자동으로 갱신하므로, 한 번 로그인하면 보통 다시 로그인할 필요가 없습니다. 오래 쓰지 않았거나, 다른 곳에서 로그아웃했거나, 비밀번호를 바꿔 세션이 만료되면 CLI 오류(`OAuth session expired` 등)가 분석 파일에 남습니다. 그때 다시 로그인합니다.
+**메뉴로 설정하기 (권장):** `sudo analyze-kdump-ui` → **설정**에서 진행합니다. `LLM_PROVIDER`를 `claude-code`나 `codex`로 바꾸면 인증을 바로 진행할지 묻습니다.
 
-화면 없는 서버에서 Claude Code를 쓸 때는 `claude setup-token`으로 발급한 장기 토큰을 root만 읽을 수 있는 파일에 두고, conf 파일에서 export합니다. conf는 셸 스크립트로 실행되므로 export한 변수가 CLI에 전달됩니다.
+- **구독 CLI 인증:** 현재 로그인 상태를 보여주고, 다음 작업을 메뉴에서 실행합니다.
+  - Claude Code: 장기 토큰 발급(`claude setup-token`, 화면 없는 서버 권장), 다른 PC에서 발급한 토큰 붙여넣기, 브라우저 로그인(`claude auth login`), 저장된 토큰 사용 중지
+  - Codex: 기기 코드 로그인(`codex login --device-auth`), 브라우저 로그인
+  - 공통: 연결 테스트(짧은 요청 1회)
+- **토큰 저장:** 장기 토큰은 `/opt/kdump-tools/secrets/claude-oauth-token`(폴더 700, 파일 600)에 저장하고, 설정에는 경로만 `LLM_CLI_TOKEN_FILE`로 남깁니다. 분석할 때는 이 토큰을 `CLAUDE_CODE_OAUTH_TOKEN` 환경변수로만 넘기므로 `ps` 같은 명령줄 목록에 보이지 않습니다.
+- **CLI 경로 자동 탐색 (`LLM_CLI_PATH`):** PATH, `/usr/local/bin`, `/usr/bin`, `~/.local/bin`, `~/.npm-global/bin`, nvm 경로(`~/.nvm/versions/node/*/bin`)에서 CLI를 찾아 버전과 함께 보여줍니다.
+  - RHEL 계열은 sudo 실행 경로에 `/usr/local/bin`이 없어서, `npm install -g`로 설치한 `claude`를 이름만으로는 못 찾습니다. 이때 전체 경로를 고르면 됩니다.
+  - nvm으로 설치한 CLI는 같은 폴더의 `node`가 필요하므로, 실행할 때 CLI가 있는 폴더를 PATH 앞에 붙입니다.
+- **실행 계정:** 메뉴를 `sudo`로 실행하면 CLI도 root로 실행되므로, 로그인도 root 계정 기준입니다.
+
+로그인 정보는 CLI가 저장하고 자동으로 갱신하므로, 한 번 로그인하면 보통 다시 로그인할 필요가 없습니다. 오래 쓰지 않았거나, 다른 곳에서 로그아웃했거나, 비밀번호를 바꿔 세션이 만료되면 CLI 오류(`OAuth session expired` 등)가 분석 파일에 남습니다. 그때 메뉴의 구독 CLI 인증에서 다시 로그인합니다.
+
+설정 파일로 직접 지정할 때는 다음과 같이 씁니다.
 
 ```bash
-# 토큰 파일 준비 (토큰은 다른 PC에서 claude setup-token으로 발급)
-install -m 600 /dev/null /opt/kdump-tools/secrets/claude-oauth-token
-vi /opt/kdump-tools/secrets/claude-oauth-token
-
-# analyze-kdump.conf
 LLM_PROVIDER="claude-code"
-export CLAUDE_CODE_OAUTH_TOKEN="$(cat /opt/kdump-tools/secrets/claude-oauth-token)"
+LLM_CLI_PATH="/usr/local/bin/claude"
+LLM_CLI_TOKEN_FILE="/opt/kdump-tools/secrets/claude-oauth-token"   # root만 읽을 수 있게 600
 ```
 
 실행 방식:

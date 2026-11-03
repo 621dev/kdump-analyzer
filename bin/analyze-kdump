@@ -32,6 +32,7 @@ ENV_LLM_MASK_SENSITIVE="${LLM_MASK_SENSITIVE:-}"
 ENV_LLM_PROMPT_FILE="${LLM_PROMPT_FILE:-}"
 ENV_LLM_CLI_PATH="${LLM_CLI_PATH:-}"
 ENV_LLM_CLI_ARGS="${LLM_CLI_ARGS:-}"
+ENV_LLM_CLI_TOKEN_FILE="${LLM_CLI_TOKEN_FILE:-}"
 ENV_LLM_ANTHROPIC_VERSION="${LLM_ANTHROPIC_VERSION:-}"
 VMLINUX_BASE="${VMLINUX_BASE:-/opt/kdump-tools/vmlinux}"
 REPORT_DIR="${REPORT_DIR:-/opt/kdump-tools/logs}"
@@ -44,6 +45,8 @@ LLM_BASE_URL="${LLM_BASE_URL:-}"
 LLM_MODEL="${LLM_MODEL:-}"
 LLM_CLI_PATH="${LLM_CLI_PATH:-}"
 LLM_CLI_ARGS="${LLM_CLI_ARGS:-}"
+# claude-code: CLAUDE_CODE_OAUTH_TOKEN으로 넘길 장기 토큰 파일 (claude setup-token으로 발급)
+LLM_CLI_TOKEN_FILE="${LLM_CLI_TOKEN_FILE:-}"
 LLM_MAX_TOKENS="${LLM_MAX_TOKENS:-8192}"
 LLM_MAX_REPORT_CHARS="${LLM_MAX_REPORT_CHARS:-60000}"
 LLM_TIMEOUT="${LLM_TIMEOUT:-120}"
@@ -489,18 +492,36 @@ llm_cli_command() {
     fi
 }
 
+# LLM_CLI_TOKEN_FILE의 첫 줄(Claude Code 장기 토큰)을 읽습니다. 앞뒤 공백과 CR은 제거합니다.
+read_cli_token() {
+    local token
+
+    [ -n "${LLM_CLI_TOKEN_FILE:-}" ] || return 0
+    if [ ! -r "$LLM_CLI_TOKEN_FILE" ]; then
+        echo "LLM_CLI_TOKEN_FILE을 읽을 수 없습니다: $LLM_CLI_TOKEN_FILE" >&2
+        return 1
+    fi
+    token=$(sed -n '1p' "$LLM_CLI_TOKEN_FILE" | tr -d '\r')
+    token="${token#"${token%%[![:space:]]*}"}"
+    token="${token%"${token##*[![:space:]]}"}"
+    printf '%s' "$token"
+}
+
 run_llm_cli() {
     local prompt_base="$1" output_file="$2" log_file="$3"
-    local cli cwd="$WORK_DIR/cli-cwd" status=0
+    local cli cli_dir token cwd="$WORK_DIR/cli-cwd" status=0
     local -a cmd extra_args
 
     cli=$(llm_cli_command)
+    # nvm 등으로 설치한 CLI는 "#!/usr/bin/env node"로 시작하므로, 같은 폴더의 node를 찾도록 PATH 앞에 붙입니다.
+    cli_dir=$(dirname "$(command -v "$cli")")
     mkdir -p "$cwd"
     # LLM_CLI_ARGS는 공백으로 나눕니다. 따옴표로 묶은 인자는 지원하지 않습니다.
     read -r -a extra_args <<< "$LLM_CLI_ARGS"
 
     case "$LLM_PROVIDER" in
         claude-code)
+            token=$(read_cli_token 2> "$log_file") || return 1
             # --bare는 구독(OAuth) 인증을 읽지 않으므로 쓰지 않습니다.
             cmd=("$cli" -p --output-format text --tools "" --strict-mcp-config
                 --no-session-persistence --system-prompt "$(cat "$prompt_base.system")")
@@ -508,8 +529,15 @@ run_llm_cli() {
                 cmd+=(--model "$LLM_MODEL")
             fi
             cmd+=("${extra_args[@]}")
-            (cd "$cwd" && timeout "$LLM_TIMEOUT" "${cmd[@]}") \
-                < "$prompt_base.input" > "$output_file" 2> "$log_file" || status=$?
+            # 토큰은 명령줄(ps에 보임)이 아니라 이 서브셸의 환경변수로만 넘깁니다.
+            (
+                cd "$cwd" || exit 1
+                export PATH="$cli_dir:$PATH"
+                if [ -n "$token" ]; then
+                    export CLAUDE_CODE_OAUTH_TOKEN="$token"
+                fi
+                timeout "$LLM_TIMEOUT" "${cmd[@]}"
+            ) < "$prompt_base.input" > "$output_file" 2> "$log_file" || status=$?
             ;;
         codex)
             # codex exec에는 시스템 프롬프트 옵션이 없어 지시문과 리포트를 합쳐 넘깁니다.
@@ -526,7 +554,7 @@ run_llm_cli() {
                 cmd+=(--model "$LLM_MODEL")
             fi
             cmd+=("${extra_args[@]}" -)
-            (cd "$cwd" && timeout "$LLM_TIMEOUT" "${cmd[@]}") \
+            (cd "$cwd" && PATH="$cli_dir:$PATH" timeout "$LLM_TIMEOUT" "${cmd[@]}") \
                 < "$prompt_base.codex" > "$log_file" 2>&1 || status=$?
             ;;
     esac
@@ -1123,6 +1151,7 @@ REPORT_MODE="$CLI_REPORT_MODE"
 [ -n "$ENV_LLM_PROMPT_FILE" ] && LLM_PROMPT_FILE="$ENV_LLM_PROMPT_FILE"
 [ -n "$ENV_LLM_CLI_PATH" ] && LLM_CLI_PATH="$ENV_LLM_CLI_PATH"
 [ -n "$ENV_LLM_CLI_ARGS" ] && LLM_CLI_ARGS="$ENV_LLM_CLI_ARGS"
+[ -n "$ENV_LLM_CLI_TOKEN_FILE" ] && LLM_CLI_TOKEN_FILE="$ENV_LLM_CLI_TOKEN_FILE"
 [ -n "$ENV_LLM_ANTHROPIC_VERSION" ] && LLM_ANTHROPIC_VERSION="$ENV_LLM_ANTHROPIC_VERSION"
 [ -n "$CLI_LLM_MODE" ] && LLM_ENABLED="$CLI_LLM_MODE"
 

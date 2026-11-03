@@ -106,6 +106,9 @@ ANALYSIS_PREFIX="kdump-analysis"
 # LLM_MODEL=""                 # 비우면 CLI 기본 모델. 예: "sonnet"
 # LLM_CLI_PATH="/usr/local/bin/claude"
 # LLM_CLI_ARGS=""              # CLI에 덧붙일 추가 인자(공백으로 구분)
+# LLM_CLI_TOKEN_FILE="/opt/kdump-tools/secrets/claude-oauth-token"
+#                              # claude-code 장기 토큰 파일(claude setup-token 발급, 권한 600)
+# 메뉴(sudo analyze-kdump-ui) → 설정 → "구독 CLI 인증"에서 로그인·토큰 발급·연결 테스트를 할 수 있습니다.
 # 이 경우 LLM_TIMEOUT이 CLI 실행 제한 시간으로 쓰이고,
 # LLM_MAX_TOKENS, LLM_TEMPERATURE, LLM_RETRY, API 키 설정은 적용되지 않습니다.
 
