@@ -42,24 +42,33 @@ ui_size() {
     UI_LIST_H=$((UI_H - 8))
 }
 
+# 목록 맨 끝에 붙이는 "이전 메뉴로" 항목의 태그
+BACK="<"
+BACK_LABEL="← 이전 메뉴로"
+# 취소 버튼 이름. 메인 메뉴에서만 "종료"로 바꿉니다.
+UI_CANCEL="뒤로"
+
 # whiptail은 선택 결과를 stderr로 내보내므로 stdout과 바꿔서 캡처합니다.
 ui_menu() {
     local text="$1"
     shift
     ui_size
-    "$WHIPTAIL" --title "$TITLE" --menu "$text" "$UI_H" "$UI_W" "$UI_LIST_H" "$@" 3>&1 1>&2 2>&3
+    "$WHIPTAIL" --title "$TITLE" --ok-button "선택" --cancel-button "$UI_CANCEL" \
+        --menu "$text" "$UI_H" "$UI_W" "$UI_LIST_H" "$@" 3>&1 1>&2 2>&3
 }
 
 ui_radio() {
     local text="$1"
     shift
     ui_size
-    "$WHIPTAIL" --title "$TITLE" --radiolist "$text" "$UI_H" "$UI_W" "$UI_LIST_H" "$@" 3>&1 1>&2 2>&3
+    "$WHIPTAIL" --title "$TITLE" --ok-button "선택" --cancel-button "$UI_CANCEL" \
+        --radiolist "$text\n(스페이스: 고르기, Enter: 확인)" "$UI_H" "$UI_W" "$UI_LIST_H" "$@" 3>&1 1>&2 2>&3
 }
 
 ui_input() {
     ui_size
-    "$WHIPTAIL" --title "$TITLE" --inputbox "$1" 10 "$UI_W" "$2" 3>&1 1>&2 2>&3
+    "$WHIPTAIL" --title "$TITLE" --ok-button "확인" --cancel-button "$UI_CANCEL" \
+        --inputbox "$1" 10 "$UI_W" "$2" 3>&1 1>&2 2>&3
 }
 
 ui_yesno() {
@@ -72,13 +81,31 @@ ui_msg() {
     "$WHIPTAIL" --title "$TITLE" --msgbox "$1" "$UI_H" "$UI_W"
 }
 
+# 오래 걸리는 확인 작업 동안 띄워 두는 안내 화면입니다(입력을 기다리지 않음).
+ui_info() {
+    ui_size
+    "$WHIPTAIL" --title "$TITLE" --infobox "$1" 8 "$UI_W"
+}
+
+# 리포트·분석 보기. less 하단에 나가는 방법을 항상 표시합니다(less는 Esc로 닫히지 않음).
 view_file() {
-    if command -v "$PAGER_CMD" >/dev/null 2>&1; then
+    if [ "$PAGER_CMD" = "less" ] && command -v less >/dev/null 2>&1; then
+        less -R -Ps"[q] 이전 화면으로   [↑↓ PgUp PgDn] 이동   [/] 검색   %f" "$1"
+    elif command -v "$PAGER_CMD" >/dev/null 2>&1; then
         "$PAGER_CMD" "$1"
     else
         ui_size
-        "$WHIPTAIL" --title "$(basename "$1")" --scrolltext --textbox "$1" "$UI_H" "$UI_W"
+        "$WHIPTAIL" --title "$(basename "$1") - Enter/Esc: 이전 화면으로" --scrolltext --textbox "$1" "$UI_H" "$UI_W"
     fi
+}
+
+# 진행 바: progress_bar <현재> <전체>
+progress_bar() {
+    local done="$1" total="$2" width=20 filled
+    [ "$total" -gt 0 ] || total=1
+    filled=$((done * width / total))
+    [ "$filled" -gt "$width" ] && filled=$width
+    printf '[%s%s]' "$(printf '%*s' "$filled" '' | tr ' ' '#')" "$(printf '%*s' "$((width - filled))" '' | tr ' ' '.')"
 }
 
 pause() {
@@ -318,6 +345,7 @@ choose_vmcore() {
     local server="$1" listing line mtime size path i=0 choice
     local -a items paths
 
+    [ "$server" = "local" ] || ui_info "원격 서버에서 vmcore 목록을 읽는 중...\n\n$(server_label "$server")"
     listing=$(list_vmcores "$server")
     while IFS= read -r line; do
         [ -n "$line" ] || continue
@@ -329,9 +357,10 @@ choose_vmcore() {
         paths[$i]="$path"
         items+=("$i" "$(date -d "@$mtime" '+%Y-%m-%d %H:%M') $(human_size "$size")  $path")
     done <<< "$listing"
-    items+=("p" "경로 직접 입력")
+    items+=("p" "경로 직접 입력" "$BACK" "$BACK_LABEL")
 
     choice=$(ui_menu "분석할 vmcore를 선택하세요. ($(server_label "$server"): $(server_crash_dir "$server"))" "${items[@]}") || return 1
+    [ "$choice" = "$BACK" ] && return 1
     if [ "$choice" = "p" ]; then
         ui_input "vmcore 파일 또는 crash 디렉터리 경로:" "$(server_crash_dir "$server")"
         return
@@ -429,7 +458,7 @@ analyze_remote_installed() {
         remote_tty "$server" "$tool" "$vmcore"
         return
     fi
-    remote_report_flow "$server" "$mode" "$log" "$tool" -r "$vmcore"
+    remote_report_flow "$server" "$mode" "$log" env ANALYZE_KDUMP_PROGRESS=1 "$tool" -r "$vmcore"
 }
 
 # 원격에 설치하지 않고, 이 서버의 analyze-kdump를 원격 임시 디렉터리로 보내 실행한 뒤 지웁니다.
@@ -448,11 +477,31 @@ analyze_remote_upload() {
         status=$?
     else
         remote_report_flow "$server" "$mode" "$log" \
-            env "REPORT_DIR=$dir/logs" "ANALYZE_KDUMP_CONF=$dir/none.conf" "$dir/analyze-kdump" -r "$vmcore"
+            env ANALYZE_KDUMP_PROGRESS=1 "REPORT_DIR=$dir/logs" "ANALYZE_KDUMP_CONF=$dir/none.conf" "$dir/analyze-kdump" -r "$vmcore"
         status=$?
     fi
     cleanup_upload "$server" "$dir"
     echo "[$server] 임시 파일 정리: $dir"
+    return "$status"
+}
+
+# 원격 파일을 받으면서 받은 크기로 진행 바를 그립니다.
+copy_with_progress() {
+    local server="$1" src="$2" dest="$3" total="$4" pid status=0 start=$SECONDS current pct
+
+    remote_run "$server" cat "$src" > "$dest" &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+        current=$(stat -c %s "$dest" 2>/dev/null || echo 0)
+        pct=$((current * 100 / (total > 0 ? total : 1)))
+        printf '\r\033[K  %s %3d%% %s/%s (%d초)' "$(progress_bar "$current" "$total")" "$pct" \
+            "$(human_size "$current")" "$(human_size "$total")" "$((SECONDS - start))"
+        sleep 0.5
+    done
+    wait "$pid" || status=$?
+    current=$(stat -c %s "$dest" 2>/dev/null || echo 0)
+    printf '\r\033[K  %s %3d%% %s/%s (%d초)\n' "$(progress_bar "$current" "$total")" \
+        "$((current * 100 / (total > 0 ? total : 1)))" "$(human_size "$current")" "$(human_size "$total")" "$((SECONDS - start))"
     return "$status"
 }
 
@@ -481,12 +530,8 @@ analyze_remote_fetch() {
             return 1
         fi
         echo "[$server] vmcore 가져오는 중: $vmcore ($(human_size "$size"))"
-        if dd --help 2>&1 | grep -q 'status=progress'; then
-            remote_run "$server" cat "$vmcore" | dd of="$dest.part" bs=4M status=progress
-        else
-            remote_run "$server" cat "$vmcore" > "$dest.part"
-        fi
-        if [ "${PIPESTATUS[0]}" -ne 0 ] || [ "$(stat -c %s "$dest.part" 2>/dev/null)" != "$size" ]; then
+        copy_with_progress "$server" "$vmcore" "$dest.part" "$size"
+        if [ "$?" -ne 0 ] || [ "$(stat -c %s "$dest.part" 2>/dev/null)" != "$size" ]; then
             echo "vmcore를 가져오지 못했습니다." | tee -a "$log"
             rm -f "$dest.part"
             return 255
@@ -536,6 +581,7 @@ choose_method() {
 
     method=$(server_method "$server")
     if [ "$method" = "auto" ]; then
+        ui_info "원격 서버 상태를 확인하는 중...\n\n$(server_label "$server")"
         if detected=$(probe_method "$server"); then
             method="$detected"
             note="자동 감지 결과: $(method_label "$detected")"
@@ -562,7 +608,9 @@ menu_analyze() {
     mode=$(ui_menu "분석 방법을 선택하세요.\n\n$vmcore" \
         report "리포트 생성" \
         llm "리포트 생성 + LLM 원인 분석" \
-        shell "crash 셸 진입 (직접 분석)") || return
+        shell "crash 셸 진입 (직접 분석)" \
+        "$BACK" "$BACK_LABEL") || return
+    [ "$mode" = "$BACK" ] && return
 
     if [ "$CURRENT_SERVER" != "local" ]; then
         method=$(choose_method "$CURRENT_SERVER") || return
@@ -594,7 +642,7 @@ menu_analyze() {
         local -a items=()
         [ -n "$analysis" ] && [ -f "$analysis" ] && items+=(analysis "LLM 분석 보기")
         [ -n "$report" ] && [ -f "$report" ] && items+=(report "리포트 보기")
-        items+=(back "메뉴로 돌아가기")
+        items+=(back "$BACK_LABEL")
         choice=$(ui_menu "결과: $(exit_code_text "$status") (종료 코드 $status)\n\n리포트: ${report:-없음}\n분석: ${analysis:-없음}" "${items[@]}") || return
         case "$choice" in
             analysis) view_file "$analysis" ;;
@@ -633,7 +681,9 @@ menu_results() {
             return
         fi
 
-        choice=$(ui_menu "분석 결과 ($(server_label "$CURRENT_SERVER"))\n$dir" "${items[@]}") || return
+        items+=("$BACK" "$BACK_LABEL")
+        choice=$(ui_menu "분석 결과 ($(server_label "$CURRENT_SERVER"))\n$dir\n\n파일을 고르면 내용을 보여줍니다. 보기 화면에서는 q로 돌아옵니다." "${items[@]}") || return
+        [ "$choice" = "$BACK" ] && return
         file="${files[$choice]}"
 
         case "$(basename "$file")" in
@@ -643,7 +693,9 @@ menu_results() {
             *)
                 action=$(ui_menu "$(basename "$file")" \
                     view "리포트 보기" \
-                    llm "이 리포트를 LLM으로 (다시) 분석") || continue
+                    llm "이 리포트를 LLM으로 (다시) 분석" \
+                    "$BACK" "$BACK_LABEL") || continue
+                [ "$action" = "$BACK" ] && continue
                 if [ "$action" = "view" ]; then
                     view_file "$file"
                 else
@@ -667,7 +719,7 @@ menu_select_server() {
         items+=("$name" "$(server_label "$name")" "$([ "$CURRENT_SERVER" = "$name" ] && echo ON || echo OFF)")
     done < <(servers_list)
 
-    choice=$(ui_radio "분석할 서버를 선택하세요. (스페이스로 선택, Enter로 확인)" "${items[@]}") || return
+    choice=$(ui_radio "분석할 서버를 선택하세요." "${items[@]}") || return
     [ -n "$choice" ] && CURRENT_SERVER="$choice"
 }
 
@@ -737,6 +789,7 @@ test_server() {
     local name="$1" tool out status detected
 
     tool=$(remote_tool "$name")
+    ui_info "연결 테스트 중...\n\n$(server_label "$name")"
     out=$(remote_run "$name" sh -c '
         echo "접속: OK ($(hostname), $(id -un))"
         if [ -x "$1" ]; then echo "analyze-kdump: OK ($1)"; else echo "analyze-kdump: 없음 ($1)"; fi
@@ -762,9 +815,10 @@ menu_servers() {
             [ -n "$name" ] || continue
             items+=("$name" "$(server_label "$name")")
         done < <(servers_list)
-        items+=("+" "새 서버 추가")
+        items+=("+" "새 서버 추가" "$BACK" "$BACK_LABEL")
 
         choice=$(ui_menu "접속 서버 관리\n($SERVERS_FILE)" "${items[@]}") || return
+        [ "$choice" = "$BACK" ] && return
         if [ "$choice" = "+" ]; then
             edit_server ""
             continue
@@ -773,7 +827,8 @@ menu_servers() {
         action=$(ui_menu "$(server_label "$choice")" \
             test "연결 테스트" \
             edit "수정" \
-            delete "삭제") || continue
+            delete "삭제" \
+            "$BACK" "$BACK_LABEL") || continue
         case "$action" in
             test) test_server "$choice" ;;
             edit) edit_server "$choice" ;;
@@ -875,7 +930,9 @@ menu_settings() {
             IFS='|' read -r key desc kind <<< "$entry"
             items+=("$key" "$desc: $(conf_get "$key" "$(setting_default "$key")")")
         done
+        items+=("$BACK" "$BACK_LABEL")
         choice=$(ui_menu "설정 ($CONFIG_FILE)\n이 서버의 분석과, 원격 서버 리포트의 LLM 분석에 적용됩니다.\nAPI 키는 파일로 관리하고 여기서는 경로만 지정합니다." "${items[@]}") || return
+        [ "$choice" = "$BACK" ] && return
         for entry in "${SETTINGS[@]}"; do
             IFS='|' read -r key desc kind <<< "$entry"
             if [ "$key" = "$choice" ]; then
@@ -942,7 +999,7 @@ main_menu() {
     local choice
 
     while true; do
-        choice=$(ui_menu "현재 서버: $(server_label "$CURRENT_SERVER")" \
+        choice=$(UI_CANCEL="종료" ui_menu "현재 서버: $(server_label "$CURRENT_SERVER")" \
             analyze "vmcore 분석" \
             results "분석 결과 보기" \
             server "접속 서버 선택" \
@@ -976,6 +1033,8 @@ main() {
         UTF-8) ;;
         *) export LANG=C.UTF-8 LC_ALL=C.UTF-8 ;;
     esac
+    # analyze-kdump 출력을 tee로 받아도 진행 표시가 나오도록 합니다.
+    export ANALYZE_KDUMP_PROGRESS=1
     if [ "$(id -u)" -ne 0 ]; then
         ui_msg "root가 아닌 계정으로 실행 중입니다.\n이 서버의 vmcore를 읽거나 설정을 저장하지 못할 수 있습니다."
     fi
