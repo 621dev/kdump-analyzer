@@ -1,0 +1,732 @@
+#!/bin/bash
+# analyze-kdump 터미널 메뉴 UI
+#
+# 장애 현장에서 SSH나 콘솔로 접속한 서버에서 메뉴로 vmcore를 분석합니다.
+#   - 이 서버(local): 이 서버에서 analyze-kdump를 실행합니다.
+#   - 원격 서버: SSH로 원격 서버에서 crash 리포트를 만들고, 리포트를 가져와
+#     LLM 분석은 이 서버의 설정으로 실행합니다(API 키/구독 로그인을 원격 서버에 둘 필요 없음).
+#
+# 환경변수:
+#   ANALYZE_KDUMP_CONF     설정 파일 (기본 /opt/kdump-tools/analyze-kdump.conf)
+#   ANALYZE_KDUMP_SERVERS  접속 서버 목록 파일 (기본 /opt/kdump-tools/servers.conf)
+#   ANALYZE_KDUMP_BIN      analyze-kdump 경로 (기본: 이 스크립트와 같은 디렉터리)
+
+SCRIPT_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+TOOL="${ANALYZE_KDUMP_BIN:-$SCRIPT_DIR/analyze-kdump}"
+CONFIG_FILE="${ANALYZE_KDUMP_CONF:-/opt/kdump-tools/analyze-kdump.conf}"
+SERVERS_FILE="${ANALYZE_KDUMP_SERVERS:-/opt/kdump-tools/servers.conf}"
+WHIPTAIL="${WHIPTAIL:-whiptail}"
+PAGER_CMD="${PAGER_CMD:-less}"
+TITLE="analyze-kdump"
+CURRENT_SERVER="local"
+
+DEFAULT_REMOTE_TOOL="/opt/kdump-tools/bin/analyze-kdump"
+DEFAULT_CRASH_DIR="/var/crash"
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10)
+
+# ---------------------------------------------------------------- 화면 helper
+
+ui_size() {
+    local lines cols
+    lines=$(tput lines 2>/dev/null || echo 24)
+    cols=$(tput cols 2>/dev/null || echo 80)
+    UI_H=$((lines - 4))
+    UI_W=$((cols - 8))
+    [ "$UI_H" -gt 30 ] && UI_H=30
+    [ "$UI_W" -gt 100 ] && UI_W=100
+    [ "$UI_H" -lt 15 ] && UI_H=15
+    [ "$UI_W" -lt 60 ] && UI_W=60
+    UI_LIST_H=$((UI_H - 8))
+}
+
+# whiptail은 선택 결과를 stderr로 내보내므로 stdout과 바꿔서 캡처합니다.
+ui_menu() {
+    local text="$1"
+    shift
+    ui_size
+    "$WHIPTAIL" --title "$TITLE" --menu "$text" "$UI_H" "$UI_W" "$UI_LIST_H" "$@" 3>&1 1>&2 2>&3
+}
+
+ui_radio() {
+    local text="$1"
+    shift
+    ui_size
+    "$WHIPTAIL" --title "$TITLE" --radiolist "$text" "$UI_H" "$UI_W" "$UI_LIST_H" "$@" 3>&1 1>&2 2>&3
+}
+
+ui_input() {
+    ui_size
+    "$WHIPTAIL" --title "$TITLE" --inputbox "$1" 10 "$UI_W" "$2" 3>&1 1>&2 2>&3
+}
+
+ui_yesno() {
+    ui_size
+    "$WHIPTAIL" --title "$TITLE" --yesno "$1" 12 "$UI_W"
+}
+
+ui_msg() {
+    ui_size
+    "$WHIPTAIL" --title "$TITLE" --msgbox "$1" "$UI_H" "$UI_W"
+}
+
+view_file() {
+    if command -v "$PAGER_CMD" >/dev/null 2>&1; then
+        "$PAGER_CMD" "$1"
+    else
+        ui_size
+        "$WHIPTAIL" --title "$(basename "$1")" --scrolltext --textbox "$1" "$UI_H" "$UI_W"
+    fi
+}
+
+pause() {
+    echo
+    read -r -p "Enter를 누르면 메뉴로 돌아갑니다... " _
+}
+
+# ---------------------------------------------------------------- 설정 파일
+
+# analyze-kdump와 같은 기준으로 conf 파일 권한을 확인합니다(셸 스크립트로 실행되기 때문).
+config_is_safe() {
+    local owner mode
+
+    [ -f "$CONFIG_FILE" ] || return 0
+    owner=$(stat -c '%u' "$CONFIG_FILE") || return 1
+    mode=$(stat -c '%a' "$CONFIG_FILE") || return 1
+    if [ "$owner" != "0" ] && [ "$owner" != "$(id -u)" ]; then
+        return 1
+    fi
+    [ $((8#$mode & 8#022)) -eq 0 ]
+}
+
+conf_get() {
+    local key="$1" default="${2:-}"
+
+    if [ -f "$CONFIG_FILE" ] && config_is_safe; then
+        (
+            # shellcheck disable=SC1090
+            . "$CONFIG_FILE" >/dev/null 2>&1
+            printf '%s' "${!key:-$default}"
+        )
+    else
+        printf '%s' "$default"
+    fi
+}
+
+# conf 파일의 KEY="VALUE" 줄을 바꾸거나 추가합니다. 값은 큰따옴표 안에 들어가도록 이스케이프합니다.
+conf_set() {
+    local key="$1" value="$2" escaped tmp
+
+    escaped=$(printf '%s' "$value" | sed -e 's/[\\"$`]/\\&/g')
+    mkdir -p "$(dirname "$CONFIG_FILE")" || return 1
+    tmp=$(mktemp "$CONFIG_FILE.XXXXXX") || return 1
+
+    if [ -f "$CONFIG_FILE" ]; then
+        CONF_LINE="$key=\"$escaped\"" awk -v key="$key" '
+            index($0, key "=") == 1 { if (!done) print ENVIRON["CONF_LINE"]; done = 1; next }
+            { print }
+            END { if (!done) print ENVIRON["CONF_LINE"] }
+        ' "$CONFIG_FILE" > "$tmp"
+    else
+        {
+            echo "# analyze-kdump 설정 (analyze-kdump-ui에서 생성)"
+            echo "$key=\"$escaped\""
+        } > "$tmp"
+    fi
+    chmod 644 "$tmp"
+    mv "$tmp" "$CONFIG_FILE"
+}
+
+report_dir() {
+    conf_get REPORT_DIR /opt/kdump-tools/logs
+}
+
+# ---------------------------------------------------------------- 접속 서버
+
+# servers.conf 형식 (한 줄에 서버 하나):
+#   이름|접속대상(user@host)|포트|sudo 사용(yes/no)|원격 analyze-kdump 경로|crash 디렉터리
+servers_list() {
+    [ -f "$SERVERS_FILE" ] || return 0
+    grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$SERVERS_FILE"
+}
+
+server_line() {
+    servers_list | awk -F'|' -v name="$1" '$1 == name { print; exit }'
+}
+
+# server_field <이름> <번호>: 1 이름, 2 대상, 3 포트, 4 sudo, 5 툴 경로, 6 crash 디렉터리
+server_field() {
+    server_line "$1" | cut -d'|' -f"$2"
+}
+
+server_label() {
+    if [ "$1" = "local" ]; then
+        echo "이 서버 ($(hostname))"
+    else
+        echo "$1 ($(server_field "$1" 2))"
+    fi
+}
+
+servers_write() {
+    local tmp
+
+    mkdir -p "$(dirname "$SERVERS_FILE")" || return 1
+    tmp=$(mktemp "$SERVERS_FILE.XXXXXX") || return 1
+    {
+        echo "# analyze-kdump-ui 접속 서버 목록"
+        echo "# 이름|접속대상(user@host)|포트|sudo 사용(yes/no)|원격 analyze-kdump 경로|crash 디렉터리"
+        cat
+    } > "$tmp"
+    chmod 644 "$tmp"
+    mv "$tmp" "$SERVERS_FILE"
+}
+
+server_save() {
+    local name="$1" line="$2"
+    { servers_list | awk -F'|' -v name="$name" '$1 != name'; echo "$line"; } | servers_write
+}
+
+server_delete() {
+    servers_list | awk -F'|' -v name="$1" '$1 != name' | servers_write
+}
+
+# 원격 서버에서 명령을 실행합니다. 인자는 printf %q로 감싸 원격 셸에 그대로 전달합니다.
+remote_run() {
+    local name="$1" target port sudo quoted
+    shift
+    target=$(server_field "$name" 2)
+    port=$(server_field "$name" 3)
+    sudo=$(server_field "$name" 4)
+    printf -v quoted '%q ' "$@"
+    if [ "$sudo" = "yes" ]; then
+        quoted="sudo -n $quoted"
+    fi
+    ssh "${SSH_OPTS[@]}" -p "${port:-22}" "$target" "$quoted"
+}
+
+remote_tool() {
+    local tool
+    tool=$(server_field "$1" 5)
+    printf '%s' "${tool:-$DEFAULT_REMOTE_TOOL}"
+}
+
+server_crash_dir() {
+    local dir
+    if [ "$1" = "local" ]; then
+        dir=$(conf_get DEFAULT_VMCORE "")
+        [ -d "$dir" ] || dir="$DEFAULT_CRASH_DIR"
+    else
+        dir=$(server_field "$1" 6)
+    fi
+    printf '%s' "${dir:-$DEFAULT_CRASH_DIR}"
+}
+
+# 원격 서버에서 받은 리포트와 그 분석 결과는 REPORT_DIR/remote/<서버 이름>에 모읍니다.
+server_result_dir() {
+    if [ "$1" = "local" ]; then
+        report_dir
+    else
+        printf '%s/remote/%s' "$(report_dir)" "$1"
+    fi
+}
+
+# ---------------------------------------------------------------- vmcore 분석
+
+# 출력: "<mtime> <size> <경로>" (최근 순)
+list_vmcores() {
+    local dir
+    dir=$(server_crash_dir "$1")
+    if [ "$1" = "local" ]; then
+        stat -c '%Y %s %n' "$dir"/*/vmcore 2>/dev/null | sort -rn
+    else
+        remote_run "$1" sh -c 'stat -c "%Y %s %n" "$1"/*/vmcore 2>/dev/null | sort -rn' sh "$dir"
+    fi
+}
+
+human_size() {
+    awk -v b="$1" 'BEGIN {
+        split("B KB MB GB TB", u); i = 1
+        while (b >= 1024 && i < 5) { b /= 1024; i++ }
+        printf (i == 1 ? "%d%s" : "%.1f%s"), b, u[i]
+    }'
+}
+
+choose_vmcore() {
+    local server="$1" listing line mtime size path i=0 choice
+    local -a items paths
+
+    listing=$(list_vmcores "$server")
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        mtime=${line%% *}
+        line=${line#* }
+        size=${line%% *}
+        path=${line#* }
+        i=$((i + 1))
+        paths[$i]="$path"
+        items+=("$i" "$(date -d "@$mtime" '+%Y-%m-%d %H:%M') $(human_size "$size")  $path")
+    done <<< "$listing"
+    items+=("p" "경로 직접 입력")
+
+    choice=$(ui_menu "분석할 vmcore를 선택하세요. ($(server_label "$server"): $(server_crash_dir "$server"))" "${items[@]}") || return 1
+    if [ "$choice" = "p" ]; then
+        ui_input "vmcore 파일 또는 crash 디렉터리 경로:" "$(server_crash_dir "$server")"
+        return
+    fi
+    printf '%s' "${paths[$choice]}"
+}
+
+# analyze-kdump 출력에서 "report:"/"analysis:" 경로를 읽습니다.
+output_path() {
+    sed -n "s/^$1:[[:space:]]*//p" "$2" | tail -n 1
+}
+
+exit_code_text() {
+    case "$1" in
+        0) echo "정상" ;;
+        1) echo "입력/환경 오류" ;;
+        2) echo "crash 실행 실패 (리포트 끝의 crash 실행 로그 확인)" ;;
+        3) echo "LLM 분석 실패 (분석 파일에 사유 기록)" ;;
+        255) echo "SSH 접속 실패" ;;
+        *) echo "알 수 없는 오류" ;;
+    esac
+}
+
+run_logged() {
+    local log="$1"
+    shift
+    set -o pipefail
+    "$@" 2>&1 | tee "$log"
+    local status=$?
+    set +o pipefail
+    return "$status"
+}
+
+analyze_local() {
+    local vmcore="$1" mode="$2" log="$3"
+
+    case "$mode" in
+        shell)
+            "$TOOL" "$vmcore"
+            ;;
+        report)
+            run_logged "$log" "$TOOL" -r "$vmcore"
+            ;;
+        llm)
+            run_logged "$log" "$TOOL" -llm "$vmcore"
+            ;;
+    esac
+}
+
+# 원격 서버에서 리포트를 만들고 가져온 뒤, 필요하면 이 서버에서 LLM 분석을 실행합니다.
+analyze_remote() {
+    local server="$1" vmcore="$2" mode="$3" log="$4"
+    local tool remote_report local_dir local_report status target port sudo
+
+    tool=$(remote_tool "$server")
+    if [ "$mode" = "shell" ]; then
+        target=$(server_field "$server" 2)
+        port=$(server_field "$server" 3)
+        sudo=$(server_field "$server" 4)
+        if [ "$sudo" = "yes" ]; then
+            ssh -t -p "${port:-22}" "$target" "sudo $(printf '%q ' "$tool" "$vmcore")"
+        else
+            ssh -t -p "${port:-22}" "$target" "$(printf '%q ' "$tool" "$vmcore")"
+        fi
+        return
+    fi
+
+    echo "[$server] crash 리포트 생성 중..."
+    run_logged "$log" remote_run "$server" "$tool" -r "$vmcore"
+    status=$?
+    remote_report=$(output_path report "$log")
+    if [ -z "$remote_report" ]; then
+        return "$status"
+    fi
+
+    local_dir=$(server_result_dir "$server")
+    mkdir -p "$local_dir" || return 1
+    local_report="$local_dir/$(basename "$remote_report")"
+    echo "[$server] 리포트 가져오는 중: $remote_report"
+    if ! remote_run "$server" cat "$remote_report" > "$local_report"; then
+        echo "리포트를 가져오지 못했습니다." | tee -a "$log"
+        return 255
+    fi
+    echo "report:  $local_report" | tee -a "$log"
+    if [ "$status" -ne 0 ] || [ "$mode" != "llm" ]; then
+        return "$status"
+    fi
+
+    echo
+    echo "[이 서버] LLM 분석 중..."
+    run_logged "$log.llm" "$TOOL" --llm-report "$local_report"
+    status=$?
+    cat "$log.llm" >> "$log"
+    return "$status"
+}
+
+menu_analyze() {
+    local vmcore mode log status report analysis choice
+
+    vmcore=$(choose_vmcore "$CURRENT_SERVER") || return
+    [ -n "$vmcore" ] || return
+
+    mode=$(ui_menu "분석 방법을 선택하세요.\n\n$vmcore" \
+        report "리포트 생성" \
+        llm "리포트 생성 + LLM 원인 분석" \
+        shell "crash 셸 진입 (직접 분석)") || return
+
+    log=$(mktemp "${TMPDIR:-/tmp}/analyze-kdump-ui.XXXXXX")
+    clear
+    echo "===== $(server_label "$CURRENT_SERVER") : $vmcore ($mode) ====="
+    echo
+    if [ "$CURRENT_SERVER" = "local" ]; then
+        analyze_local "$vmcore" "$mode" "$log"
+    else
+        analyze_remote "$CURRENT_SERVER" "$vmcore" "$mode" "$log"
+    fi
+    status=$?
+
+    if [ "$mode" = "shell" ]; then
+        rm -f "$log" "$log.llm"
+        return
+    fi
+    pause
+
+    report=$(output_path report "$log")
+    analysis=$(output_path analysis "$log")
+    rm -f "$log" "$log.llm"
+
+    while true; do
+        local -a items=()
+        [ -n "$analysis" ] && [ -f "$analysis" ] && items+=(analysis "LLM 분석 보기")
+        [ -n "$report" ] && [ -f "$report" ] && items+=(report "리포트 보기")
+        items+=(back "메뉴로 돌아가기")
+        choice=$(ui_menu "결과: $(exit_code_text "$status") (종료 코드 $status)\n\n리포트: ${report:-없음}\n분석: ${analysis:-없음}" "${items[@]}") || return
+        case "$choice" in
+            analysis) view_file "$analysis" ;;
+            report) view_file "$report" ;;
+            *) return ;;
+        esac
+    done
+}
+
+# ---------------------------------------------------------------- 결과 보기
+
+menu_results() {
+    local dir report_prefix analysis_prefix choice file i action
+    local -a items files
+
+    dir=$(server_result_dir "$CURRENT_SERVER")
+    report_prefix=$(conf_get REPORT_PREFIX kdump-report)
+    analysis_prefix=$(conf_get ANALYSIS_PREFIX kdump-analysis)
+
+    while true; do
+        items=()
+        files=()
+        i=0
+        while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            i=$((i + 1))
+            files[$i]="$file"
+            case "$(basename "$file")" in
+                "$analysis_prefix"-*) items+=("$i" "[분석]   $(basename "$file")") ;;
+                *) items+=("$i" "[리포트] $(basename "$file")") ;;
+            esac
+        done < <(ls -1t "$dir/$report_prefix"-*.txt "$dir/$analysis_prefix"-*.txt 2>/dev/null)
+
+        if [ "$i" -eq 0 ]; then
+            ui_msg "결과 파일이 없습니다.\n\n$dir"
+            return
+        fi
+
+        choice=$(ui_menu "분석 결과 ($(server_label "$CURRENT_SERVER"))\n$dir" "${items[@]}") || return
+        file="${files[$choice]}"
+
+        case "$(basename "$file")" in
+            "$analysis_prefix"-*)
+                view_file "$file"
+                ;;
+            *)
+                action=$(ui_menu "$(basename "$file")" \
+                    view "리포트 보기" \
+                    llm "이 리포트를 LLM으로 (다시) 분석") || continue
+                if [ "$action" = "view" ]; then
+                    view_file "$file"
+                else
+                    clear
+                    "$TOOL" --llm-report "$file"
+                    pause
+                fi
+                ;;
+        esac
+    done
+}
+
+# ---------------------------------------------------------------- 서버 선택/관리
+
+menu_select_server() {
+    local name choice
+    local -a items=(local "$(server_label local)" "$([ "$CURRENT_SERVER" = local ] && echo ON || echo OFF)")
+
+    while IFS='|' read -r name _; do
+        [ -n "$name" ] || continue
+        items+=("$name" "$(server_label "$name")" "$([ "$CURRENT_SERVER" = "$name" ] && echo ON || echo OFF)")
+    done < <(servers_list)
+
+    choice=$(ui_radio "분석할 서버를 선택하세요. (스페이스로 선택, Enter로 확인)" "${items[@]}") || return
+    [ -n "$choice" ] && CURRENT_SERVER="$choice"
+}
+
+valid_field() {
+    case "$1" in
+        *'|'*|'') return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+edit_server() {
+    local name="$1" target port sudo tool crash_dir
+
+    if [ -z "$name" ]; then
+        name=$(ui_input "서버 이름 (영문, 숫자, . _ -):" "") || return
+        case "$name" in
+            ''|local|*[!A-Za-z0-9._-]*)
+                ui_msg "사용할 수 없는 이름입니다: $name"
+                return
+                ;;
+        esac
+        if [ -n "$(server_line "$name")" ]; then
+            ui_msg "이미 등록된 이름입니다: $name"
+            return
+        fi
+    fi
+
+    target=$(ui_input "접속 대상 (user@host):" "$(server_field "$name" 2)") || return
+    port=$(ui_input "SSH 포트:" "$(server_field "$name" 3 | grep . || echo 22)") || return
+    tool=$(ui_input "원격 서버의 analyze-kdump 경로:" "$(server_field "$name" 5 | grep . || echo "$DEFAULT_REMOTE_TOOL")") || return
+    crash_dir=$(ui_input "원격 서버의 crash 디렉터리:" "$(server_field "$name" 6 | grep . || echo "$DEFAULT_CRASH_DIR")") || return
+    if ui_yesno "원격 명령을 sudo로 실행할까요?\n\nroot가 아닌 계정으로 접속한다면 '예'를 선택하세요.\n(리포트 생성에는 비밀번호 없는 sudo(NOPASSWD)가 필요합니다)"; then
+        sudo=yes
+    else
+        sudo=no
+    fi
+
+    for f in "$target" "$port" "$tool" "$crash_dir"; do
+        if ! valid_field "$f"; then
+            ui_msg "빈 값이나 '|' 문자는 사용할 수 없습니다."
+            return
+        fi
+    done
+    case "$port" in
+        *[!0-9]*)
+            ui_msg "포트는 숫자여야 합니다: $port"
+            return
+            ;;
+    esac
+
+    if server_save "$name" "$name|$target|$port|$sudo|$tool|$crash_dir"; then
+        ui_msg "저장했습니다: $name ($target)"
+    else
+        ui_msg "저장하지 못했습니다: $SERVERS_FILE"
+    fi
+}
+
+test_server() {
+    local name="$1" tool out status
+
+    tool=$(remote_tool "$name")
+    out=$(remote_run "$name" sh -c '
+        echo "접속: OK ($(hostname), $(id -un))"
+        if [ -x "$1" ]; then echo "analyze-kdump: OK ($1)"; else echo "analyze-kdump: 없음 ($1)"; fi
+        if command -v crash >/dev/null 2>&1; then echo "crash: OK ($(crash --version 2>/dev/null | head -n 1))"; else echo "crash: 없음"; fi
+        n=$(ls -1 "$2"/*/vmcore 2>/dev/null | wc -l); echo "vmcore: ${n}개 ($2)"
+    ' sh "$tool" "$(server_crash_dir "$name")" 2>&1)
+    status=$?
+    if [ "$status" -ne 0 ] && [ -z "$out" ]; then
+        out="접속 실패 (종료 코드 $status)"
+    fi
+    ui_msg "연결 테스트: $(server_label "$name")\n\n$out"
+}
+
+menu_servers() {
+    local choice name action
+    local -a items
+
+    while true; do
+        items=()
+        while IFS='|' read -r name _; do
+            [ -n "$name" ] || continue
+            items+=("$name" "$(server_label "$name")")
+        done < <(servers_list)
+        items+=("+" "새 서버 추가")
+
+        choice=$(ui_menu "접속 서버 관리\n($SERVERS_FILE)" "${items[@]}") || return
+        if [ "$choice" = "+" ]; then
+            edit_server ""
+            continue
+        fi
+
+        action=$(ui_menu "$(server_label "$choice")" \
+            test "연결 테스트" \
+            edit "수정" \
+            delete "삭제") || continue
+        case "$action" in
+            test) test_server "$choice" ;;
+            edit) edit_server "$choice" ;;
+            delete)
+                if ui_yesno "$choice 서버를 목록에서 삭제할까요?"; then
+                    server_delete "$choice"
+                    [ "$CURRENT_SERVER" = "$choice" ] && CURRENT_SERVER="local"
+                fi
+                ;;
+        esac
+    done
+}
+
+# ---------------------------------------------------------------- 설정
+
+# 키|설명|종류(text/number/provider/bool)
+SETTINGS=(
+    "VMLINUX_BASE|vmlinux 보관 디렉터리|text"
+    "REPORT_DIR|리포트 저장 디렉터리|text"
+    "DEFAULT_VMCORE|기본 vmcore 또는 crash 디렉터리|text"
+    "LLM_PROVIDER|LLM provider|provider"
+    "LLM_MODEL|LLM 모델 (비우면 provider 기본값)|text"
+    "LLM_BASE_URL|API 엔드포인트 (비우면 기본값)|text"
+    "LLM_API_KEY_FILE|API 키 파일 경로|text"
+    "LLM_CLI_PATH|구독 CLI 경로 (claude-code/codex)|text"
+    "LLM_CLI_ARGS|구독 CLI 추가 인자|text"
+    "LLM_MASK_SENSITIVE|LLM 입력 민감정보 마스킹|bool"
+    "LLM_MAX_REPORT_CHARS|LLM 입력 최대 문자 수|number"
+    "LLM_MAX_TOKENS|LLM 출력 최대 토큰|number"
+    "LLM_TIMEOUT|LLM 호출 제한 시간(초)|number"
+)
+
+setting_default() {
+    case "$1" in
+        VMLINUX_BASE) echo /opt/kdump-tools/vmlinux ;;
+        REPORT_DIR) echo /opt/kdump-tools/logs ;;
+        LLM_PROVIDER) echo openai ;;
+        LLM_MASK_SENSITIVE) echo 1 ;;
+        LLM_MAX_REPORT_CHARS) echo 60000 ;;
+        LLM_MAX_TOKENS) echo 8192 ;;
+        LLM_TIMEOUT) echo 120 ;;
+    esac
+}
+
+edit_setting() {
+    local key="$1" desc="$2" kind="$3" current value p
+
+    current=$(conf_get "$key" "$(setting_default "$key")")
+    case "$kind" in
+        provider)
+            local -a items=()
+            for p in openai gemini claude claude-code codex; do
+                items+=("$p" "$(case $p in
+                    openai) echo "OpenAI / 호환 API (API 키)" ;;
+                    gemini) echo "Google Gemini (API 키)" ;;
+                    claude) echo "Anthropic Claude (API 키)" ;;
+                    claude-code) echo "Claude Code CLI (Claude 구독)" ;;
+                    codex) echo "Codex CLI (ChatGPT 구독)" ;;
+                esac)" "$([ "$p" = "$current" ] && echo ON || echo OFF)")
+            done
+            value=$(ui_radio "$desc" "${items[@]}") || return
+            ;;
+        bool)
+            if ui_yesno "$desc\n\n현재: $current\n\n켤까요?"; then value=1; else value=0; fi
+            ;;
+        number)
+            value=$(ui_input "$desc (숫자):" "$current") || return
+            case "$value" in
+                ''|*[!0-9]*)
+                    ui_msg "숫자를 입력해 주세요: $value"
+                    return
+                    ;;
+            esac
+            ;;
+        *)
+            value=$(ui_input "$desc:" "$current") || return
+            ;;
+    esac
+
+    if conf_set "$key" "$value"; then
+        ui_msg "저장했습니다.\n\n$key=\"$value\"\n($CONFIG_FILE)"
+    else
+        ui_msg "저장하지 못했습니다. 쓰기 권한을 확인해 주세요.\n\n$CONFIG_FILE"
+    fi
+}
+
+menu_settings() {
+    local entry key desc kind choice
+    local -a items
+
+    if ! config_is_safe; then
+        ui_msg "설정 파일 권한이 안전하지 않아 읽지 않습니다.\n소유자가 root 또는 실행 사용자이고 group/other 쓰기 권한이 없어야 합니다.\n\n$CONFIG_FILE"
+        return
+    fi
+
+    while true; do
+        items=()
+        for entry in "${SETTINGS[@]}"; do
+            IFS='|' read -r key desc kind <<< "$entry"
+            items+=("$key" "$desc: $(conf_get "$key" "$(setting_default "$key")")")
+        done
+        choice=$(ui_menu "설정 ($CONFIG_FILE)\n이 서버의 분석과, 원격 서버 리포트의 LLM 분석에 적용됩니다.\nAPI 키는 파일로 관리하고 여기서는 경로만 지정합니다." "${items[@]}") || return
+        for entry in "${SETTINGS[@]}"; do
+            IFS='|' read -r key desc kind <<< "$entry"
+            if [ "$key" = "$choice" ]; then
+                edit_setting "$key" "$desc" "$kind"
+            fi
+        done
+    done
+}
+
+# ---------------------------------------------------------------- 메인
+
+main_menu() {
+    local choice
+
+    while true; do
+        choice=$(ui_menu "현재 서버: $(server_label "$CURRENT_SERVER")" \
+            analyze "vmcore 분석" \
+            results "분석 결과 보기" \
+            server "접속 서버 선택" \
+            servers "접속 서버 관리" \
+            settings "설정" \
+            quit "종료") || return 0
+        case "$choice" in
+            analyze) menu_analyze ;;
+            results) menu_results ;;
+            server) menu_select_server ;;
+            servers) menu_servers ;;
+            settings) menu_settings ;;
+            quit) return 0 ;;
+        esac
+    done
+}
+
+main() {
+    if ! command -v "$WHIPTAIL" >/dev/null 2>&1; then
+        echo "whiptail이 필요합니다. 설치: dnf install -y newt (Debian/Ubuntu: apt-get install -y whiptail)" >&2
+        exit 1
+    fi
+    if [ ! -x "$TOOL" ]; then
+        echo "analyze-kdump를 찾을 수 없습니다: $TOOL" >&2
+        exit 1
+    fi
+    # 한글 메뉴가 깨지지 않도록 UTF-8 로캘을 사용합니다.
+    case "$(locale charmap 2>/dev/null)" in
+        UTF-8) ;;
+        *) export LANG=C.UTF-8 LC_ALL=C.UTF-8 ;;
+    esac
+    if [ "$(id -u)" -ne 0 ]; then
+        ui_msg "root가 아닌 계정으로 실행 중입니다.\n이 서버의 vmcore를 읽거나 설정을 저장하지 못할 수 있습니다."
+    fi
+    main_menu
+    clear 2>/dev/null
+    exit 0
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi

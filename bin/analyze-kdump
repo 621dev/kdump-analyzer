@@ -55,6 +55,7 @@ LLM_ANTHROPIC_VERSION="${LLM_ANTHROPIC_VERSION:-2023-06-01}"
 REPORT_MODE=0
 LLM_MODE=""
 LLM_FAILED=0
+LLM_REPORT_INPUT=""
 VMCORE=""
 WORK_DIR=""
 
@@ -69,6 +70,43 @@ trap 'exit 143' TERM
 
 usage() {
     echo "사용법: analyze-kdump [-config <conf-file>] [-report|-r] [-llm|--llm] [-no-llm] [/path/to/vmcore | /path/to/crash-dir]"
+    echo "        analyze-kdump [-config <conf-file>] --llm-report <report-file>   # 기존 리포트를 LLM으로만 분석"
+}
+
+# 이미 만든 리포트(다른 서버에서 가져온 리포트 포함)를 LLM으로만 분석합니다.
+# crash와 vmcore 없이 동작하므로 원격 서버의 리포트를 로컬에서 분석할 때 씁니다.
+run_llm_report_only() {
+    local base
+
+    if [ ! -f "$LLM_REPORT_INPUT" ]; then
+        echo "리포트 파일을 찾을 수 없습니다: $LLM_REPORT_INPUT" >&2
+        exit 1
+    fi
+
+    REPORT_DIR=$(cd "$(dirname "$LLM_REPORT_INPUT")" && pwd)
+    REPORT_FILE="$REPORT_DIR/$(basename "$LLM_REPORT_INPUT")"
+    base=$(basename "$REPORT_FILE" .txt)
+    RUN_ID="${base#"${REPORT_PREFIX}-"}"
+    # 같은 리포트를 다시 분석해도 이전 분석 파일을 덮어쓰지 않도록 번호를 붙입니다.
+    if [ -e "$REPORT_DIR/${ANALYSIS_PREFIX}-${RUN_ID}.txt" ]; then
+        local n=2
+        while [ -e "$REPORT_DIR/${ANALYSIS_PREFIX}-${RUN_ID}-$n.txt" ]; do
+            n=$((n + 1))
+        done
+        RUN_ID="${RUN_ID}-$n"
+    fi
+
+    LLM_ENABLED=1
+    ensure_work_dir
+    append_llm_analysis
+
+    echo "report:  $REPORT_FILE"
+    echo "analysis: $ANALYSIS_FILE"
+    if [ "$LLM_FAILED" -eq 1 ]; then
+        echo "LLM 분석에 실패했습니다. 사유는 분석 파일을 확인해 주세요." >&2
+        exit 3
+    fi
+    exit 0
 }
 
 ensure_work_dir() {
@@ -915,6 +953,15 @@ while [ "$#" -gt 0 ]; do
             LLM_MODE=0
             shift
             ;;
+        -llm-report|--llm-report)
+            if [ -z "${2:-}" ]; then
+                echo "--llm-report 옵션에는 리포트 파일 경로가 필요합니다." >&2
+                usage
+                exit 1
+            fi
+            LLM_REPORT_INPUT="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -973,6 +1020,10 @@ sanitize_number LLM_MAX_TOKENS 8192
 sanitize_number LLM_MAX_REPORT_CHARS 60000
 sanitize_number LLM_TIMEOUT 120
 sanitize_number LLM_RETRY 2
+
+if [ -n "$LLM_REPORT_INPUT" ]; then
+    run_llm_report_only
+fi
 
 # conf 파일이 내부 변수 VMCORE를 덮어써도 무시하고, 명령줄 인자 또는 DEFAULT_VMCORE만 사용합니다.
 VMCORE="$CLI_VMCORE"

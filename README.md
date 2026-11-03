@@ -14,6 +14,7 @@
 - `-report` 옵션으로 셸 진입 없이 명령별 섹션으로 구분된 요약 리포트 파일 생성
 - 선택적으로 LLM을 연동해 원인분석과 조치 권고 추가 (민감정보 마스킹, 섹션 단위 입력 축소)
 - 자동화에서 결과를 판별할 수 있는 종료 코드
+- 터미널 메뉴 UI(`analyze-kdump-ui`): vmcore 선택, 분석, 결과 보기, 접속 서버 관리, 설정을 메뉴로 처리하고 원격 서버도 SSH로 분석
 
 ## 디렉터리 구조
 
@@ -23,9 +24,12 @@
 /opt/kdump-tools/
 ├── README.md
 ├── analyze-kdump.conf.sample
+├── servers.conf.sample
 ├── bin/
-│   └── analyze-kdump
+│   ├── analyze-kdump
+│   └── analyze-kdump-ui
 ├── logs/
+│   └── remote/<서버 이름>/   # 메뉴 UI로 분석한 원격 서버의 리포트와 분석
 └── vmlinux/
     └── <kernel-version>/
         └── vmlinux
@@ -77,6 +81,12 @@ analyze-kdump /path/to/vmcore
 
 ```bash
 LLM_API_KEY="<api-key>" /opt/kdump-tools/bin/analyze-kdump -llm /path/to/vmcore
+```
+
+이미 만든 리포트를 LLM으로만 분석하려면 `--llm-report`를 사용합니다. crash와 vmcore가 필요 없으므로, 다른 서버에서 가져온 리포트를 분석하거나 같은 리포트를 다른 모델로 다시 분석할 때 씁니다. 분석 파일은 리포트와 같은 디렉터리에 저장되고, 이미 분석 파일이 있으면 `-2`, `-3`처럼 번호를 붙여 덮어쓰지 않습니다.
+
+```bash
+/opt/kdump-tools/bin/analyze-kdump --llm-report /opt/kdump-tools/logs/kdump-report-20260701-100000-12345.txt
 ```
 
 기본 설정 파일은 `/opt/kdump-tools/analyze-kdump.conf`입니다. 저장소에는 샘플 파일인 `analyze-kdump.conf.sample`만 포함하고, 실제 설정 파일인 `analyze-kdump.conf`는 Git에 올리지 않습니다. 다른 설정 파일을 사용하려면 `-config` 옵션으로 지정합니다.
@@ -345,6 +355,44 @@ log
 ```
 
 hung task 패닉을 분석할 때는 D 상태 프로세스의 스택이 핵심이므로 `foreach UN bt`를 추가하는 것을 권장합니다.
+
+## 터미널 메뉴 UI
+
+`analyze-kdump-ui`는 장애 현장에서 SSH나 서버 콘솔로 접속한 상태로 쓰는 메뉴 화면입니다. 명령 옵션을 외우지 않아도 vmcore 선택부터 결과 확인까지 메뉴로 진행합니다.
+
+```bash
+sudo /opt/kdump-tools/bin/analyze-kdump-ui
+```
+
+요구 사항: `whiptail`(RHEL 계열 `newt` 패키지, 최소 설치에도 포함), `less`, 원격 서버를 쓸 경우 `ssh`. 화면 크기는 터미널 크기에 맞춰 조정됩니다.
+
+| 메뉴 | 내용 |
+|------|------|
+| vmcore 분석 | 선택한 서버의 crash 디렉터리에서 vmcore를 최근 순으로 보여주고, 리포트 생성 / 리포트 + LLM 분석 / crash 셸 진입 중 하나를 실행합니다. 끝나면 결과(종료 코드 의미 포함)와 리포트·분석 보기를 제공합니다 |
+| 분석 결과 보기 | 선택한 서버의 리포트와 분석 파일을 최근 순으로 보여줍니다. 리포트를 골라 LLM으로 (다시) 분석할 수 있습니다 |
+| 접속 서버 선택 | 분석할 서버를 고릅니다. "이 서버"는 메뉴를 실행한 서버입니다 |
+| 접속 서버 관리 | 원격 서버를 추가·수정·삭제하고 연결 테스트(SSH, analyze-kdump, crash, vmcore 개수)를 합니다 |
+| 설정 | `analyze-kdump.conf`의 주요 항목(경로, LLM provider·모델·키 파일·CLI·마스킹·한도)을 바꿉니다. API 키 자체는 저장하지 않고 키 파일 경로만 지정합니다 |
+
+### 원격 서버 분석 방식
+
+```text
+[메뉴를 실행한 서버] ──SSH──▶ [원격 서버: analyze-kdump -r] ── crash 리포트 생성
+        ◀────────── 리포트 가져오기 (logs/remote/<서버 이름>/) ──┘
+        └─▶ LLM 분석 (메뉴를 실행한 서버의 설정 사용)
+```
+
+- crash 리포트는 원격 서버에서 그 서버의 설정으로 만들고, LLM 분석은 메뉴를 실행한 서버에서 합니다. 그래서 API 키나 구독 로그인을 원격 서버마다 둘 필요가 없고, 외부 통신이 막힌 서버의 리포트도 분석할 수 있습니다.
+- 원격 서버에는 `analyze-kdump`와 `crash`가 설치되어 있어야 합니다.
+- SSH는 키 인증으로 비밀번호 없이 접속할 수 있어야 합니다(`BatchMode`로 접속).
+- root가 아닌 계정으로 접속하면 서버 설정에서 sudo를 켜고, 원격 서버에 비밀번호 없는 sudo(NOPASSWD)를 허용합니다. crash 셸 진입은 터미널을 연결하므로 sudo 비밀번호를 입력할 수 있습니다.
+
+접속 서버 목록은 `/opt/kdump-tools/servers.conf`에 저장됩니다(`ANALYZE_KDUMP_SERVERS`로 변경 가능). 메뉴에서 관리하면 되고, 직접 편집할 때는 `servers.conf.sample` 형식을 따릅니다.
+
+```text
+# 이름|접속대상(user@host)|포트|sudo 사용(yes/no)|원격 analyze-kdump 경로|crash 디렉터리
+db01|ops@10.0.0.11|22|yes|/opt/kdump-tools/bin/analyze-kdump|/var/crash
+```
 
 ## 테스트 VM에서 검증하기
 
