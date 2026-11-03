@@ -870,6 +870,7 @@ SETTINGS=(
     "LLM_TIMEOUT|LLM 호출 제한 시간(초)|number"
     "KDUMP_TOOLS_REPO|업데이트 저장소 (GitHub owner/repo)|text"
     "KDUMP_TOOLS_BRANCH|업데이트 브랜치|text"
+    "KDUMP_TOOLS_UPDATE_CHECK|메뉴 시작 시 최신 버전 확인 (폐쇄망은 끄기)|bool"
 )
 
 setting_default() {
@@ -883,6 +884,7 @@ setting_default() {
         LLM_TIMEOUT) echo 120 ;;
         KDUMP_TOOLS_REPO) echo 621dev/kdump-tools ;;
         KDUMP_TOOLS_BRANCH) echo main ;;
+        KDUMP_TOOLS_UPDATE_CHECK) echo 1 ;;
     esac
 }
 
@@ -1002,7 +1004,8 @@ check_latest() {
     LATEST_COMMIT=""
     LATEST_VERSION=""
     command -v curl >/dev/null 2>&1 || return 1
-    LATEST_COMMIT=$(curl -fsSL --max-time 10 -H 'Accept: application/vnd.github.sha' \
+    # 메뉴 시작 때 실행하므로 인터넷이 막힌 서버에서도 오래 기다리지 않도록 짧게 끊습니다.
+    LATEST_COMMIT=$(curl -fsSL --connect-timeout 3 --max-time 5 -H 'Accept: application/vnd.github.sha' \
         "https://api.github.com/repos/$repo/commits/$branch" 2>/dev/null) || return 1
     case "$LATEST_COMMIT" in
         ''|*[!0-9a-f]*)
@@ -1010,7 +1013,7 @@ check_latest() {
             return 1
             ;;
     esac
-    LATEST_VERSION=$(curl -fsSL --max-time 10 "https://raw.githubusercontent.com/$repo/$LATEST_COMMIT/VERSION" 2>/dev/null \
+    LATEST_VERSION=$(curl -fsSL --connect-timeout 3 --max-time 5 "https://raw.githubusercontent.com/$repo/$LATEST_COMMIT/VERSION" 2>/dev/null \
         | head -n 1 | tr -d '[:space:]')
     {
         echo "LATEST_VERSION=${LATEST_VERSION:-unknown}"
@@ -1041,16 +1044,58 @@ for commit in reversed(commits[-30:]):
 ' > "$out"
 }
 
-# 메인 메뉴에 보여줄 "업데이트 가능" 안내. 마지막 확인 결과(캐시)만 보고 네트워크는 쓰지 않습니다.
-update_badge() {
-    local latest current
+# 최신 버전 확인 결과: 1 성공, 0 실패, off 설정에서 꺼짐, 빈 값은 아직 확인 안 함
+LATEST_OK=""
 
-    [ -f "$UPDATE_CACHE" ] || return 0
-    latest=$(info_get LATEST_COMMIT "$UPDATE_CACHE")
-    current=$(current_commit)
-    if [ -n "$latest" ] && [ -n "$current" ] && [ "$latest" != "$current" ]; then
-        printf '\n▲ 업데이트 가능: %s (%s 확인)' "$(version_text "$(info_get LATEST_VERSION "$UPDATE_CACHE")")" "$(info_get CHECKED_AT "$UPDATE_CACHE")"
+run_latest_check() {
+    ui_info "최신 버전을 확인하는 중... (최대 5초)\n\n$(update_repo) ($(update_branch))"
+    if check_latest; then
+        LATEST_OK=1
+    else
+        LATEST_OK=0
     fi
+}
+
+current_text() {
+    local commit
+    commit=$(current_commit)
+    printf '%s%s' "$(version_text "$(current_version)")" "${commit:+ (${commit:0:7})}"
+}
+
+# 메인 메뉴와 업데이트 메뉴에 보여줄 "최신 버전" 한 줄. 네트워크는 쓰지 않고 확인해 둔 결과만 씁니다.
+latest_status() {
+    local current cached
+
+    current=$(current_commit)
+    case "$LATEST_OK" in
+        1)
+            if [ -n "$current" ] && [ "$current" = "$LATEST_COMMIT" ]; then
+                printf '최신: %s (%s) - 최신 버전 사용 중' "$(version_text "$LATEST_VERSION")" "${LATEST_COMMIT:0:7}"
+            elif [ -z "$current" ]; then
+                printf '최신: %s (%s) - 현재 설치본의 커밋 정보가 없어 비교 불가' "$(version_text "$LATEST_VERSION")" "${LATEST_COMMIT:0:7}"
+            else
+                printf '▲ 업데이트 가능: %s (%s) - 메뉴의 "업데이트"에서 설치' "$(version_text "$LATEST_VERSION")" "${LATEST_COMMIT:0:7}"
+            fi
+            ;;
+        off)
+            printf '최신: 시작할 때 확인하지 않음 (설정 KDUMP_TOOLS_UPDATE_CHECK)'
+            ;;
+        *)
+            cached=$(info_get LATEST_COMMIT "$UPDATE_CACHE")
+            if [ -n "$cached" ]; then
+                printf '최신: %s (%s, %s 확인) - 지금은 GitHub 접속 실패' \
+                    "$(version_text "$(info_get LATEST_VERSION "$UPDATE_CACHE")")" "${cached:0:7}" "$(info_get CHECKED_AT "$UPDATE_CACHE")"
+            else
+                printf '최신: 확인 실패 (GitHub 접속 불가)'
+            fi
+            ;;
+    esac
+}
+
+update_available() {
+    local current
+    current=$(current_commit)
+    [ "$LATEST_OK" = "1" ] && [ -n "$current" ] && [ "$current" != "$LATEST_COMMIT" ]
 }
 
 can_update() {
@@ -1155,43 +1200,38 @@ update_from_dir() {
     finish_update "$?"
 }
 
+# 버전 정보는 메인 메뉴에 이미 보이므로 여기서는 업데이트 방법만 고릅니다.
+# 시작할 때 확인한 결과를 쓰고, 확인하지 못했을 때만 다시 확인합니다.
 menu_update() {
-    local cur_v cur_c latest_text status choice installed changes
+    local installed choice changes note
     local -a items
 
-    cur_v=$(current_version)
-    cur_c=$(current_commit)
+    [ "$LATEST_OK" = "1" ] || run_latest_check
     installed=$(info_get INSTALLED_AT "$INSTALL_INFO")
-    ui_info "최신 버전을 확인하는 중...\n\n$(update_repo) ($(update_branch))"
-    if check_latest; then
-        latest_text="$(version_text "$LATEST_VERSION") (${LATEST_COMMIT:0:7})"
-        if [ -z "$cur_c" ]; then
-            status="현재 설치본의 커밋 정보가 없어 비교할 수 없습니다.\n업데이트하면 최신 버전으로 다시 설치합니다."
-        elif [ "$cur_c" = "$LATEST_COMMIT" ]; then
-            status="최신 버전을 사용 중입니다."
-        else
-            status="업데이트가 있습니다."
-        fi
-    else
-        latest_text="확인 실패"
-        status="GitHub에 접속하지 못했습니다(인터넷 차단 또는 curl 없음).\n폐쇄망이라면 저장소를 서버에 복사한 뒤 '디렉터리에서 업데이트'를 사용하세요."
-    fi
 
     while true; do
         items=()
-        if [ -n "$LATEST_COMMIT" ] && [ -n "$cur_c" ] && [ "$cur_c" != "$LATEST_COMMIT" ]; then
+        if update_available; then
             items+=(changes "변경 내역 보기")
         fi
-        if [ -n "$LATEST_COMMIT" ]; then
+        if [ "$LATEST_OK" = "1" ]; then
             items+=(github "GitHub에서 업데이트 ($(update_repo), $(update_branch))")
+            note=""
+        else
+            note="\n\nGitHub에 접속하지 못했습니다(인터넷 차단 또는 curl 없음).\n폐쇄망이라면 저장소를 서버에 복사한 뒤 '디렉터리에서 업데이트'를 사용하세요."
         fi
-        items+=(local "서버의 디렉터리에서 업데이트 (폐쇄망)" "$BACK" "$BACK_LABEL")
+        items+=(local "서버의 디렉터리에서 업데이트 (폐쇄망)" \
+            recheck "최신 버전 다시 확인" \
+            "$BACK" "$BACK_LABEL")
 
-        choice=$(ui_menu "현재 버전: v$cur_v${cur_c:+ (${cur_c:0:7})}${installed:+, 설치 $installed}\n최신 버전: $latest_text\n\n$status" "${items[@]}") || return
+        choice=$(ui_menu "현재: $(current_text)${installed:+, 설치 $installed}\n$(latest_status)$note" "${items[@]}") || return
         case "$choice" in
+            recheck)
+                run_latest_check
+                ;;
             changes)
                 changes=$(mktemp "${TMPDIR:-/tmp}/kdump-changes.XXXXXX")
-                if write_changes "$cur_c" "$LATEST_COMMIT" "$changes"; then
+                if write_changes "$(current_commit)" "$LATEST_COMMIT" "$changes"; then
                     view_file "$changes"
                 else
                     ui_msg "변경 내역을 가져오지 못했습니다."
@@ -1270,14 +1310,14 @@ main_menu() {
     local choice
 
     while true; do
-        choice=$(UI_CANCEL="종료" ui_menu "현재 서버: $(server_label "$CURRENT_SERVER")\n버전: v$(current_version)$(c=$(current_commit); [ -n "$c" ] && printf ' (%s)' "${c:0:7}")$(update_badge)" \
+        choice=$(UI_CANCEL="종료" ui_menu "현재 서버: $(server_label "$CURRENT_SERVER")\n버전: $(current_text)\n$(latest_status)" \
             analyze "vmcore 분석" \
             results "분석 결과 보기" \
             server "접속 서버 선택" \
             servers "접속 서버 관리" \
             settings "설정" \
             guide "kdump 원격 전송 안내 (중앙 분석 서버 구성)" \
-            update "버전 확인 / 업데이트" \
+            update "업데이트" \
             quit "종료") || return 0
         case "$choice" in
             analyze) menu_analyze ;;
@@ -1308,7 +1348,12 @@ main() {
     esac
     # analyze-kdump 출력을 tee로 받아도 진행 표시가 나오도록 합니다.
     export ANALYZE_KDUMP_PROGRESS=1
-    TITLE="analyze-kdump v$(current_version)"
+    TITLE="analyze-kdump $(version_text "$(current_version)")"
+    # 메인 메뉴에 최신 버전을 바로 보여주기 위해 시작할 때 한 번 확인합니다.
+    case "$(conf_get KDUMP_TOOLS_UPDATE_CHECK 1)" in
+        0|false|FALSE|no|NO|off|OFF) LATEST_OK=off ;;
+        *) run_latest_check ;;
+    esac
     if [ "$(id -u)" -ne 0 ]; then
         ui_msg "root가 아닌 계정으로 실행 중입니다.\n이 서버의 vmcore를 읽거나 설정을 저장하지 못할 수 있습니다."
     fi
