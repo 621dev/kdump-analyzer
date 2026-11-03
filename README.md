@@ -23,11 +23,14 @@
 ```text
 /opt/kdump-tools/
 ├── README.md
+├── install.sh                 # 설치·명령 등록 (/usr/sbin)
 ├── analyze-kdump.conf.sample
 ├── servers.conf.sample
 ├── bin/
 │   ├── analyze-kdump
 │   └── analyze-kdump-ui
+├── completion/
+│   └── kdump-tools.bash       # bash 자동완성
 ├── logs/
 │   └── remote/<서버 이름>/   # 메뉴 UI로 분석한 원격 서버의 리포트와 분석
 └── vmlinux/
@@ -52,23 +55,39 @@ RHEL 계열 시스템에서는 보통 `crash`와 `debuginfo-install`을 사용�
 dnf install -y crash dnf-plugins-core
 ```
 
+## 설치
+
+저장소를 받은 뒤 `install.sh`를 root로 실행합니다. 파일을 `/opt/kdump-tools`에 복사하고 모든 명령(`analyze-kdump`, `analyze-kdump-ui`)을 `/usr/sbin`에 등록하므로, 이후에는 어디서나 명령 이름만으로 실행할 수 있습니다.
+
+```bash
+git clone https://github.com/621dev/kdump-tools.git
+sudo ./kdump-tools/install.sh
+```
+
+```bash
+sudo analyze-kdump-ui
+sudo analyze-kdump -r /var/crash
+```
+
+- **설정과 데이터:** 이미 있는 `analyze-kdump.conf`, `servers.conf`, `logs/`, `vmlinux/`는 덮어쓰지 않습니다. 새 버전을 받은 뒤 다시 실행하면 업데이트됩니다.
+- **등록 위치:** `/usr/sbin`에 심볼릭 링크로 등록합니다. RHEL 계열은 sudo의 `secure_path`에 `/usr/local/*`가 없어서, `/usr/local/bin`에 두면 `sudo analyze-kdump-ui`가 명령을 찾지 못합니다. 같은 이름의 일반 파일이 이미 있으면 덮어쓰지 않고 건너뜁니다.
+- **자동완성:** `/etc/bash_completion.d`가 있으면 `analyze-kdump` 옵션과 경로의 Tab 자동완성도 등록합니다. 새 셸부터 적용됩니다.
+- **도구 점검:** 설치가 끝나면 crash, whiptail, python3, curl, ssh가 있는지 보여줍니다.
+- **설치 옵션:** 설치 위치와 등록 위치는 `--prefix`, `--bin-dir`로 바꿀 수 있습니다.
+
+등록을 해제하려면 다음을 실행합니다. 등록한 명령과 자동완성만 지우고, `/opt/kdump-tools`(설정, 서버 목록, 로그, vmlinux)는 남깁니다.
+
+```bash
+sudo /opt/kdump-tools/install.sh --uninstall
+```
+
 ## 사용법
-
-```bash
-/opt/kdump-tools/bin/analyze-kdump /path/to/vmcore
-```
-
-경로를 매번 입력하지 않으려면 `/usr/sbin`에 심볼릭 링크를 만들 수 있습니다.
-
-```bash
-ln -s /opt/kdump-tools/bin/analyze-kdump /usr/sbin/analyze-kdump
-```
-
-이후에는 명령어만으로 실행할 수 있습니다.
 
 ```bash
 analyze-kdump /path/to/vmcore
 ```
+
+`install.sh`를 쓰지 않았다면 `/opt/kdump-tools/bin/analyze-kdump`처럼 전체 경로로 실행합니다.
 
 요약 리포트만 생성하려면 `-report` 또는 `-r` 옵션을 사용합니다.
 
@@ -361,7 +380,7 @@ hung task 패닉을 분석할 때는 D 상태 프로세스의 스택이 핵심�
 `analyze-kdump-ui`는 장애 현장에서 SSH나 서버 콘솔로 접속한 상태로 쓰는 메뉴 화면입니다. 명령 옵션을 외우지 않아도 vmcore 선택부터 결과 확인까지 메뉴로 진행합니다.
 
 ```bash
-sudo /opt/kdump-tools/bin/analyze-kdump-ui
+sudo analyze-kdump-ui
 ```
 
 요구 사항: `whiptail`(RHEL 계열 `newt` 패키지, 최소 설치에도 포함), `less`, 원격 서버를 쓸 경우 `ssh`. 화면 크기는 터미널 크기에 맞춰 조정됩니다.
