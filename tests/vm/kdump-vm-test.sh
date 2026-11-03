@@ -8,6 +8,7 @@
 #      ./kdump-vm-test.sh panic oom      # (선택) OOM 패닉 덤프
 #   3) ./kdump-vm-test.sh verify         # debuginfo 설치 후 analyze-kdump -r 결과 점검
 #      LLM_API_KEY=... LLM_PROVIDER=... LLM_MODEL=... ./kdump-vm-test.sh verify --llm
+#      LLM_PROVIDER=claude-code ./kdump-vm-test.sh verify --llm   # 구독 CLI (root로 로그인 필요)
 #
 # 환경변수:
 #   TOOL_DIR    analyze-kdump 저장소 위치 (기본 /opt/kdump-tools-test, 없으면 clone)
@@ -179,7 +180,14 @@ cmd_verify() {
     if [ "$use_llm" -eq 1 ]; then
         echo
         echo "===== analyze-kdump -llm 실행 ====="
-        [ -n "${LLM_API_KEY:-}${LLM_API_KEY_FILE:-}" ] || die "LLM_API_KEY 또는 LLM_API_KEY_FILE을 설정해 주세요."
+        case "${LLM_PROVIDER:-}" in
+            claude-code|codex)
+                # 구독 CLI는 실행 사용자(root)로 로그인되어 있어야 합니다.
+                ;;
+            *)
+                [ -n "${LLM_API_KEY:-}${LLM_API_KEY_FILE:-}" ] || die "LLM_API_KEY 또는 LLM_API_KEY_FILE을 설정해 주세요."
+                ;;
+        esac
         status=0
         ANALYZE_KDUMP_CONF=/nonexistent VMLINUX_BASE=/nonexistent REPORT_DIR="$out" \
             "$TOOL_DIR/bin/analyze-kdump" -llm "$vmcore" || status=$?

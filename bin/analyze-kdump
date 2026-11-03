@@ -30,6 +30,8 @@ ENV_LLM_TEMPERATURE="${LLM_TEMPERATURE:-}"
 ENV_LLM_OPENAI_TOKEN_PARAM="${LLM_OPENAI_TOKEN_PARAM:-}"
 ENV_LLM_MASK_SENSITIVE="${LLM_MASK_SENSITIVE:-}"
 ENV_LLM_PROMPT_FILE="${LLM_PROMPT_FILE:-}"
+ENV_LLM_CLI_PATH="${LLM_CLI_PATH:-}"
+ENV_LLM_CLI_ARGS="${LLM_CLI_ARGS:-}"
 ENV_LLM_ANTHROPIC_VERSION="${LLM_ANTHROPIC_VERSION:-}"
 VMLINUX_BASE="${VMLINUX_BASE:-/opt/kdump-tools/vmlinux}"
 REPORT_DIR="${REPORT_DIR:-/opt/kdump-tools/logs}"
@@ -38,7 +40,10 @@ ANALYSIS_PREFIX="${ANALYSIS_PREFIX:-kdump-analysis}"
 LLM_ENABLED="${LLM_ENABLED:-0}"
 LLM_PROVIDER="${LLM_PROVIDER:-openai}"
 LLM_BASE_URL="${LLM_BASE_URL:-}"
-LLM_MODEL="${LLM_MODEL:-gpt-4o-mini}"
+# 비어 있으면 provider별 기본값을 씁니다(resolve_llm_model 참고).
+LLM_MODEL="${LLM_MODEL:-}"
+LLM_CLI_PATH="${LLM_CLI_PATH:-}"
+LLM_CLI_ARGS="${LLM_CLI_ARGS:-}"
 LLM_MAX_TOKENS="${LLM_MAX_TOKENS:-8192}"
 LLM_MAX_REPORT_CHARS="${LLM_MAX_REPORT_CHARS:-60000}"
 LLM_TIMEOUT="${LLM_TIMEOUT:-120}"
@@ -298,10 +303,100 @@ normalize_llm_provider() {
         claude|anthropic)
             echo "claude"
             ;;
+        claude-code|claude_code|claudecode)
+            echo "claude-code"
+            ;;
+        codex|codex-cli)
+            echo "codex"
+            ;;
         *)
             echo "$1"
             ;;
     esac
+}
+
+is_cli_provider() {
+    case "$LLM_PROVIDER" in
+        claude-code|codex)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# LLM_MODEL이 비어 있으면 provider별 기본 모델을 씁니다.
+# CLI provider는 비워 두면 CLI에 설정된 기본 모델을 사용합니다.
+resolve_llm_model() {
+    if [ -n "$LLM_MODEL" ]; then
+        return
+    fi
+    case "$LLM_PROVIDER" in
+        openai)
+            LLM_MODEL="gpt-4o-mini"
+            ;;
+        claude)
+            LLM_MODEL="claude-sonnet-5-5"
+            ;;
+    esac
+}
+
+# 구독 계정으로 로그인한 Claude Code / Codex CLI를 비대화 모드로 실행합니다.
+# 프로젝트 파일(CLAUDE.md, AGENTS.md 등)을 읽지 않도록 빈 작업 디렉터리에서 실행하고,
+# 파일 읽기나 명령 실행 같은 도구는 끈 채 텍스트만 주고받습니다.
+llm_cli_command() {
+    if [ -n "$LLM_CLI_PATH" ]; then
+        printf '%s' "$LLM_CLI_PATH"
+    elif [ "$LLM_PROVIDER" = "codex" ]; then
+        printf '%s' "codex"
+    else
+        printf '%s' "claude"
+    fi
+}
+
+run_llm_cli() {
+    local prompt_base="$1" output_file="$2" log_file="$3"
+    local cli cwd="$WORK_DIR/cli-cwd" status=0
+    local -a cmd extra_args
+
+    cli=$(llm_cli_command)
+    mkdir -p "$cwd"
+    # LLM_CLI_ARGS는 공백으로 나눕니다. 따옴표로 묶은 인자는 지원하지 않습니다.
+    read -r -a extra_args <<< "$LLM_CLI_ARGS"
+
+    case "$LLM_PROVIDER" in
+        claude-code)
+            # --bare는 구독(OAuth) 인증을 읽지 않으므로 쓰지 않습니다.
+            cmd=("$cli" -p --output-format text --tools "" --strict-mcp-config
+                --no-session-persistence --system-prompt "$(cat "$prompt_base.system")")
+            if [ -n "$LLM_MODEL" ]; then
+                cmd+=(--model "$LLM_MODEL")
+            fi
+            cmd+=("${extra_args[@]}")
+            (cd "$cwd" && timeout "$LLM_TIMEOUT" "${cmd[@]}") \
+                < "$prompt_base.input" > "$output_file" 2> "$log_file" || status=$?
+            ;;
+        codex)
+            # codex exec에는 시스템 프롬프트 옵션이 없어 지시문과 리포트를 합쳐 넘깁니다.
+            {
+                cat "$prompt_base.system"
+                echo
+                echo
+                echo "----- crash report -----"
+                cat "$prompt_base.input"
+            } > "$prompt_base.codex"
+            cmd=("$cli" exec --skip-git-repo-check --sandbox read-only --color never
+                --ephemeral --output-last-message "$output_file")
+            if [ -n "$LLM_MODEL" ]; then
+                cmd+=(--model "$LLM_MODEL")
+            fi
+            cmd+=("${extra_args[@]}" -)
+            (cd "$cwd" && timeout "$LLM_TIMEOUT" "${cmd[@]}") \
+                < "$prompt_base.codex" > "$log_file" 2>&1 || status=$?
+            ;;
+    esac
+    return "$status"
 }
 
 get_llm_url() {
@@ -357,7 +452,7 @@ curl_config_escape() {
 }
 
 write_llm_payload() {
-    python3 - "$REPORT_FILE" "$LLM_PROVIDER" "$LLM_MODEL" "$LLM_MAX_REPORT_CHARS" "$LLM_MAX_TOKENS" "${LLM_PROMPT_FILE:-}" "$LLM_TEMPERATURE" "$(resolve_openai_token_param)" "$LLM_MASK_SENSITIVE" > "$1" <<'PY'
+    python3 - "$REPORT_FILE" "$LLM_PROVIDER" "$LLM_MODEL" "$LLM_MAX_REPORT_CHARS" "$LLM_MAX_TOKENS" "${LLM_PROMPT_FILE:-}" "$LLM_TEMPERATURE" "$(resolve_openai_token_param)" "$LLM_MASK_SENSITIVE" "$1" > "$1" <<'PY'
 import io
 import json
 import re
@@ -368,7 +463,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", write_through=True)
 
 (report_path, provider, model, max_chars_raw, max_tokens_raw, prompt_file,
- temperature_raw, openai_token_param, mask_raw) = sys.argv[1:10]
+ temperature_raw, openai_token_param, mask_raw, output_path) = sys.argv[1:11]
 
 
 def to_int(raw, default):
@@ -505,6 +600,14 @@ if mask:
 
 Some identifiers in the report are masked as <HOSTNAME>, <IPV4>, <MAC> or <EMAIL>. Treat them as placeholders, not as errors."""
 
+if provider in ("claude-code", "codex"):
+    # CLI provider는 JSON 대신 시스템 프롬프트와 입력을 각각 파일로 넘깁니다.
+    with open(output_path + ".system", "w", encoding="utf-8") as system_file:
+        system_file.write(system_prompt)
+    with open(output_path + ".input", "w", encoding="utf-8") as input_file:
+        input_file.write(report_text)
+    sys.exit(0)
+
 if provider == "openai":
     payload = {
         "model": model,
@@ -542,8 +645,7 @@ elif provider == "claude":
             {"role": "user", "content": report_text},
         ],
     }
-    if temperature is not None:
-        payload["temperature"] = temperature
+    # Anthropic Messages API는 2026-10-21부터 temperature를 보내면 400을 반환하므로 전송하지 않습니다.
 else:
     raise SystemExit(f"지원하지 않는 LLM_PROVIDER입니다: {provider}")
 
@@ -639,6 +741,54 @@ llm_skip() {
     LLM_FAILED=1
 }
 
+append_llm_cli_analysis() {
+    local cli status=0
+    local prompt_base="$WORK_DIR/llm-prompt"
+    local output_file="$WORK_DIR/llm-cli-output.txt"
+    local log_file="$WORK_DIR/llm-cli.log"
+
+    cli=$(llm_cli_command)
+    if ! command -v "$cli" >/dev/null 2>&1; then
+        llm_skip "$cli 명령을 찾을 수 없습니다. 설치 여부와 LLM_CLI_PATH를 확인해 주세요."
+        return 0
+    fi
+
+    if ! command -v timeout >/dev/null 2>&1; then
+        llm_skip "timeout 명령을 찾을 수 없습니다."
+        return 0
+    fi
+
+    if ! write_llm_payload "$prompt_base" 2> "$log_file"; then
+        llm_skip "요청 내용 생성에 실패했습니다."
+        cat "$log_file" >> "$ANALYSIS_FILE"
+        return 0
+    fi
+
+    run_llm_cli "$prompt_base" "$output_file" "$log_file" || status=$?
+
+    if [ "$status" -eq 124 ]; then
+        llm_skip "$cli 응답이 ${LLM_TIMEOUT}초 안에 오지 않았습니다. LLM_TIMEOUT을 늘려 주세요."
+        return 0
+    fi
+    if [ "$status" -ne 0 ]; then
+        llm_skip "$cli 실행 실패(exit $status). 로그인 상태와 사용 한도를 확인해 주세요."
+        {
+            tail -n 40 "$log_file"
+            if [ -f "$output_file" ]; then
+                tail -n 20 "$output_file"
+            fi
+        } >> "$ANALYSIS_FILE"
+        return 0
+    fi
+    if [ ! -f "$output_file" ] || ! grep -q '[^[:space:]]' "$output_file"; then
+        llm_skip "$cli 응답이 비어 있습니다."
+        tail -n 40 "$log_file" >> "$ANALYSIS_FILE"
+        return 0
+    fi
+
+    cat "$output_file" >> "$ANALYSIS_FILE"
+}
+
 append_llm_analysis() {
     local api_key api_key_escaped llm_url http_status
     local payload_file="$WORK_DIR/llm-payload.json"
@@ -651,25 +801,36 @@ append_llm_analysis() {
     fi
 
     LLM_PROVIDER=$(normalize_llm_provider "$LLM_PROVIDER")
+    resolve_llm_model
     ANALYSIS_FILE="$REPORT_DIR/${ANALYSIS_PREFIX}-${RUN_ID}.txt"
 
     {
         echo "kdump llm root cause analysis"
         echo "source_report: $REPORT_FILE"
         echo "provider:  $LLM_PROVIDER"
-        echo "model:     $LLM_MODEL"
+        echo "model:     ${LLM_MODEL:-(CLI 기본값)}"
         echo "masking:   $(is_enabled "$LLM_MASK_SENSITIVE" && echo on || echo off)"
         echo "generated: $(date -Is)"
         echo
     } > "$ANALYSIS_FILE"
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        llm_skip "python3 명령을 찾을 수 없습니다."
+        return 0
+    fi
+
+    if is_cli_provider; then
+        append_llm_cli_analysis
+        return 0
+    fi
 
     if ! command -v curl >/dev/null 2>&1; then
         llm_skip "curl 명령을 찾을 수 없습니다."
         return 0
     fi
 
-    if ! command -v python3 >/dev/null 2>&1; then
-        llm_skip "python3 명령을 찾을 수 없습니다."
+    if [ -z "$LLM_MODEL" ]; then
+        llm_skip "LLM_MODEL을 설정해 주세요."
         return 0
     fi
 
@@ -803,6 +964,8 @@ REPORT_MODE="$CLI_REPORT_MODE"
 [ -n "$ENV_LLM_OPENAI_TOKEN_PARAM" ] && LLM_OPENAI_TOKEN_PARAM="$ENV_LLM_OPENAI_TOKEN_PARAM"
 [ -n "$ENV_LLM_MASK_SENSITIVE" ] && LLM_MASK_SENSITIVE="$ENV_LLM_MASK_SENSITIVE"
 [ -n "$ENV_LLM_PROMPT_FILE" ] && LLM_PROMPT_FILE="$ENV_LLM_PROMPT_FILE"
+[ -n "$ENV_LLM_CLI_PATH" ] && LLM_CLI_PATH="$ENV_LLM_CLI_PATH"
+[ -n "$ENV_LLM_CLI_ARGS" ] && LLM_CLI_ARGS="$ENV_LLM_CLI_ARGS"
 [ -n "$ENV_LLM_ANTHROPIC_VERSION" ] && LLM_ANTHROPIC_VERSION="$ENV_LLM_ANTHROPIC_VERSION"
 [ -n "$CLI_LLM_MODE" ] && LLM_ENABLED="$CLI_LLM_MODE"
 

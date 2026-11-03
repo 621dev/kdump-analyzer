@@ -194,12 +194,14 @@ LLM_TIMEOUT=120
 - `LLM_ENABLED`: `1`, `true`, `yes`, `on`으로 설정하면 `-report` 실행 시 LLM 분석 추가
 - `LLM_API_KEY`: LLM API 키. conf 파일에 저장하기보다 환경변수로 주입하는 방식을 권장
 - `LLM_API_KEY_FILE`: API 키를 담은 파일 경로. 첫 줄만 읽고 CR과 앞뒤 공백은 제거합니다. 권한이 `600`보다 넓으면 경고합니다
-- `LLM_PROVIDER`: `openai`, `gemini`, `claude` 중 하나. `openai`는 OpenAI 호환 Chat Completions API도 포함
+- `LLM_PROVIDER`: `openai`, `gemini`, `claude`, `claude-code`, `codex` 중 하나. `openai`는 OpenAI 호환 Chat Completions API도 포함하고, `claude-code`와 `codex`는 구독 계정으로 로그인한 CLI를 사용합니다([구독 계정으로 사용하기](#구독-계정으로-사용하기-claude-code--codex-cli))
 - `LLM_BASE_URL`: provider 기본 엔드포인트 대신 사용할 API 엔드포인트
-- `LLM_MODEL`: 사용할 모델명
+- `LLM_MODEL`: 사용할 모델명. 비우면 `openai`는 `gpt-4o-mini`, `claude`는 `claude-sonnet-5-5`, `claude-code`와 `codex`는 CLI 기본 모델을 사용합니다. `gemini`는 반드시 지정합니다
+- `LLM_CLI_PATH`: `claude-code`/`codex` provider에서 실행할 CLI 경로. 기본값은 `claude` 또는 `codex`
+- `LLM_CLI_ARGS`: CLI에 덧붙일 추가 인자. 공백으로 나뉘며 따옴표로 묶은 인자는 지원하지 않습니다. 예: `LLM_CLI_ARGS="--profile kdump"`(Codex)
 - `LLM_MAX_TOKENS`: LLM이 생성할 최대 토큰 수. 기본값 `8192`. Gemini thinking 모델이나 OpenAI reasoning 모델은 내부 추론 토큰도 이 한도에 포함되므로 너무 작게 잡지 않습니다
 - `LLM_OPENAI_TOKEN_PARAM`: OpenAI 요청에 쓸 토큰 한도 필드. `auto`(기본값)는 `LLM_BASE_URL`이 없으면 `max_completion_tokens`, 있으면 `max_tokens`를 사용합니다. `max_tokens`, `max_completion_tokens`, `none`으로 직접 지정할 수 있습니다
-- `LLM_TEMPERATURE`: 비워 두면(기본값) 전송하지 않고 모델 기본값을 사용합니다. OpenAI reasoning 모델은 기본값 외의 temperature를 거부하므로 설정하지 않습니다
+- `LLM_TEMPERATURE`: 비워 두면(기본값) 전송하지 않고 모델 기본값을 사용합니다. `openai`와 `gemini`에만 적용됩니다. OpenAI reasoning 모델은 기본값 외의 temperature를 거부하므로 설정하지 않습니다. Anthropic Messages API는 2026-10-21부터 temperature를 받지 않으므로 `claude` provider에는 설정해도 전송하지 않습니다
 - `LLM_MAX_REPORT_CHARS`: LLM 입력으로 전달할 리포트 최대 문자 수. 초과 시 섹션 단위로 축소합니다
 - `LLM_MASK_SENSITIVE`: LLM 입력의 호스트명, IPv4, MAC, 이메일 마스킹 여부. 기본값 `1`
 - `LLM_TIMEOUT`: LLM API 호출 1회당 제한 시간(초)
@@ -245,8 +247,57 @@ LLM_MODEL="gemini-3.5-flash"
 
 # Claude
 LLM_PROVIDER="claude"
-LLM_MODEL="claude-sonnet-4-5"
+LLM_MODEL="claude-sonnet-5-5"
 ```
+
+### 구독 계정으로 사용하기 (Claude Code / Codex CLI)
+
+API 키 대신 Claude 구독(Pro/Max)이나 ChatGPT 구독으로 로그인한 CLI를 통해 분석할 수 있습니다. 툴이 리포트를 줄이고 마스킹한 뒤 CLI를 비대화 모드로 실행하고, 결과를 분석 파일에 저장합니다. API 키는 필요 없습니다.
+
+```bash
+# Claude Code (Claude Pro/Max 구독)
+LLM_PROVIDER="claude-code"
+LLM_MODEL=""            # 비우면 Claude Code 기본 모델. 예: "sonnet", "opus"
+
+# Codex CLI (ChatGPT 구독)
+LLM_PROVIDER="codex"
+LLM_MODEL=""            # 비우면 Codex 설정(~/.codex/config.toml)의 기본 모델
+```
+
+분석 서버에 CLI를 설치하고, 리포트를 생성할 사용자(보통 root)로 로그인해 둡니다.
+
+| CLI | 설치 | 로그인 | 화면 없는 서버 |
+|------|------|------|------|
+| Claude Code | `npm install -g @anthropic-ai/claude-code` | `claude` 실행 후 `/login` | 다른 PC에서 `claude setup-token`으로 장기 토큰을 발급받아 `CLAUDE_CODE_OAUTH_TOKEN` 환경변수로 지정 |
+| Codex CLI | `npm install -g @openai/codex` | `codex login` | `codex login --device-auth` (기기 코드 방식) |
+
+로그인 정보는 CLI가 저장하고 자동으로 갱신하므로, 한 번 로그인하면 보통 다시 로그인할 필요가 없습니다. 오래 쓰지 않았거나, 다른 곳에서 로그아웃했거나, 비밀번호를 바꿔 세션이 만료되면 CLI 오류(`OAuth session expired` 등)가 분석 파일에 남습니다. 그때 다시 로그인합니다.
+
+화면 없는 서버에서 Claude Code를 쓸 때는 `claude setup-token`으로 발급한 장기 토큰을 root만 읽을 수 있는 파일에 두고, conf 파일에서 export합니다. conf는 셸 스크립트로 실행되므로 export한 변수가 CLI에 전달됩니다.
+
+```bash
+# 토큰 파일 준비 (토큰은 다른 PC에서 claude setup-token으로 발급)
+install -m 600 /dev/null /opt/kdump-tools/secrets/claude-oauth-token
+vi /opt/kdump-tools/secrets/claude-oauth-token
+
+# analyze-kdump.conf
+LLM_PROVIDER="claude-code"
+export CLAUDE_CODE_OAUTH_TOKEN="$(cat /opt/kdump-tools/secrets/claude-oauth-token)"
+```
+
+실행 방식:
+
+- **Claude Code:** `claude -p --output-format text --tools "" --strict-mcp-config --no-session-persistence --system-prompt <프롬프트>`로 실행하고, 리포트는 표준입력으로 넘깁니다. `--bare` 모드는 구독(OAuth) 인증을 읽지 않으므로 쓰지 않습니다.
+- **Codex:** `codex exec --skip-git-repo-check --sandbox read-only --color never --ephemeral --output-last-message <파일> -`로 실행하고, 지시문과 리포트를 합쳐 표준입력으로 넘깁니다.
+- 두 CLI 모두 프로젝트 설정 파일(`CLAUDE.md`, `AGENTS.md`)을 읽지 않도록 빈 임시 디렉터리에서 실행합니다. 또 파일 읽기와 명령 실행 도구를 끄거나(Claude Code) 읽기 전용 샌드박스로 제한합니다(Codex).
+- `LLM_TIMEOUT`이 CLI 실행 제한 시간으로 쓰입니다. 시간을 넘기면 종료 코드 `3`과 함께 사유가 분석 파일에 남습니다.
+- `LLM_MAX_TOKENS`, `LLM_TEMPERATURE`, `LLM_RETRY`, API 키 관련 설정은 CLI provider에 적용되지 않습니다.
+
+주의할 점:
+
+- **이용 약관:** 구독은 개인 사용을 전제로 합니다. 여러 사람이 공유하는 서버에서 자동으로 반복 호출하는 용도라면 API 키 방식이나 팀/엔터프라이즈 플랜을 사용합니다.
+- **사용 한도:** 구독의 시간당 사용 한도에 걸리면 분석이 실패하고, CLI의 오류 메시지가 분석 파일에 기록됩니다.
+- **데이터:** 구독 경로로 보내도 리포트는 외부로 전송됩니다. `LLM_MASK_SENSITIVE` 마스킹은 똑같이 적용됩니다.
 
 ## vmlinux 추가 방법
 

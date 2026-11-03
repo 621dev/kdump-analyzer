@@ -65,8 +65,13 @@ ANALYSIS_PREFIX="kdump-analysis"
 #   openai  - OpenAI 또는 OpenAI 호환 Chat Completions API
 #   gemini  - Google Gemini generateContent API
 #   claude  - Anthropic Claude Messages API
+#   claude-code - Claude 구독(Pro/Max)으로 로그인한 Claude Code CLI (API 키 불필요)
+#   codex       - ChatGPT 구독으로 로그인한 Codex CLI (API 키 불필요)
 # LLM_PROVIDER="openai"
 # LLM_BASE_URL="https://api.openai.com/v1/chat/completions"
+#
+# 비우면 openai는 gpt-4o-mini, claude는 claude-sonnet-5-5,
+# claude-code/codex는 CLI 기본 모델을 사용합니다. gemini는 반드시 지정합니다.
 # LLM_MODEL="gpt-4o-mini"
 #
 # 출력 토큰 한도. thinking/reasoning 모델은 내부 추론 토큰도 포함되므로 넉넉히 잡습니다.
@@ -76,7 +81,8 @@ ANALYSIS_PREFIX="kdump-analysis"
 # 있으면(호환 서버) max_tokens를 사용합니다. max_tokens|max_completion_tokens|none
 # LLM_OPENAI_TOKEN_PARAM="auto"
 #
-# 비워 두면 temperature를 전송하지 않습니다. OpenAI reasoning 모델은 지정 시 오류가 납니다.
+# 비워 두면 temperature를 전송하지 않습니다. openai/gemini에만 적용됩니다.
+# OpenAI reasoning 모델은 지정 시 오류가 나고, claude provider에는 전송하지 않습니다.
 # LLM_TEMPERATURE=0.2
 #
 # 사내 OpenAI 호환 서버(vLLM, Ollama 등) 예:
@@ -90,8 +96,18 @@ ANALYSIS_PREFIX="kdump-analysis"
 #
 # Claude 예:
 # LLM_PROVIDER="claude"
-# LLM_MODEL="claude-sonnet-4-5"
+# LLM_MODEL="claude-sonnet-5-5"
 # LLM_ANTHROPIC_VERSION="2023-06-01"
+#
+# 구독 계정(CLI) 예: 분석 서버에 CLI를 설치하고 실행 사용자로 로그인해 둡니다.
+#   Claude Code: claude 실행 후 /login, 화면 없는 서버는 CLAUDE_CODE_OAUTH_TOKEN 사용
+#   Codex:       codex login 또는 codex login --device-auth
+# LLM_PROVIDER="claude-code"   # 또는 "codex"
+# LLM_MODEL=""                 # 비우면 CLI 기본 모델. 예: "sonnet"
+# LLM_CLI_PATH="/usr/local/bin/claude"
+# LLM_CLI_ARGS=""              # CLI에 덧붙일 추가 인자(공백으로 구분)
+# 이 경우 LLM_TIMEOUT이 CLI 실행 제한 시간으로 쓰이고,
+# LLM_MAX_TOKENS, LLM_TEMPERATURE, LLM_RETRY, API 키 설정은 적용되지 않습니다.
 
 # API 키는 환경변수 LLM_API_KEY로 주입하는 방식을 권장합니다.
 # 파일로 관리해야 한다면 권한을 600으로 제한한 뒤 LLM_API_KEY_FILE을 사용합니다.
