@@ -23,7 +23,9 @@
 ```text
 /opt/kdump-tools/
 ├── README.md
-├── install.sh                 # 설치·명령 등록 (/usr/sbin)
+├── VERSION                    # 버전 번호
+├── .install-info              # 설치한 버전·커밋·시각 (install.sh가 기록)
+├── install.sh                 # 설치·업데이트·명령 등록 (/usr/sbin)
 ├── analyze-kdump.conf.sample
 ├── servers.conf.sample
 ├── bin/
@@ -74,12 +76,37 @@ sudo analyze-kdump -r /var/crash
 - **자동완성:** `/etc/bash_completion.d`가 있으면 `analyze-kdump` 옵션과 경로의 Tab 자동완성도 등록합니다. 새 셸부터 적용됩니다.
 - **도구 점검:** 설치가 끝나면 crash, whiptail, python3, curl, ssh가 있는지 보여줍니다.
 - **설치 옵션:** 설치 위치와 등록 위치는 `--prefix`, `--bin-dir`로 바꿀 수 있습니다.
+- **설치 정보:** 설치한 버전, 커밋, 시각, 원본, 등록 위치를 `/opt/kdump-tools/.install-info`에 기록하고, `install.sh` 자신도 `/opt/kdump-tools`에 복사합니다. 저장소 폴더를 지워도 업데이트와 해제를 할 수 있습니다.
 
 등록을 해제하려면 다음을 실행합니다. 등록한 명령과 자동완성만 지우고, `/opt/kdump-tools`(설정, 서버 목록, 로그, vmlinux)는 남깁니다.
 
 ```bash
 sudo /opt/kdump-tools/install.sh --uninstall
 ```
+
+## 버전 확인과 업데이트
+
+```bash
+analyze-kdump --version
+# analyze-kdump 1.4.0 (commit b13f701), 설치 2026-11-03 16:00
+```
+
+업데이트는 메뉴(`sudo analyze-kdump-ui` → **버전 확인 / 업데이트**)에서 하는 것이 가장 간단합니다.
+
+- **현재·최신 버전 표시:** 현재 설치본의 버전과 커밋, GitHub의 최신 버전과 커밋을 보여주고, 업데이트가 있으면 **변경 내역**(그 사이 커밋 목록)을 볼 수 있습니다.
+- **업데이트 알림:** 마지막으로 확인한 결과는 메인 메뉴에 `▲ 업데이트 가능`으로 표시됩니다. 메인 메뉴를 열 때는 네트워크에 접속하지 않습니다.
+- **GitHub에서 업데이트:** 최신 코드를 받아(`git`, 없으면 `curl`+`tar`) 같은 위치에 다시 설치합니다. 끝나면 새 버전으로 메뉴를 다시 시작할 수 있습니다.
+- **서버의 디렉터리에서 업데이트 (폐쇄망):** 인터넷이 막힌 서버라면 다른 곳에서 받은 저장소를 서버에 복사한 뒤 그 경로를 지정합니다.
+- **유지되는 것:** 설정, 접속 서버 목록, 로그, vmlinux는 그대로 유지됩니다. 업데이트는 root로 실행해야 하고, `install.sh`로 설치한 경우에만 메뉴에서 할 수 있습니다.
+- **저장소 변경:** 업데이트할 저장소와 브랜치는 설정 메뉴의 `KDUMP_TOOLS_REPO`(기본 `621dev/kdump-tools`)와 `KDUMP_TOOLS_BRANCH`(기본 `main`)로 바꿀 수 있습니다.
+
+명령으로 업데이트하려면 저장소에서 최신 코드를 받은 뒤 `install.sh`를 다시 실행합니다.
+
+```bash
+cd kdump-tools && git pull && sudo ./install.sh
+```
+
+원격 서버는 분석 방식에 따라 다릅니다. **원격 설치본 실행** 방식으로 쓰는 서버는 그 서버에서도 업데이트해야 합니다. 연결 테스트 화면에서 원격 서버의 버전을 확인할 수 있습니다. **무설치 실행**은 매번 메뉴를 실행한 서버의 최신 버전을 보내서 쓰고, **vmcore 가져오기**는 원격에 설치할 것이 없습니다.
 
 ## 사용법
 
@@ -408,6 +435,7 @@ sudo analyze-kdump-ui
 | 접속 서버 관리 | 원격 서버를 추가·수정·삭제하고, 기본 분석 방식을 정하고, 연결 테스트(SSH, analyze-kdump, crash, vmcore 개수, 자동 선택될 분석 방식)를 합니다 |
 | 설정 | `analyze-kdump.conf`의 주요 항목(경로, LLM provider·모델·키 파일·CLI·마스킹·한도)을 바꿉니다. API 키 자체는 저장하지 않고 키 파일 경로만 지정합니다 |
 | kdump 원격 전송 안내 | 운영 서버의 vmcore를 이 서버로 자동 전송하는 `/etc/kdump.conf` 설정을 이 서버 주소로 채워 보여줍니다(중앙 분석 서버 구성) |
+| 버전 확인 / 업데이트 | 현재·최신 버전과 변경 내역을 보여주고, GitHub나 서버의 디렉터리에서 업데이트합니다([버전 확인과 업데이트](#버전-확인과-업데이트)) |
 
 ### 상황별 사용 방식
 

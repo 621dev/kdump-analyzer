@@ -13,7 +13,7 @@ _analyze_kdump() {
     esac
 
     if [[ "$cur" == -* ]]; then
-        mapfile -t COMPREPLY < <(compgen -W "-report -r -llm --llm -no-llm --no-llm -config --config --llm-report -h --help" -- "$cur")
+        mapfile -t COMPREPLY < <(compgen -W "-report -r -llm --llm -no-llm --no-llm -config --config --llm-report -h --help --version" -- "$cur")
     else
         mapfile -t COMPREPLY < <(compgen -f -- "$cur")
     fi

@@ -9,6 +9,8 @@
 #   --prefix DIR    설치 디렉터리 (기본 /opt/kdump-tools)
 #   --bin-dir DIR   명령을 등록할 디렉터리 (기본 /usr/sbin)
 #                   RHEL 계열 sudo의 secure_path에는 /usr/local/* 가 없어서 기본값을 /usr/sbin으로 둡니다.
+#   --commit SHA    설치 정보에 기록할 커밋 (git 저장소가 아닌 원본에서 설치할 때, 메뉴 업데이트가 사용)
+#   --source TEXT   설치 정보에 기록할 원본 설명
 set -e
 
 SRC_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
@@ -18,6 +20,8 @@ COMPLETION_DIR="/etc/bash_completion.d"
 COMPLETION_NAME="kdump-tools"
 ACTION="install"
 SKIPPED=0
+COMMIT=""
+SOURCE_LABEL=""
 
 usage() {
     sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
@@ -38,6 +42,16 @@ while [ "$#" -gt 0 ]; do
         --bin-dir)
             [ -n "${2:-}" ] || die "--bin-dir에는 디렉터리가 필요합니다."
             BIN_DIR="$2"
+            shift 2
+            ;;
+        --commit)
+            [ -n "${2:-}" ] || die "--commit에는 커밋 값이 필요합니다."
+            COMMIT="$2"
+            shift 2
+            ;;
+        --source)
+            [ -n "${2:-}" ] || die "--source에는 설명이 필요합니다."
+            SOURCE_LABEL="$2"
             shift 2
             ;;
         --uninstall)
@@ -66,11 +80,13 @@ install_files() {
         echo "파일 복사: $SRC_DIR -> $PREFIX"
         mkdir -p "$PREFIX/bin"
         install -m 755 "$SRC_DIR"/bin/* "$PREFIX/bin/"
-        for f in README.md analyze-kdump.conf.sample servers.conf.sample; do
+        for f in README.md VERSION analyze-kdump.conf.sample servers.conf.sample; do
             if [ -f "$SRC_DIR/$f" ]; then
                 install -m 644 "$SRC_DIR/$f" "$PREFIX/$f"
             fi
         done
+        # 저장소 폴더를 지워도 업데이트·해제를 할 수 있도록 설치 스크립트도 함께 둡니다.
+        install -m 755 "$SRC_DIR/install.sh" "$PREFIX/install.sh"
         for f in tests completion; do
             if [ -d "$SRC_DIR/$f" ]; then
                 mkdir -p "$PREFIX/$f"
@@ -135,8 +151,33 @@ ssh|원격 서버 분석
 EOF
 }
 
+# 설치한 버전과 원본을 기록합니다. analyze-kdump --version과 메뉴의 업데이트 화면이 읽습니다.
+write_install_info() {
+    local info="$PREFIX/.install-info" version commit="$COMMIT"
+
+    version=$(head -n 1 "$PREFIX/VERSION" 2>/dev/null | tr -d '[:space:]')
+    if [ -z "$commit" ] && command -v git >/dev/null 2>&1; then
+        commit=$(git -c safe.directory="$SRC_DIR" -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || true)
+    fi
+    # 설치 디렉터리에서 다시 실행한 경우(파일이 바뀌지 않음)에만 이전 커밋 기록을 유지합니다.
+    if [ -z "$commit" ] && [ -f "$info" ] && [ "$(readlink -f "$SRC_DIR")" = "$(readlink -f "$PREFIX")" ]; then
+        commit=$(sed -n 's/^COMMIT=//p' "$info" | head -n 1)
+    fi
+
+    {
+        echo "VERSION=${version:-unknown}"
+        echo "COMMIT=$commit"
+        echo "INSTALLED_AT=$(date '+%Y-%m-%d %H:%M')"
+        echo "SOURCE=${SOURCE_LABEL:-$SRC_DIR}"
+        echo "BIN_DIR=$BIN_DIR"
+    } > "$info"
+    chmod 644 "$info"
+    echo "설치 정보: v${version:-unknown}${commit:+ (${commit:0:7})}"
+}
+
 do_install() {
     install_files
+    write_install_info
     link_commands
     install_completion
     check_dependencies
