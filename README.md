@@ -7,11 +7,13 @@
 ## 주요 기능
 
 - `vmcore` 파일의 커널 버전 자동 확인
-- 커널 버전에 맞는 `vmlinux` 경로 자동 매칭
-- 매칭되는 `vmlinux`가 없을 때 필요한 설치 명령 안내
+- 커널 버전에 맞는 `vmlinux` 경로 자동 매칭 (`VMLINUX_BASE`, 설치된 debuginfo 경로 순으로 탐색)
+- 매칭되는 `vmlinux`가 없을 때 필요한 설치 명령 안내 (RHEL 계열, Debian/Ubuntu)
 - `crash <vmlinux> <vmcore>` 실행 자동화
-- `-report` 옵션으로 셸 진입 없이 요약 리포트 파일 생성
-- 선택적으로 LLM을 연동해 요약 리포트에 원인분석과 조치 권고 추가
+- `/var/crash` 같은 덤프 디렉터리를 지정하면 가장 최근 `vmcore` 자동 선택
+- `-report` 옵션으로 셸 진입 없이 명령별 섹션으로 구분된 요약 리포트 파일 생성
+- 선택적으로 LLM을 연동해 원인분석과 조치 권고 추가 (민감정보 마스킹, 섹션 단위 입력 축소)
+- 자동화에서 결과를 판별할 수 있는 종료 코드
 
 ## 디렉터리 구조
 
@@ -37,6 +39,8 @@
 - `crash`
 - 분석 대상 `vmcore`
 - `vmcore`의 커널 버전과 일치하는 `vmlinux`
+- LLM 분석을 쓸 경우 `curl`, `python3`
+- 분석 서버 메모리: `crash`가 커널 디버그 정보를 읽을 때 RHEL 9 커널 기준 약 1.5GB를 사용합니다. 메모리가 2GB 이하인 서버나 VM에서는 swap을 추가합니다. 메모리가 부족하면 `crash`가 OOM으로 강제 종료되고 종료 코드 `2`가 반환됩니다.
 
 RHEL 계열 시스템에서는 보통 `crash`와 `debuginfo-install`을 사용할 수 있어야 합니다.
 
@@ -81,7 +85,13 @@ LLM_API_KEY="<api-key>" /opt/kdump-tools/bin/analyze-kdump -llm /path/to/vmcore
 /opt/kdump-tools/bin/analyze-kdump -config /path/to/analyze-kdump.conf -report /path/to/vmcore
 ```
 
-conf 파일에서 `DEFAULT_VMCORE`를 지정하면 명령줄에서 vmcore 경로를 생략할 수 있습니다.
+vmcore 파일 대신 디렉터리를 지정할 수도 있습니다. 디렉터리 안에 `vmcore`가 있으면 그 파일을, 없으면 하위 디렉터리의 `*/vmcore` 중 가장 최근 파일을 사용합니다.
+
+```bash
+/opt/kdump-tools/bin/analyze-kdump -report /var/crash
+```
+
+conf 파일에서 `DEFAULT_VMCORE`를 지정하면 명령줄에서 vmcore 경로를 생략할 수 있습니다. `DEFAULT_VMCORE="/var/crash"`처럼 디렉터리로 지정하면 항상 최근 덤프를 분석합니다.
 
 ```bash
 /opt/kdump-tools/bin/analyze-kdump -report
@@ -90,11 +100,23 @@ conf 파일에서 `DEFAULT_VMCORE`를 지정하면 명령줄에서 vmcore 경로
 스크립트는 다음 순서로 동작합니다.
 
 1. `crash --osrelease <vmcore>`로 `vmcore`의 커널 버전을 확인합니다.
-2. `/opt/kdump-tools/vmlinux/<kernel-version>/vmlinux` 파일이 있는지 확인합니다.
+2. 다음 순서로 `vmlinux`를 찾습니다.
+   - `${VMLINUX_BASE}/<kernel-version>/vmlinux`
+   - `/usr/lib/debug/lib/modules/<kernel-version>/vmlinux` (RHEL 계열 debuginfo 설치 경로)
+   - `/usr/lib/debug/boot/vmlinux-<kernel-version>` (Debian/Ubuntu dbgsym 설치 경로)
 3. 파일이 있으면 기본 모드에서는 `crash <vmlinux> <vmcore>`를 실행합니다.
-4. `-report` 모드에서는 `crash` 셸에 진입하지 않고 `/opt/kdump-tools/logs/kdump-report-<timestamp>.txt` 파일을 생성합니다.
+4. `-report` 모드에서는 `crash` 셸에 진입하지 않고 `/opt/kdump-tools/logs/kdump-report-<timestamp>-<pid>.txt` 파일을 생성합니다.
 5. LLM 분석이 활성화되어 있으면 생성된 리포트 내용을 API로 보내 원인분석, 근거, 영향 범위, 권고 조치를 별도 분석 파일로 저장합니다.
 6. 파일이 없으면 필요한 `vmlinux` 준비 명령을 안내하고 종료합니다.
+
+### 종료 코드
+
+| 코드 | 의미 |
+|------|------|
+| `0` | 정상 |
+| `1` | 사용법, 환경, 입력 오류 (vmcore/vmlinux 없음, conf 권한 문제 등) |
+| `2` | `crash` 실행 실패. 리포트 끝의 `crash 실행 로그` 섹션에 오류가 남고, LLM 분석은 건너뜀 |
+| `3` | 리포트는 생성했지만 LLM 분석 실패. 사유는 분석 파일에 기록됨 |
 
 예상 출력 예시는 다음과 같습니다.
 
@@ -107,17 +129,40 @@ vmlinux: /opt/kdump-tools/vmlinux/4.18.0-553.el8_10.x86_64/vmlinux
 리포트 모드에서는 다음과 같이 생성된 파일 경로를 출력합니다.
 
 ```text
-report:  /opt/kdump-tools/logs/kdump-report-20260701-100000.txt
-analysis: /opt/kdump-tools/logs/kdump-analysis-20260701-100000.txt
+report:  /opt/kdump-tools/logs/kdump-report-20260701-100000-12345.txt
+analysis: /opt/kdump-tools/logs/kdump-analysis-20260701-100000-12345.txt
 ```
 
-리포트에는 기본 메타데이터와 함께 `sys`, `bt`, `bt -a`, `ps`, `log`, `kmem -i`, `mount`, `files` 명령 결과가 포함됩니다.
+리포트와 분석 파일은 같은 실행 ID(`<timestamp>-<pid>`)를 쓰므로 짝을 쉽게 찾을 수 있고, 같은 초에 여러 번 실행해도 덮어쓰지 않습니다.
 
-LLM 분석이 활성화된 경우 원본 crash 리포트와 별도로 `kdump-analysis-<timestamp>.txt` 파일이 생성됩니다. API 호출이나 응답 파싱에 실패해도 원본 crash 리포트는 유지되며, 실패 이유는 분석 파일에 기록됩니다.
+리포트에는 기본 메타데이터와 함께 `sys`, `bt`, `bt -a`, `ps`, `log`, `kmem -i`, `mount`, `files` 명령 결과가 `===== crash> <명령> =====` 섹션으로 구분되어 들어갑니다. 마지막 `===== crash 실행 로그 =====` 섹션에는 crash 시작 메시지, 경고, 명령 오류가 남습니다.
+
+각 명령의 출력은 crash의 `명령 > 파일` 리다이렉션으로 따로 받습니다. 따라서 `REPORT_COMMANDS`에 직접 `>` 리다이렉션을 쓴 명령은 리포트 섹션이 비어 있게 됩니다. `set scroll off`처럼 `set`으로 시작하는 명령은 섹션을 만들지 않습니다.
+
+LLM 분석이 활성화된 경우 원본 crash 리포트와 별도로 `kdump-analysis-<timestamp>-<pid>.txt` 파일이 생성됩니다. API 호출이나 응답 파싱에 실패해도 원본 crash 리포트는 유지되며, 실패 이유는 분석 파일에 기록되고 종료 코드 `3`을 반환합니다. LLM 출력이 토큰 한도에서 잘린 경우 분석 파일 끝에 경고가 붙습니다.
+
+### LLM 입력 축소와 민감정보 마스킹
+
+리포트가 `LLM_MAX_REPORT_CHARS`보다 길면 섹션 단위로 줄입니다. 짧은 섹션(`sys`, `kmem -i` 등)은 그대로 두고, 긴 섹션끼리 남은 분량을 가중치에 따라 나눕니다. `bt`, `log`가 가장 많이 배정받고, `log`는 패닉 메시지가 있는 뒷부분을 남깁니다.
+
+`LLM_MASK_SENSITIVE`가 켜져 있으면(기본값) LLM으로 보내는 내용에서만 호스트명(`sys`의 `NODENAME`), IPv4 주소, MAC 주소, 이메일을 `<HOSTNAME>`, `<IPV4>`, `<MAC>`, `<EMAIL>`로 바꿉니다. 로컬 리포트 파일은 원본 그대로 유지됩니다. IPv6 주소, 사용자명, 파일 경로는 마스킹하지 않으니, 외부 전송이 곤란한 환경이라면 `LLM_BASE_URL`로 사내 OpenAI 호환 서버(vLLM, Ollama 등)를 사용합니다.
+
+```bash
+LLM_PROVIDER="openai"
+LLM_BASE_URL="http://llm.internal:8000/v1/chat/completions"
+LLM_MODEL="<served-model-name>"
+```
 
 ## 설정 파일
 
 `analyze-kdump.conf.sample`은 bash 변수 형식으로 작성된 샘플입니다. 실제 운영 설정은 `/opt/kdump-tools/analyze-kdump.conf` 또는 `-config`로 지정한 파일에 작성합니다.
+
+conf 파일은 셸 스크립트로 읽혀 실행되므로, 소유자가 root 또는 실행 사용자이고 group/other 쓰기 권한이 없어야 합니다. 조건을 만족하지 않으면 스크립트가 실행을 거부합니다.
+
+```bash
+chown root:root /opt/kdump-tools/analyze-kdump.conf
+chmod 644 /opt/kdump-tools/analyze-kdump.conf
+```
 
 ```bash
 VMLINUX_BASE="/opt/kdump-tools/vmlinux"
@@ -126,13 +171,13 @@ REPORT_PREFIX="kdump-report"
 ANALYSIS_PREFIX="kdump-analysis"
 
 # 선택 사항
-DEFAULT_VMCORE="/var/crash/127.0.0.1-2026-07-01-10:00:00/vmcore"
+DEFAULT_VMCORE="/var/crash"
 
 # 선택 사항: LLM 분석
 LLM_ENABLED=0
 LLM_PROVIDER="openai"
 LLM_MODEL="gpt-4o-mini"
-LLM_MAX_TOKENS=2048
+LLM_MAX_TOKENS=8192
 LLM_MAX_REPORT_CHARS=60000
 LLM_TIMEOUT=120
 ```
@@ -143,22 +188,28 @@ LLM_TIMEOUT=120
 - `REPORT_DIR`: `-report` 결과 파일을 저장할 디렉터리
 - `REPORT_PREFIX`: 생성되는 리포트 파일명 접두어
 - `ANALYSIS_PREFIX`: 생성되는 LLM 분석 파일명 접두어
-- `DEFAULT_VMCORE`: 명령줄 인자가 없을 때 사용할 기본 `vmcore` 경로
+- `DEFAULT_VMCORE`: 명령줄 인자가 없을 때 사용할 기본 `vmcore` 경로. 디렉터리를 지정하면 가장 최근 `vmcore` 사용
 - `REPORT_COMMANDS`: 리포트에 포함할 `crash` 명령 목록
 - `REPORT_COMMAND_FILE`: 별도 파일로 관리하는 `crash` 명령 목록
 - `LLM_ENABLED`: `1`, `true`, `yes`, `on`으로 설정하면 `-report` 실행 시 LLM 분석 추가
 - `LLM_API_KEY`: LLM API 키. conf 파일에 저장하기보다 환경변수로 주입하는 방식을 권장
-- `LLM_API_KEY_FILE`: API 키를 담은 파일 경로. 파일 권한은 `600` 권장
-- `LLM_PROVIDER`: `openai`, `gemini`, `claude` 중 하나. `openai`는 OpenAI 호환 Chat Completions API도 포함
+- `LLM_API_KEY_FILE`: API 키를 담은 파일 경로. 첫 줄만 읽고 CR과 앞뒤 공백은 제거합니다. 권한이 `600`보다 넓으면 경고합니다
+- `LLM_PROVIDER`: `openai`, `gemini`, `claude`, `claude-code`, `codex` 중 하나. `openai`는 OpenAI 호환 Chat Completions API도 포함하고, `claude-code`와 `codex`는 구독 계정으로 로그인한 CLI를 사용합니다([구독 계정으로 사용하기](#구독-계정으로-사용하기-claude-code--codex-cli))
 - `LLM_BASE_URL`: provider 기본 엔드포인트 대신 사용할 API 엔드포인트
-- `LLM_MODEL`: 사용할 모델명
-- `LLM_MAX_TOKENS`: LLM이 생성할 최대 토큰 수
-- `LLM_MAX_REPORT_CHARS`: LLM 입력으로 전달할 리포트 최대 문자 수
-- `LLM_TIMEOUT`: LLM API 호출 제한 시간(초)
+- `LLM_MODEL`: 사용할 모델명. 비우면 `openai`는 `gpt-4o-mini`, `claude`는 `claude-sonnet-5-5`, `claude-code`와 `codex`는 CLI 기본 모델을 사용합니다. `gemini`는 반드시 지정합니다
+- `LLM_CLI_PATH`: `claude-code`/`codex` provider에서 실행할 CLI 경로. 기본값은 `claude` 또는 `codex`
+- `LLM_CLI_ARGS`: CLI에 덧붙일 추가 인자. 공백으로 나뉘며 따옴표로 묶은 인자는 지원하지 않습니다. 예: `LLM_CLI_ARGS="--profile kdump"`(Codex)
+- `LLM_MAX_TOKENS`: LLM이 생성할 최대 토큰 수. 기본값 `8192`. Gemini thinking 모델이나 OpenAI reasoning 모델은 내부 추론 토큰도 이 한도에 포함되므로 너무 작게 잡지 않습니다
+- `LLM_OPENAI_TOKEN_PARAM`: OpenAI 요청에 쓸 토큰 한도 필드. `auto`(기본값)는 `LLM_BASE_URL`이 없으면 `max_completion_tokens`, 있으면 `max_tokens`를 사용합니다. `max_tokens`, `max_completion_tokens`, `none`으로 직접 지정할 수 있습니다
+- `LLM_TEMPERATURE`: 비워 두면(기본값) 전송하지 않고 모델 기본값을 사용합니다. `openai`와 `gemini`에만 적용됩니다. OpenAI reasoning 모델은 기본값 외의 temperature를 거부하므로 설정하지 않습니다. Anthropic Messages API는 2026-10-21부터 temperature를 받지 않으므로 `claude` provider에는 설정해도 전송하지 않습니다
+- `LLM_MAX_REPORT_CHARS`: LLM 입력으로 전달할 리포트 최대 문자 수. 초과 시 섹션 단위로 축소합니다
+- `LLM_MASK_SENSITIVE`: LLM 입력의 호스트명, IPv4, MAC, 이메일 마스킹 여부. 기본값 `1`
+- `LLM_TIMEOUT`: LLM API 호출 1회당 제한 시간(초)
+- `LLM_RETRY`: 타임아웃, 429, 5xx 같은 일시 오류 시 재시도 횟수. 기본값 `2`
 - `LLM_PROMPT_FILE`: 기본 원인분석 프롬프트 대신 사용할 프롬프트 파일
 - `LLM_ANTHROPIC_VERSION`: Claude API에 전달할 Anthropic API 버전. 기본값은 `2023-06-01`
 
-환경변수로도 기본값을 바꿀 수 있지만, 운영 환경에서는 conf 파일로 관리하는 방식을 권장합니다.
+설정 우선순위는 **명령줄 옵션 > 환경변수 > conf 파일 > 스크립트 기본값**입니다. 셸에 예전에 export한 `LLM_MODEL` 같은 변수가 남아 있으면 conf 값보다 우선 적용되니 주의합니다. 운영 환경에서는 conf 파일로 관리하고, 환경변수는 API 키처럼 일회성으로 주입할 값에만 쓰는 방식을 권장합니다.
 
 API 키는 다음처럼 실행 시 환경변수로 전달할 수 있습니다.
 
@@ -196,17 +247,79 @@ LLM_MODEL="gemini-3.5-flash"
 
 # Claude
 LLM_PROVIDER="claude"
-LLM_MODEL="claude-sonnet-4-5"
+LLM_MODEL="claude-sonnet-5-5"
 ```
+
+### 구독 계정으로 사용하기 (Claude Code / Codex CLI)
+
+API 키 대신 Claude 구독(Pro/Max)이나 ChatGPT 구독으로 로그인한 CLI를 통해 분석할 수 있습니다. 툴이 리포트를 줄이고 마스킹한 뒤 CLI를 비대화 모드로 실행하고, 결과를 분석 파일에 저장합니다. API 키는 필요 없습니다.
+
+```bash
+# Claude Code (Claude Pro/Max 구독)
+LLM_PROVIDER="claude-code"
+LLM_MODEL=""            # 비우면 Claude Code 기본 모델. 예: "sonnet", "opus"
+
+# Codex CLI (ChatGPT 구독)
+LLM_PROVIDER="codex"
+LLM_MODEL=""            # 비우면 Codex 설정(~/.codex/config.toml)의 기본 모델
+```
+
+분석 서버에 CLI를 설치하고, 리포트를 생성할 사용자(보통 root)로 로그인해 둡니다.
+
+| CLI | 설치 | 로그인 | 화면 없는 서버 |
+|------|------|------|------|
+| Claude Code | `npm install -g @anthropic-ai/claude-code` | `claude` 실행 후 `/login` | 다른 PC에서 `claude setup-token`으로 장기 토큰을 발급받아 `CLAUDE_CODE_OAUTH_TOKEN` 환경변수로 지정 |
+| Codex CLI | `npm install -g @openai/codex` | `codex login` | `codex login --device-auth` (기기 코드 방식) |
+
+로그인 정보는 CLI가 저장하고 자동으로 갱신하므로, 한 번 로그인하면 보통 다시 로그인할 필요가 없습니다. 오래 쓰지 않았거나, 다른 곳에서 로그아웃했거나, 비밀번호를 바꿔 세션이 만료되면 CLI 오류(`OAuth session expired` 등)가 분석 파일에 남습니다. 그때 다시 로그인합니다.
+
+화면 없는 서버에서 Claude Code를 쓸 때는 `claude setup-token`으로 발급한 장기 토큰을 root만 읽을 수 있는 파일에 두고, conf 파일에서 export합니다. conf는 셸 스크립트로 실행되므로 export한 변수가 CLI에 전달됩니다.
+
+```bash
+# 토큰 파일 준비 (토큰은 다른 PC에서 claude setup-token으로 발급)
+install -m 600 /dev/null /opt/kdump-tools/secrets/claude-oauth-token
+vi /opt/kdump-tools/secrets/claude-oauth-token
+
+# analyze-kdump.conf
+LLM_PROVIDER="claude-code"
+export CLAUDE_CODE_OAUTH_TOKEN="$(cat /opt/kdump-tools/secrets/claude-oauth-token)"
+```
+
+실행 방식:
+
+- **Claude Code:** `claude -p --output-format text --tools "" --strict-mcp-config --no-session-persistence --system-prompt <프롬프트>`로 실행하고, 리포트는 표준입력으로 넘깁니다. `--bare` 모드는 구독(OAuth) 인증을 읽지 않으므로 쓰지 않습니다.
+- **Codex:** `codex exec --skip-git-repo-check --sandbox read-only --color never --ephemeral --output-last-message <파일> -`로 실행하고, 지시문과 리포트를 합쳐 표준입력으로 넘깁니다.
+- 두 CLI 모두 프로젝트 설정 파일(`CLAUDE.md`, `AGENTS.md`)을 읽지 않도록 빈 임시 디렉터리에서 실행합니다. 또 파일 읽기와 명령 실행 도구를 끄거나(Claude Code) 읽기 전용 샌드박스로 제한합니다(Codex).
+- `LLM_TIMEOUT`이 CLI 실행 제한 시간으로 쓰입니다. 시간을 넘기면 종료 코드 `3`과 함께 사유가 분석 파일에 남습니다.
+- `LLM_MAX_TOKENS`, `LLM_TEMPERATURE`, `LLM_RETRY`, API 키 관련 설정은 CLI provider에 적용되지 않습니다.
+
+주의할 점:
+
+- **이용 약관:** 구독은 개인 사용을 전제로 합니다. 여러 사람이 공유하는 서버에서 자동으로 반복 호출하는 용도라면 API 키 방식이나 팀/엔터프라이즈 플랜을 사용합니다.
+- **사용 한도:** 구독의 시간당 사용 한도에 걸리면 분석이 실패하고, CLI의 오류 메시지가 분석 파일에 기록됩니다.
+- **데이터:** 구독 경로로 보내도 리포트는 외부로 전송됩니다. `LLM_MASK_SENSITIVE` 마스킹은 똑같이 적용됩니다.
 
 ## vmlinux 추가 방법
 
-분석하려는 `vmcore`의 커널 버전에 해당하는 `vmlinux`가 없다면 디버그 심볼을 설치한 뒤 `/opt/kdump-tools/vmlinux` 아래에 복사합니다.
+분석하려는 `vmcore`의 커널 버전에 해당하는 `vmlinux`가 없다면 디버그 심볼을 설치합니다. 설치된 debuginfo 경로는 자동으로 탐색하므로, 분석 서버에 debuginfo를 설치했다면 복사하지 않아도 됩니다.
+
+RHEL 계열 (`kernel-rt`, Oracle `kernel-uek`이면 패키지 이름을 바꿉니다):
 
 ```bash
 KVER="<kernel-version>"
-
 dnf debuginfo-install -y "kernel-$KVER"
+```
+
+Debian/Ubuntu (dbgsym 저장소 설정 필요):
+
+```bash
+KVER="<kernel-version>"
+apt-get install -y "linux-image-$KVER-dbgsym"
+```
+
+여러 커널 버전의 `vmlinux`를 한 곳에 보관하려면 `/opt/kdump-tools/vmlinux` 아래에 복사합니다.
+
+```bash
 mkdir -p "/opt/kdump-tools/vmlinux/$KVER"
 cp "/usr/lib/debug/lib/modules/$KVER/vmlinux" "/opt/kdump-tools/vmlinux/$KVER/"
 ```
@@ -216,6 +329,34 @@ cp "/usr/lib/debug/lib/modules/$KVER/vmlinux" "/opt/kdump-tools/vmlinux/$KVER/"
 ```text
 /opt/kdump-tools/vmlinux/4.18.0-553.el8_10.x86_64/vmlinux
 ```
+
+### 커널 모듈 심볼
+
+패닉이 커널 모듈(서드파티 드라이버 등) 안에서 발생했다면 모듈 debuginfo를 불러와야 `bt`에 심볼이 제대로 나옵니다. `REPORT_COMMANDS` 맨 앞에 `mod -S`를 추가합니다. 모듈 debuginfo가 기본 경로에 없으면 `mod -S <디렉터리>`로 지정합니다.
+
+```bash
+REPORT_COMMANDS="
+mod -S
+sys
+bt
+bt -a
+log
+"
+```
+
+hung task 패닉을 분석할 때는 D 상태 프로세스의 스택이 핵심이므로 `foreach UN bt`를 추가하는 것을 권장합니다.
+
+## 테스트 VM에서 검증하기
+
+`tests/vm/kdump-vm-test.sh`는 테스트용 RHEL 계열 VM에서 실제 vmcore를 만들어 `analyze-kdump`를 검증합니다. **운영 서버에서는 실행하지 않습니다.** `panic` 단계는 커널을 즉시 패닉시킵니다.
+
+```bash
+sudo ./tests/vm/kdump-vm-test.sh setup    # kdump 설정. crashkernel이 새로 잡히면 재부팅 후 다시 실행
+sudo ./tests/vm/kdump-vm-test.sh panic    # sysrq 패닉 -> 재부팅 후 /var/crash에 vmcore 생성
+sudo ./tests/vm/kdump-vm-test.sh verify   # debuginfo 설치, analyze-kdump -r 실행, 섹션별 출력 점검
+```
+
+`verify --llm`을 쓰면 `LLM_API_KEY` 등 LLM 설정으로 분석 파일 생성까지 확인합니다.
 
 ## 로그 디렉터리
 

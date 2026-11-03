@@ -6,9 +6,17 @@
 #
 # 스크립트 실행 시 다른 conf 파일을 지정할 수도 있습니다.
 #   analyze-kdump -config /path/to/analyze-kdump.conf -report /path/to/vmcore
+#
+# 이 파일은 셸 스크립트로 실행됩니다. 소유자가 root 또는 실행 사용자이고
+# group/other 쓰기 권한이 없어야 하며, 그렇지 않으면 실행을 거부합니다.
+#   chmod 644 /opt/kdump-tools/analyze-kdump.conf
+#
+# 설정 우선순위: 명령줄 옵션 > 환경변수 > conf 파일 > 스크립트 기본값
 
 # 커널 버전별 vmlinux 파일을 보관하는 기준 디렉터리:
 #   ${VMLINUX_BASE}/<kernel-version>/vmlinux
+# 여기에 없으면 /usr/lib/debug/lib/modules/<kver>/vmlinux,
+# /usr/lib/debug/boot/vmlinux-<kver> 순으로 찾습니다.
 VMLINUX_BASE="/opt/kdump-tools/vmlinux"
 
 # -report 결과 파일을 저장할 디렉터리.
@@ -22,12 +30,17 @@ ANALYSIS_PREFIX="kdump-analysis"
 
 # 선택 사항: 기본 vmcore 경로. 이 값을 설정하면 명령줄에서
 # /path/to/vmcore 인자를 생략할 수 있습니다.
-# DEFAULT_VMCORE="/var/crash/127.0.0.1-2026-07-01-10:00:00/vmcore"
+# 디렉터리를 지정하면 하위의 */vmcore 중 가장 최근 파일을 사용합니다.
+# DEFAULT_VMCORE="/var/crash"
 
 # 선택 사항: 리포트에 포함할 crash 명령 목록.
 # 설정하지 않으면 스크립트 기본 명령 목록을 사용합니다.
+# 각 명령 출력은 "===== crash> <명령> =====" 섹션으로 저장되므로
+# 명령에 직접 > 리다이렉션을 쓰지 않습니다.
+# 모듈 심볼이 필요하면 맨 앞에 mod -S, hung task 분석에는 foreach UN bt를 추가합니다.
 # REPORT_COMMANDS="
 # set scroll off
+# mod -S
 # sys
 # bt
 # bt -a
@@ -52,10 +65,30 @@ ANALYSIS_PREFIX="kdump-analysis"
 #   openai  - OpenAI 또는 OpenAI 호환 Chat Completions API
 #   gemini  - Google Gemini generateContent API
 #   claude  - Anthropic Claude Messages API
+#   claude-code - Claude 구독(Pro/Max)으로 로그인한 Claude Code CLI (API 키 불필요)
+#   codex       - ChatGPT 구독으로 로그인한 Codex CLI (API 키 불필요)
 # LLM_PROVIDER="openai"
 # LLM_BASE_URL="https://api.openai.com/v1/chat/completions"
+#
+# 비우면 openai는 gpt-4o-mini, claude는 claude-sonnet-5-5,
+# claude-code/codex는 CLI 기본 모델을 사용합니다. gemini는 반드시 지정합니다.
 # LLM_MODEL="gpt-4o-mini"
-# LLM_MAX_TOKENS=2048
+#
+# 출력 토큰 한도. thinking/reasoning 모델은 내부 추론 토큰도 포함되므로 넉넉히 잡습니다.
+# LLM_MAX_TOKENS=8192
+#
+# OpenAI 토큰 한도 필드. auto는 LLM_BASE_URL이 없으면 max_completion_tokens,
+# 있으면(호환 서버) max_tokens를 사용합니다. max_tokens|max_completion_tokens|none
+# LLM_OPENAI_TOKEN_PARAM="auto"
+#
+# 비워 두면 temperature를 전송하지 않습니다. openai/gemini에만 적용됩니다.
+# OpenAI reasoning 모델은 지정 시 오류가 나고, claude provider에는 전송하지 않습니다.
+# LLM_TEMPERATURE=0.2
+#
+# 사내 OpenAI 호환 서버(vLLM, Ollama 등) 예:
+# LLM_PROVIDER="openai"
+# LLM_BASE_URL="http://llm.internal:8000/v1/chat/completions"
+# LLM_MODEL="<served-model-name>"
 #
 # Gemini 예:
 # LLM_PROVIDER="gemini"
@@ -63,8 +96,18 @@ ANALYSIS_PREFIX="kdump-analysis"
 #
 # Claude 예:
 # LLM_PROVIDER="claude"
-# LLM_MODEL="claude-sonnet-4-5"
+# LLM_MODEL="claude-sonnet-5-5"
 # LLM_ANTHROPIC_VERSION="2023-06-01"
+#
+# 구독 계정(CLI) 예: 분석 서버에 CLI를 설치하고 실행 사용자로 로그인해 둡니다.
+#   Claude Code: claude 실행 후 /login, 화면 없는 서버는 CLAUDE_CODE_OAUTH_TOKEN 사용
+#   Codex:       codex login 또는 codex login --device-auth
+# LLM_PROVIDER="claude-code"   # 또는 "codex"
+# LLM_MODEL=""                 # 비우면 CLI 기본 모델. 예: "sonnet"
+# LLM_CLI_PATH="/usr/local/bin/claude"
+# LLM_CLI_ARGS=""              # CLI에 덧붙일 추가 인자(공백으로 구분)
+# 이 경우 LLM_TIMEOUT이 CLI 실행 제한 시간으로 쓰이고,
+# LLM_MAX_TOKENS, LLM_TEMPERATURE, LLM_RETRY, API 키 설정은 적용되지 않습니다.
 
 # API 키는 환경변수 LLM_API_KEY로 주입하는 방식을 권장합니다.
 # 파일로 관리해야 한다면 권한을 600으로 제한한 뒤 LLM_API_KEY_FILE을 사용합니다.
@@ -74,11 +117,16 @@ ANALYSIS_PREFIX="kdump-analysis"
 #   chmod 600 /opt/kdump-tools/secrets/gemini-api-key
 # LLM_API_KEY_FILE="/opt/kdump-tools/secrets/gemini-api-key"
 
-# LLM 입력으로 보낼 리포트 최대 문자 수. 초과 시 앞/뒤 일부만 전달합니다.
+# LLM 입력으로 보낼 리포트 최대 문자 수. 초과 시 섹션 단위로 줄이며,
+# bt와 log에 더 많은 분량을 배정하고 log는 패닉 메시지가 있는 뒷부분을 남깁니다.
 # LLM_MAX_REPORT_CHARS=60000
 
-# LLM API 호출 제한 시간(초).
+# LLM 입력에서 호스트명, IPv4, MAC, 이메일을 마스킹합니다. 로컬 리포트는 원본 유지.
+# LLM_MASK_SENSITIVE=1
+
+# LLM API 호출 1회당 제한 시간(초)과 일시 오류(타임아웃, 429, 5xx) 재시도 횟수.
 # LLM_TIMEOUT=120
+# LLM_RETRY=2
 
 # 선택 사항: 기본 분석 프롬프트를 별도 파일로 교체합니다.
 # LLM_PROMPT_FILE="/opt/kdump-tools/llm-prompt.txt"
