@@ -19,11 +19,13 @@ import re
 import secrets
 import shlex
 import socketserver
+import base64
 import subprocess
 import sys
 import threading
 import time
 import urllib.parse
+import urllib.request
 import uuid
 import webbrowser
 
@@ -44,7 +46,11 @@ DEFAULT_SETTINGS = {
     "provider": "openai", "model": "", "base_url": "", "api_key_file": "",
     "cli_path": "", "cli_token_file": "", "cli_args": "",
     "mask": True, "max_report_chars": 60000, "max_tokens": 8192, "timeout": 300,
+    "update_repo": "621dev/kdump-tools", "update_branch": "main",
 }
+REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+BRANCH_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
+TOOL_VERSION_RE = re.compile(r"analyze-kdump (\S+?)(?: \(commit ([0-9a-f]+)\))?(?:, 설치 (.+))?$")
 DEFAULT_SERVER = {
     "name": "", "target": "", "port": 22, "key_file": "", "sudo": True,
     "tool": "/opt/kdump-tools/bin/analyze-kdump", "crash_dir": "/var/crash", "method": "auto",
@@ -325,12 +331,197 @@ def list_vmcores(server):
     return items
 
 
+# ---------------------------------------------------------------- 버전과 업그레이드
+
+def git(*args, timeout=30):
+    try:
+        result = subprocess.run(["git", "-c", "safe.directory=*", "-C", REPO_DIR] + list(args),
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+        return result.returncode, result.stdout.decode("utf-8", errors="replace").strip()
+    except subprocess.TimeoutExpired:
+        return 124, "git 시간 초과"
+    except OSError:
+        return 127, "git이 설치되어 있지 않습니다."
+
+
+def local_info():
+    """노트북에서 실행 중인 kdump-tools(웹 UI와 무설치 실행에 쓰는 스크립트)의 버전."""
+    info = {"version": version_text(), "commit": "", "branch": "", "git": False, "dirty": False}
+    code, out = git("rev-parse", "HEAD")
+    if code == 0 and re.fullmatch(r"[0-9a-f]{40}", out):
+        info.update(git=True, commit=out)
+        info["branch"] = git("rev-parse", "--abbrev-ref", "HEAD")[1]
+        info["dirty"] = bool(git("status", "--porcelain", "--untracked-files=no")[1])
+    return info
+
+
+def _http_get(url, accept=None, timeout=8):
+    headers = {"User-Agent": "kdump-tools-webui"}
+    if accept:
+        headers["Accept"] = accept
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as res:
+        return res.read()
+
+
+def fetch_latest(repo, branch, base=""):
+    """GitHub에서 브랜치의 최신 커밋과 VERSION을 읽습니다. base가 있으면 그 뒤의 커밋 제목도 가져옵니다."""
+    if not REPO_RE.match(repo or "") or not BRANCH_RE.match(branch or ""):
+        return {"ok": False, "error": "업데이트 저장소나 브랜치 형식이 올바르지 않습니다."}
+    result = {"ok": False, "repo": repo, "branch": branch, "checked": time.time()}
+    try:
+        sha = _http_get("https://api.github.com/repos/%s/commits/%s" % (repo, urllib.parse.quote(branch, safe="")),
+                        "application/vnd.github.sha").decode().strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise ValueError("커밋 값을 읽지 못했습니다.")
+        version = _http_get("https://raw.githubusercontent.com/%s/%s/VERSION" % (repo, sha)).decode()
+        result.update(ok=True, commit=sha, version=version.splitlines()[0].strip() if version else "unknown")
+    except Exception as error:  # noqa: BLE001 - 네트워크 오류는 화면에 그대로 보여줍니다.
+        result["error"] = "GitHub에 접속하지 못했습니다: %s" % error
+        return result
+    if base and re.fullmatch(r"[0-9a-f]{7,40}", base) and not sha.startswith(base):
+        try:
+            data = json.loads(_http_get("https://api.github.com/repos/%s/compare/%s...%s" % (repo, base, sha)))
+            result["ahead"] = data.get("ahead_by")
+            result["changes"] = [{"sha": c.get("sha", "")[:7],
+                                  "title": (c.get("commit", {}).get("message") or "").splitlines()[0]}
+                                 for c in reversed(data.get("commits", [])[-30:])]
+        except Exception:  # noqa: BLE001 - 변경 내역은 없어도 됩니다.
+            pass
+    return result
+
+
+def self_update(branch):
+    """노트북의 저장소를 git pull --ff-only로 갱신합니다."""
+    info = local_info()
+    if not info["git"]:
+        raise ApiError(400, "웹 UI가 git 저장소에서 실행되고 있지 않아 자동으로 업데이트할 수 없습니다. "
+                            "GitHub에서 새로 받아 주세요.")
+    if info["dirty"]:
+        raise ApiError(409, "저장소에 커밋하지 않은 변경이 있어 업데이트하지 않았습니다. "
+                            "변경을 정리한 뒤 다시 시도해 주세요.")
+    if info["branch"] != branch:
+        raise ApiError(409, "현재 브랜치(%s)가 업데이트 브랜치(%s)와 달라 업데이트하지 않았습니다." % (info["branch"], branch))
+    before = info["commit"]
+    code, out = git("pull", "--ff-only", timeout=180)
+    after = local_info()
+    if code != 0:
+        raise ApiError(502, "git pull이 실패했습니다:\n%s" % out[-800:])
+    changed = git("diff", "--name-only", before, after["commit"])[1].splitlines() if after["commit"] != before else []
+    return {"ok": True, "output": out[-2000:], "before": before, "local": after, "changed": changed,
+            "restart": any(f.startswith("webui/") and f.endswith(".py") for f in changed)}
+
+
+def server_version(server):
+    """원격 서버에 설치된 analyze-kdump의 버전과 설치 정보."""
+    code, out = ssh_text(server, ["sh", "-c", """
+t=$(command -v "$1" 2>/dev/null || true)
+if [ -n "$t" ] && [ -x "$t" ]; then
+  "$t" --version 2>/dev/null | grep -m 1 '^analyze-kdump ' | sed 's/^/version=/'
+  d=$(dirname "$(dirname "$(readlink -f "$t")")")
+  echo "prefix=$d"
+  grep -E '^(SOURCE|INSTALLED_AT|BIN_DIR)=' "$d/.install-info" 2>/dev/null
+else
+  echo "version="
+fi
+""", "sh", server["tool"]], timeout=40)
+    info = {"ok": code == 0, "server": server["name"]}
+    if code != 0:
+        info["error"] = (out.strip().splitlines() or ["SSH 접속 실패"])[-1][-300:]
+        return info
+    for line in out.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key in ("version", "prefix", "SOURCE", "INSTALLED_AT", "BIN_DIR"):
+            info[key.lower()] = value.strip()
+    info["installed"] = bool(info.get("version"))
+    match = TOOL_VERSION_RE.match(info.get("version", ""))
+    if match:
+        info["version"], info["commit"] = match.group(1), match.group(2) or ""
+        if not info.get("installed_at"):
+            info["installed_at"] = match.group(3) or ""
+    return info
+
+
+# 서버에 보낼 설치 묶음. install.sh가 복사하는 파일만 담습니다.
+BUNDLE_FILES = ("install.sh", "VERSION", "README.md", "analyze-kdump.conf.sample", "servers.conf.sample")
+BUNDLE_DIRS = ("bin", "completion")
+
+
+def build_bundle():
+    """설치 파일을 푸는 셸 스크립트를 만듭니다. 최소 설치 서버에는 tar가 없을 수 있어 base64(coreutils)만 씁니다.
+    서버에서 sh -s -- <대상 디렉터리>로 실행합니다."""
+    lines = ['set -e', 'd="$1"', 'mkdir -p "$d/bin" "$d/completion"']
+
+    def add(rel, mode):
+        with open(os.path.join(REPO_DIR, rel), "rb") as f:
+            data = f.read().replace(b"\r\n", b"\n")  # Windows에서 CRLF로 받았더라도 리눅스용으로 맞춥니다.
+        target = '"$d"/' + shlex.quote(rel.replace(os.sep, "/"))
+        encoded = base64.encodebytes(data).decode("ascii").rstrip("\n")
+        lines.extend(["base64 -d > %s <<'KDUMP_TOOLS_EOF'" % target, encoded, "KDUMP_TOOLS_EOF",
+                      "chmod %o %s" % (mode, target)])
+
+    for rel in BUNDLE_FILES:
+        if os.path.isfile(os.path.join(REPO_DIR, rel)):
+            add(rel, 0o755 if rel.endswith(".sh") else 0o644)
+    for folder in BUNDLE_DIRS:
+        base = os.path.join(REPO_DIR, folder)
+        for name in sorted(os.listdir(base)) if os.path.isdir(base) else []:
+            if os.path.isfile(os.path.join(base, name)) and NAME_RE.match(name):
+                add(os.path.join(folder, name), 0o755 if folder == "bin" else 0o644)
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
+# 원격에서 설치 위치를 찾고 install.sh를 실행합니다.
+# $1 도구 경로, $2 local|github, $3 저장소, $4 브랜치, $5 커밋, $6 원본 설명
+REMOTE_INSTALL = r"""
+tool="$1"; mode="$2"; repo="$3"; branch="$4"; commit="$5"; label="$6"
+t=$(command -v "$tool" 2>/dev/null || true)
+if [ -n "$t" ]; then t=$(readlink -f "$t"); else t="$tool"; fi
+case "$t" in
+  /*/bin/analyze-kdump) prefix=${t%/bin/analyze-kdump} ;;
+  *) echo "설치 위치를 알 수 없습니다: $tool (서버 설정의 원격 analyze-kdump 경로를 /opt/kdump-tools/bin/analyze-kdump 형태로 지정해 주세요)"; exit 3 ;;
+esac
+[ "$(id -u)" -eq 0 ] || { echo "root 권한이 필요합니다. 서버 설정에서 sudo를 켜 주세요(비밀번호 없는 sudo 필요)."; exit 4; }
+tmp=$(mktemp -d /tmp/kdump-tools-update.XXXXXX) || exit 5
+trap 'rm -rf "$tmp"' EXIT
+mkdir -p "$tmp/src"
+if [ "$mode" = local ]; then
+  echo "[1/2] 노트북에서 보낸 파일 푸는 중"
+  command -v base64 >/dev/null 2>&1 || { echo "서버에 base64(coreutils)가 없습니다."; exit 6; }
+  sh -s -- "$tmp/src" || { echo "파일을 풀지 못했습니다."; exit 6; }
+else
+  echo "[1/2] GitHub에서 받는 중: $repo ($branch)"
+  if command -v git >/dev/null 2>&1; then
+    git clone -q --depth 1 --branch "$branch" "https://github.com/$repo.git" "$tmp/src" || exit 7
+    commit=$(git -c safe.directory="$tmp/src" -C "$tmp/src" rev-parse HEAD 2>/dev/null || echo "$commit")
+  elif command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+    curl -fsSL "https://codeload.github.com/$repo/tar.gz/refs/heads/$branch" | tar xz -C "$tmp/src" --strip-components=1 || exit 7
+  else
+    echo "서버에 git이 없고 curl·tar도 없어 GitHub에서 받을 수 없습니다. '노트북 버전 설치'를 사용해 주세요."; exit 7
+  fi
+fi
+[ -f "$tmp/src/install.sh" ] || { echo "install.sh가 없습니다."; exit 8; }
+echo "[2/2] 설치 중: v$(head -n 1 "$tmp/src/VERSION" 2>/dev/null | tr -d '[:space:]') -> $prefix"
+set -- --prefix "$prefix"
+bin_dir=$(sed -n 's/^BIN_DIR=//p' "$prefix/.install-info" 2>/dev/null | head -n 1)
+[ -n "$bin_dir" ] && set -- "$@" --bin-dir "$bin_dir"
+if grep -q -- '--commit)' "$tmp/src/install.sh"; then
+  [ -n "$commit" ] && set -- "$@" --commit "$commit"
+  set -- "$@" --source "$label"
+fi
+bash "$tmp/src/install.sh" "$@"
+status=$?
+# install.sh는 일부 명령 등록을 건너뛰면 2를 반환하지만 설치는 끝난 상태입니다.
+[ "$status" -eq 2 ] && status=0
+exit $status
+"""
+
+
 # ---------------------------------------------------------------- 분석 작업
 
 class Job:
     def __init__(self, kind, server, vmcore=None, report=None):
         self.id = uuid.uuid4().hex[:12]
-        self.kind = kind            # report | llm | reanalyze
+        self.kind = kind            # report | llm | reanalyze | upgrade
         self.server = server
         self.vmcore = vmcore
         self.report = report
@@ -341,6 +532,8 @@ class Job:
         self.logs = []
         self.error = None
         self.method = None
+        self.source = None          # upgrade: local | github
+        self.version = None         # upgrade: 설치 후 서버 버전
         self.started = time.time()
         self.finished = None
         self.lock = threading.Lock()
@@ -357,7 +550,8 @@ class Job:
             return {"id": self.id, "kind": self.kind, "server": self.server, "vmcore": self.vmcore,
                     "report": self.report, "analysis": self.analysis, "status": self.status,
                     "phase": self.phase, "progress": self.progress, "logs": self.logs[-60:],
-                    "error": self.error, "method": self.method, "started": self.started,
+                    "error": self.error, "method": self.method, "source": self.source,
+                    "version": self.version, "started": self.started,
                     "elapsed": int((self.finished or time.time()) - self.started)}
 
 
@@ -499,6 +693,35 @@ class Jobs:
         if llm:
             self.run_llm(job)
 
+    # ---- 서버의 analyze-kdump 설치·업그레이드
+
+    def run_upgrade(self, job):
+        server = self.store.server(job.server)
+        settings = self.store.settings()
+        repo = settings.get("update_repo") or DEFAULT_SETTINGS["update_repo"]
+        branch = settings.get("update_branch") or DEFAULT_SETTINGS["update_branch"]
+        if not REPO_RE.match(repo) or not BRANCH_RE.match(branch):
+            raise ApiError(400, "업데이트 저장소나 브랜치 형식이 올바르지 않습니다.")
+        if job.source == "local":
+            local = local_info()
+            commit = local["commit"]
+            label = "webui:%s" % (commit[:7] or "v" + local["version"])
+            job.phase = "설치 파일 만드는 중 (v%s)" % local["version"]
+            stdin = build_bundle()
+            job.log("노트북 버전 v%s%s 를 보냅니다 (%d KB)" % (
+                local["version"], " (%s)" % commit[:7] if commit else "", max(1, len(stdin) // 1024)))
+        else:
+            commit, label, stdin = "", "github:%s@%s" % (repo, branch), None
+        job.phase = "설치 중"
+        code, _ = self._stream(job, server, ["sh", "-c", REMOTE_INSTALL, "sh", server["tool"], job.source,
+                                             repo, branch, commit, label], stdin)
+        if code != 0:
+            raise ApiError(502, "설치에 실패했습니다 (종료 코드 %d). 로그를 확인해 주세요. 기존 설치는 그대로입니다." % code)
+        job.phase = "설치 확인 중"
+        info = server_version(server)
+        job.version = info.get("version")
+        job.log("설치된 버전: %s" % (info.get("version") or "확인 실패"))
+
     # ---- LLM 분석
 
     def run_llm(self, job):
@@ -533,6 +756,15 @@ class App:
         self.jobs = Jobs(store)
         self.port = port
         self.token = secrets.token_urlsafe(24)
+        self.latest = None
+        threading.Thread(target=self.check_latest, daemon=True).start()
+
+    def check_latest(self):
+        settings = self.store.settings()
+        self.latest = fetch_latest(settings.get("update_repo") or DEFAULT_SETTINGS["update_repo"],
+                                   settings.get("update_branch") or DEFAULT_SETTINGS["update_branch"],
+                                   local_info()["commit"])
+        return self.latest
 
     def public_settings(self):
         settings = self.store.settings()
@@ -661,6 +893,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(200, {"ok": True})
         if len(parts) == 3 and parts[0] == "servers" and parts[2] == "test" and method == "POST":
             return self._json(200, test_server(store.server(parts[1])))
+        if len(parts) == 3 and parts[0] == "servers" and parts[2] == "version" and method == "GET":
+            return self._json(200, server_version(store.server(parts[1])))
+        if parts == ["versions"] and method == "GET":
+            if query.get("check", [""])[0] == "1" or app.latest is None:
+                app.check_latest()
+            return self._json(200, {"local": local_info(), "latest": app.latest})
+        if parts == ["self-update"] and method == "POST":
+            settings = store.settings()
+            result = self_update(settings.get("update_branch") or DEFAULT_SETTINGS["update_branch"])
+            app.check_latest()
+            result["latest"] = app.latest
+            return self._json(200, result)
         if len(parts) == 3 and parts[0] == "servers" and parts[2] == "vmcores" and method == "GET":
             return self._json(200, {"vmcores": list_vmcores(store.server(parts[1]))})
 
@@ -674,6 +918,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     raise ApiError(400, "vmcore 경로가 올바르지 않습니다.")
                 job = Job(kind, server["name"], vmcore=vmcore)
                 app.jobs.start(job, lambda j: app.jobs.run_report(j, kind == "llm"))
+            elif kind == "upgrade":
+                source = body.get("source")
+                if source not in ("local", "github"):
+                    raise ApiError(400, "설치 원본은 local 또는 github여야 합니다.")
+                job = Job(kind, server["name"])
+                job.source = source
+                app.jobs.start(job, app.jobs.run_upgrade)
             elif kind == "reanalyze":
                 store.result_path(server["name"], body.get("report", ""))
                 job = Job(kind, server["name"], report=body["report"])
@@ -705,6 +956,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             for key in ("max_report_chars", "max_tokens", "timeout"):
                 if key in body:
                     body[key] = int(body[key])
+            if "update_repo" in body and not REPO_RE.match(str(body["update_repo"])):
+                raise ApiError(400, "업데이트 저장소는 owner/repo 형식이어야 합니다.")
+            if "update_branch" in body and not BRANCH_RE.match(str(body["update_branch"])):
+                raise ApiError(400, "업데이트 브랜치 이름이 올바르지 않습니다.")
             store.save_settings(body)
             return self._json(200, app.public_settings())
         if parts == ["secrets", "api-key"] and method == "POST":

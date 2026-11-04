@@ -6,7 +6,9 @@ const state = {
   version: "",
   settings: {},
   servers: [],
-  page: "server",       // server | history
+  page: "server",       // server | history | versions
+  versions: null,       // { local, latest } 노트북 버전과 GitHub 최신
+  serverVersions: {},   // 서버 이름 -> 설치된 analyze-kdump 버전
   selected: null,       // 서버 이름
   tab: "vmcores",       // vmcores | results
   view: null,           // { server, name } 결과 파일 보기
@@ -155,6 +157,7 @@ function renderSidebar() {
     list.append(h('<li class="muted" style="padding:8px 10px;font-size:13px">등록된 서버가 없습니다.</li>'));
   }
   $("#nav-history").classList.toggle("active", state.page === "history");
+  $("#nav-versions").classList.toggle("active", state.page === "versions");
   for (const s of state.servers) {
     const health = state.health[s.name];
     const dot = health ? (health.ok ? "ok" : "err") : "";
@@ -199,6 +202,7 @@ function openFile(server, name) {
 function renderMain() {
   const main = $("#main");
   main.innerHTML = "";
+  if (state.page === "versions") return renderVersions(main);
   if (state.page === "history") {
     if (state.view) return renderViewer(main, state.view.server);
     return renderHistory(main);
@@ -448,6 +452,247 @@ async function renderHistory(main) {
   $("#h-text").addEventListener("input", e => { clearTimeout(timer); timer = setTimeout(() => { f.text = e.target.value; draw(); }, 150); });
 }
 
+
+// ---------------------------------------------------------------- 버전·업데이트
+
+function openVersions() {
+  state.page = "versions";
+  state.view = null;
+  renderSidebar();
+  renderMain();
+}
+
+const short = c => (c || "").slice(0, 7);
+
+// "1.10.0" > "1.9.2" 처럼 숫자 단위로 비교합니다.
+function cmpVersion(a, b) {
+  const pa = String(a || "").split(/[.-]/).map(n => parseInt(n, 10) || 0);
+  const pb = String(b || "").split(/[.-]/).map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
+  }
+  return 0;
+}
+
+function localStatus() {
+  const v = state.versions;
+  if (!v) return { cls: "", text: "확인 중" };
+  const { local, latest } = v;
+  if (!latest || !latest.ok) return { cls: "warn", text: "최신 버전 확인 실패" };
+  if (local.commit && local.commit === latest.commit) return { cls: "ok", text: "최신 버전 사용 중" };
+  if (local.commit) {
+    if (latest.ahead === 0) return { cls: "ok", text: "최신보다 앞선 버전 (개발 중)" };
+    return { cls: "up", text: latest.ahead ? `업데이트 가능 · 커밋 ${latest.ahead}개` : "업데이트 가능" };
+  }
+  return cmpVersion(latest.version, local.version) > 0
+    ? { cls: "up", text: "업데이트 가능" } : { cls: "ok", text: "최신 버전과 같은 번호" };
+}
+
+function updateAvailable() {
+  return localStatus().cls === "up";
+}
+
+function serverStatus(info) {
+  if (!info) return { cls: "", text: "" };
+  if (info.loading) return { cls: "", text: "확인 중" };
+  if (!info.ok) return { cls: "err", text: "접속 실패" };
+  if (!info.installed) return { cls: "muted", text: "미설치 · 무설치 실행으로 분석 가능" };
+  const v = state.versions || {};
+  const latest = v.latest && v.latest.ok ? v.latest : null;
+  const local = v.local || {};
+  if (info.commit && latest && latest.commit.startsWith(info.commit)) return { cls: "ok", text: "최신 버전" };
+  if (info.commit && local.commit && local.commit.startsWith(info.commit)) return { cls: "ok", text: "노트북과 같은 버전" };
+  const newest = [latest && latest.version, local.version].filter(Boolean).sort(cmpVersion).pop();
+  if (newest && cmpVersion(newest, info.version) > 0) return { cls: "up", text: `업데이트 가능 → v${newest}` };
+  if (info.commit && latest) return { cls: "up", text: "다른 커밋 · 다시 설치 가능" };
+  return { cls: "ok", text: "확인됨" };
+}
+
+function renderVersionBadge() {
+  const badge = $("#version");
+  const up = updateAvailable();
+  badge.textContent = "v" + state.version + (up ? ` → v${state.versions.latest.version}` : "");
+  badge.classList.toggle("up", up);
+  $("#nav-update-dot").hidden = !up;
+}
+
+async function loadVersions(check = false) {
+  try {
+    state.versions = await api("GET", "/api/versions" + (check ? "?check=1" : ""));
+  } catch (e) {
+    state.versions = { local: { version: state.version }, latest: { ok: false, error: e.message } };
+  }
+  renderVersionBadge();
+}
+
+async function loadServerVersion(name) {
+  state.serverVersions[name] = { loading: true };
+  if (state.page === "versions" && !state.view) drawServerVersions();
+  try {
+    state.serverVersions[name] = await api("GET", `/api/servers/${encodeURIComponent(name)}/version`);
+  } catch (e) {
+    state.serverVersions[name] = { ok: false, error: e.message };
+  }
+  if (state.page === "versions" && !state.view) drawServerVersions();
+}
+
+function renderVersions(main) {
+  const v = state.versions;
+  const local = (v && v.local) || { version: state.version };
+  const latest = v && v.latest;
+  const st = localStatus();
+  const checked = latest && latest.checked ? fmtTime(latest.checked) : "";
+  const repo = state.settings.update_repo || "621dev/kdump-tools";
+  const branch = state.settings.update_branch || "main";
+
+  const card = h(`<div class="card">
+    <div class="card-head">
+      <div>
+        <h2>이 노트북의 kdump-tools</h2>
+        <div class="meta">웹 UI와, 서버에 '무설치 실행'·'노트북 버전 설치'로 보내는 스크립트의 버전입니다.</div>
+      </div>
+      <div class="actions"><button class="btn small" id="ver-check">최신 버전 확인</button></div>
+    </div>
+    <div class="version-grid">
+      <div class="version-box">
+        <div class="label">현재</div>
+        <div class="value">v${esc(local.version)}</div>
+        <div class="sub">${local.git ? `${esc(short(local.commit))} · 브랜치 ${esc(local.branch)}${local.dirty ? ' · <span class="warn-text">커밋하지 않은 변경 있음</span>' : ""}` : "git 저장소가 아님 (커밋 정보 없음)"}</div>
+      </div>
+      <div class="version-box">
+        <div class="label">최신 (GitHub)</div>
+        <div class="value">${latest && latest.ok ? "v" + esc(latest.version) : "—"}</div>
+        <div class="sub">${latest && latest.ok ? `${esc(short(latest.commit))} · ${esc(repo)} ${esc(branch)}${checked ? " · " + checked + " 확인" : ""}` : esc((latest && latest.error) || "확인 중")}</div>
+      </div>
+      <div class="version-box">
+        <div class="label">상태</div>
+        <div class="value"><span class="pill ${st.cls}">${esc(st.text)}</span></div>
+        <div class="sub" id="ver-action"></div>
+      </div>
+    </div>
+    <div id="ver-changes"></div>
+    <div id="ver-result"></div>
+    <details class="ver-source"><summary>업데이트 저장소 설정</summary>
+      <div class="inline-actions" style="margin-top:8px">
+        <label style="flex:1">저장소 (owner/repo)<input id="ver-repo" value="${esc(repo)}"></label>
+        <label style="width:180px">브랜치<input id="ver-branch" value="${esc(branch)}"></label>
+        <button class="btn small" id="ver-save" style="align-self:flex-end">저장</button>
+      </div>
+    </details>
+  </div>`);
+  main.append(card);
+
+  const action = $("#ver-action");
+  if (st.cls === "up" && local.git) {
+    const btn = h('<button class="btn small primary">업데이트 (git pull)</button>');
+    btn.addEventListener("click", () => selfUpdate(btn));
+    action.append(btn);
+  } else if (st.cls === "up") {
+    action.append(h(`<span>git으로 받은 저장소가 아니어서 자동 업데이트를 할 수 없습니다. <a href="https://github.com/${esc(repo)}" target="_blank" rel="noopener noreferrer">GitHub</a>에서 새로 받아 주세요.</span>`));
+  }
+  if (latest && latest.changes && latest.changes.length && st.cls === "up") {
+    $("#ver-changes").append(h(`<div class="changes"><div class="label">새 커밋 (최근 순)</div><ul>${latest.changes.map(c =>
+      `<li><code>${esc(c.sha)}</code> ${esc(c.title)}</li>`).join("")}</ul></div>`));
+  }
+  $("#ver-check").addEventListener("click", async e => {
+    e.target.disabled = true;
+    e.target.innerHTML = '<span class="spinner"></span> 확인 중';
+    await loadVersions(true);
+    renderMain();
+  });
+  $("#ver-save").addEventListener("click", async () => {
+    try {
+      state.settings = await api("POST", "/api/settings", { update_repo: $("#ver-repo").value.trim(), update_branch: $("#ver-branch").value.trim() });
+      toast("업데이트 저장소를 저장했습니다.");
+      await loadVersions(true);
+      renderMain();
+    } catch (e) { toast(e.message); }
+  });
+
+  const servers = h(`<div class="card">
+    <div class="card-head">
+      <div><h2>서버의 analyze-kdump</h2>
+        <div class="meta">'원격 설치본 실행'에 쓰는 서버 설치본입니다. 설정·서버 목록·로그·vmlinux는 업그레이드해도 유지됩니다.</div></div>
+      <div class="actions"><button class="btn small" id="srv-ver-all">모두 확인</button></div>
+    </div>
+    <div id="srv-versions"></div>
+  </div>`);
+  main.append(servers);
+  $("#srv-ver-all").addEventListener("click", () => state.servers.forEach(s => loadServerVersion(s.name)));
+  drawServerVersions();
+  // 처음 들어왔을 때는 아직 확인하지 않은 서버를 한 번씩 확인합니다.
+  for (const s of state.servers) if (!state.serverVersions[s.name]) loadServerVersion(s.name);
+}
+
+function drawServerVersions() {
+  const holder = $("#srv-versions");
+  if (!holder) return;
+  holder.innerHTML = "";
+  if (!state.servers.length) {
+    holder.append(h('<p class="muted">등록된 서버가 없습니다.</p>'));
+    return;
+  }
+  const local = (state.versions && state.versions.local) || { version: state.version };
+  const latest = state.versions && state.versions.latest;
+  const table = h(`<table class="list"><thead><tr><th>서버</th><th>설치 버전</th><th>설치 정보</th><th>상태</th><th></th></tr></thead><tbody></tbody></table>`);
+  for (const s of state.servers) {
+    const info = state.serverVersions[s.name];
+    const st = serverStatus(info);
+    const running = [...state.jobs.values()].some(j => j.kind === "upgrade" && j.server === s.name && j.status === "running");
+    const installed = info && info.ok && info.installed;
+    const verb = installed ? "업그레이드" : "설치";
+    const row = h(`<tr>
+      <td><div style="font-weight:600">${esc(s.name)}</div><div class="muted" style="font-size:12px">${esc(s.target)}</div></td>
+      <td style="white-space:nowrap">${info && info.ok && info.installed ? `v${esc(info.version)}${info.commit ? `<div class="muted path">${esc(info.commit)}</div>` : ""}` : (info && info.loading ? '<span class="spinner"></span>' : "—")}</td>
+      <td class="muted" style="font-size:12.5px">${info && info.ok && info.installed
+        ? `${esc(info.prefix || "")}${info.installed_at ? "<br>" + esc(info.installed_at) : ""}${info.source ? "<br>" + esc(info.source) : ""}`
+        : esc((info && info.error) || "")}</td>
+      <td><span class="pill ${st.cls}">${esc(st.text)}</span></td>
+      <td><div class="row-actions">
+        <button class="btn small" data-act="check">확인</button>
+        <button class="btn small ${st.cls === "up" ? "primary" : ""}" data-act="local" ${running || !(info && info.ok) ? "disabled" : ""}
+          title="노트북의 v${esc(local.version)}를 SSH로 보내 설치합니다. 서버에 인터넷이 없어도 됩니다.">노트북 버전 ${verb}</button>
+        <button class="btn small" data-act="github" ${running || !(info && info.ok) ? "disabled" : ""}
+          title="서버가 GitHub에서 직접 받아 설치합니다. 서버에 인터넷이 필요합니다.">GitHub 최신 ${verb}</button>
+      </div></td></tr>`);
+    row.querySelector('[data-act="check"]').addEventListener("click", () => loadServerVersion(s.name));
+    row.querySelectorAll('[data-act="local"],[data-act="github"]').forEach(b => b.addEventListener("click", () => {
+      const source = b.dataset.act;
+      const what = source === "local"
+        ? `노트북의 v${local.version}${local.commit ? " (" + short(local.commit) + ")" : ""}`
+        : `GitHub 최신${latest && latest.ok ? " v" + latest.version + " (" + short(latest.commit) + ")" : ""}`;
+      const now = installed ? `현재 v${info.version}${info.commit ? " (" + info.commit + ")" : ""}` : "현재 미설치";
+      if (!confirm(`${s.name}에 ${what}을(를) ${verb}할까요?\n\n${now}\n설치 위치: ${(info && info.prefix) || s.tool}\n\n설정·서버 목록·로그·vmlinux는 유지됩니다.`)) return;
+      startJob({ kind: "upgrade", server: s.name, source }).then(() => drawServerVersions());
+    }));
+    table.tBodies[0].append(row);
+  }
+  holder.append(table);
+}
+
+async function selfUpdate(btn) {
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> 업데이트 중';
+  try {
+    const r = await api("POST", "/api/self-update");
+    state.versions = { local: r.local, latest: r.latest };
+    state.version = r.local.version;
+    renderVersionBadge();
+    renderMain();
+    const msg = r.restart
+      ? "웹 UI 서버 코드가 바뀌었습니다. 콘솔에서 Ctrl+C로 끈 뒤 다시 실행해 주세요."
+      : "화면 파일만 바뀌었습니다. 새로고침(Ctrl+F5)하면 적용됩니다.";
+    $("#ver-result").append(h(`<div class="notice ok"><b>업데이트를 마쳤습니다: ${esc(short(r.before))} → ${esc(short(r.local.commit))} (v${esc(r.local.version)})</b>
+      <div>${r.changed.length ? esc(msg) : "바뀐 파일이 없습니다."}</div>
+      ${r.changed.length ? `<details><summary>바뀐 파일 ${r.changed.length}개</summary><pre>${esc(r.changed.join("\n"))}</pre></details>` : ""}</div>`));
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = "업데이트 (git pull)";
+    $("#ver-result").innerHTML = "";
+    $("#ver-result").append(h(`<div class="notice err"><b>업데이트하지 못했습니다</b><pre>${esc(e.message)}</pre></div>`));
+  }
+}
+
 // ---------------------------------------------------------------- 결과 보기
 
 async function renderViewer(main, serverName) {
@@ -604,6 +849,7 @@ async function startJob(body) {
     state.jobs.set(job.id, job);
     renderJobs();
     pollJobs();
+    return job;
   } catch (e) {
     toast(e.message);
   }
@@ -629,6 +875,13 @@ async function pollJobs() {
 }
 
 function onJobFinished(job) {
+  if (job.kind === "upgrade") {
+    toast(job.status === "done" ? `${job.server}: v${job.version || "?"} 설치를 마쳤습니다.` : `${job.server}: 설치에 실패했습니다.`);
+    delete state.health[job.server];
+    if (job.status === "done") scheduleJobClose(job.id);
+    loadServerVersion(job.server);
+    return;
+  }
   toast(job.status === "done" ? `${job.server}: 분석을 마쳤습니다.` : `${job.server}: 실패했습니다.`);
   if (job.status === "done") scheduleJobClose(job.id);
   // 기록 목록을 보고 있으면 새 결과가 보이도록 다시 그립니다.
@@ -654,7 +907,9 @@ function renderJobs() {
   const box = $("#jobs");
   box.innerHTML = "";
   for (const job of [...state.jobs.values()].slice(-4)) {
-    const label = { report: "리포트 생성", llm: "리포트 + LLM 분석", reanalyze: "LLM 분석" }[job.kind];
+    const label = job.kind === "upgrade"
+      ? `analyze-kdump 설치 (${job.source === "github" ? "GitHub" : "노트북 버전"})`
+      : { report: "리포트 생성", llm: "리포트 + LLM 분석", reanalyze: "LLM 분석" }[job.kind];
     let pct = null;
     if (job.status === "running" && job.progress && job.progress.total) {
       pct = Math.round(job.progress.current / job.progress.total * 100);
@@ -665,7 +920,7 @@ function renderJobs() {
     const el = h(`<div class="job ${job.status}" data-id="${esc(job.id)}">
       <div class="job-head"><span>${esc(job.server)} · ${esc(label)}</span>
         <span>${job.status === "running" ? '<span class="spinner"></span>' : (job.status === "done" ? "✓" : "✕")}</span></div>
-      <div class="job-sub">${esc(job.vmcore || job.report || "")}</div>
+      <div class="job-sub">${esc(job.vmcore || job.report || (job.version ? "설치된 버전: v" + job.version : ""))}</div>
       <div class="bar ${pct === null && job.status === "running" ? "indeterminate" : ""}"><span style="width:${pct ?? 0}%"></span></div>
       <div class="job-foot"><span>${esc(detail)}</span><span>${fmtElapsed(job.elapsed)}</span></div>
       ${job.error ? `<div class="job-error">${esc(job.error)}</div>` : ""}
@@ -830,6 +1085,8 @@ $("#llm-test").addEventListener("click", async () => {
 
 $("#add-server").addEventListener("click", () => openServerDialog());
 $("#nav-history").addEventListener("click", openHistory);
+$("#nav-versions").addEventListener("click", openVersions);
+$("#version").addEventListener("click", openVersions);
 
 // ---------------------------------------------------------------- 시작
 
@@ -840,11 +1097,11 @@ async function loadState() {
   state.servers = data.servers;
   // 페이지를 새로 열었을 때는 아직 진행 중인 작업만 다시 보여줍니다.
   for (const job of data.jobs) if (job.status === "running" && !state.jobs.has(job.id)) state.jobs.set(job.id, job);
-  $("#version").textContent = "v" + data.version;
+  renderVersionBadge();
   if (!state.selected && state.servers.length === 1) state.selected = state.servers[0].name;
   renderSidebar();
 }
 
-loadState().then(() => { renderMain(); renderJobs(); pollJobs(); }).catch(e => {
+loadState().then(() => { renderMain(); renderJobs(); pollJobs(); loadVersions().then(() => { if (state.page === "versions") renderMain(); }); }).catch(e => {
   $("#main").innerHTML = `<div class="card"><p class="form-error">${esc(e.message)}</p></div>`;
 });
