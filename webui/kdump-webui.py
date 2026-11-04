@@ -341,8 +341,11 @@ def remote_command(server, argv):
 
 def ssh_run(server, argv, stdin=None, timeout=60):
     """원격 명령을 실행하고 (종료 코드, 출력)을 돌려줍니다."""
+    # 보낼 입력이 없으면 표준 입력을 반드시 막습니다. 물려받은 입력이 열려 있으면
+    # Windows의 ssh는 입력이 끝나기를 기다리며 원격 명령이 끝난 뒤에도 종료하지 않습니다.
+    stdin_args = {"input": stdin} if stdin is not None else {"stdin": subprocess.DEVNULL}
     try:
-        result = subprocess.run(ssh_args(server) + [remote_command(server, argv)], input=stdin,
+        result = subprocess.run(ssh_args(server) + [remote_command(server, argv)], **stdin_args,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
         return result.returncode, result.stdout
     except subprocess.TimeoutExpired:
@@ -400,7 +403,8 @@ def list_vmcores(server):
 def git(*args, timeout=30):
     try:
         result = subprocess.run(["git", "-c", "safe.directory=*", "-C", REPO_DIR] + list(args),
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, timeout=timeout)
         return result.returncode, result.stdout.decode("utf-8", errors="replace").strip()
     except subprocess.TimeoutExpired:
         return 124, "git 시간 초과"
@@ -1241,11 +1245,27 @@ def print_banner(data_dir, url):
     print("  " + url, flush=True)
 
 
-def watch_supervisor():
-    """감시 프로세스가 사라지면(창을 닫거나 강제 종료) 연결된 표준 입력이 닫히므로 서버도 끝냅니다."""
+def detach_supervisor_pipe():
+    """감시 프로세스와 연결된 표준 입력을 따로 떼어 두고, 표준 입력은 빈 장치로 바꿉니다.
+    이 파이프는 닫히지 않으므로 그대로 두면 ssh·git·CLI 같은 하위 명령이 물려받아 입력을 기다리며 멈춥니다."""
+    pipe_fd = os.dup(0)
+    devnull = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(devnull, 0)
+    os.close(devnull)
+    if os.name == "nt":
+        # 하위 프로세스는 C 런타임의 0번이 아니라 Win32 표준 입력 핸들을 물려받으므로 그것도 바꿉니다.
+        import ctypes
+        import msvcrt
+        ctypes.windll.kernel32.SetStdHandle(-10, msvcrt.get_osfhandle(0))  # STD_INPUT_HANDLE
+    return pipe_fd
+
+
+def watch_supervisor(pipe_fd):
+    """감시 프로세스가 사라지면(창을 닫거나 강제 종료) 파이프가 닫히므로 서버도 끝냅니다."""
     try:
-        sys.stdin.buffer.read()
-    except Exception:  # noqa: BLE001
+        while os.read(pipe_fd, 4096):
+            pass
+    except OSError:
         pass
     os._exit(0)
 
@@ -1263,7 +1283,7 @@ def serve(args, supervised=False):
     app.httpd = httpd
     Handler.app = app
     if supervised:
-        threading.Thread(target=watch_supervisor, daemon=True).start()
+        threading.Thread(target=watch_supervisor, args=(detach_supervisor_pipe(),), daemon=True).start()
     else:
         url = "http://127.0.0.1:%d/?t=%s" % (port, app.token)
         print_banner(args.data_dir, url)
