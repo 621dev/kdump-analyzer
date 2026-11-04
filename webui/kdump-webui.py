@@ -20,6 +20,7 @@ import secrets
 import shlex
 import socketserver
 import base64
+import contextlib
 import subprocess
 import sys
 import threading
@@ -518,6 +519,51 @@ exit $status
 
 # ---------------------------------------------------------------- 분석 작업
 
+class JobCancelled(Exception):
+    pass
+
+
+class FifoSlot:
+    """먼저 온 작업부터 하나씩 실행하게 하는 대기열입니다. 같은 서버에서 crash를 동시에 돌리지 않으려고 씁니다
+    (메모리가 작은 서버에서는 crash 두 개가 동시에 돌면 OOM으로 죽을 수 있습니다)."""
+
+    def __init__(self, label):
+        self.label = label
+        self.cond = threading.Condition()
+        self.queue = []
+
+    def reserve(self, job):
+        with self.cond:
+            if job not in self.queue:
+                self.queue.append(job)
+
+    @contextlib.contextmanager
+    def hold(self, job):
+        self.reserve(job)
+        with self.cond:
+            while self.queue[0] is not job:
+                if job.cancelled:
+                    self.queue.remove(job)
+                    self.cond.notify_all()
+                    raise JobCancelled()
+                job.status = "queued"
+                job.phase = "%s 대기 중 (앞에 %d개)" % (self.label, self.queue.index(job))
+                self.cond.wait(0.5)
+            if job.cancelled:
+                self.queue.remove(job)
+                self.cond.notify_all()
+                raise JobCancelled()
+        job.status = "running"
+        if job.run_started is None:
+            job.run_started = time.time()
+        try:
+            yield
+        finally:
+            with self.cond:
+                self.queue.remove(job)
+                self.cond.notify_all()
+
+
 class Job:
     def __init__(self, kind, server, vmcore=None, report=None):
         self.id = uuid.uuid4().hex[:12]
@@ -526,7 +572,9 @@ class Job:
         self.vmcore = vmcore
         self.report = report
         self.analysis = None
-        self.status = "running"     # running | done | error
+        self.status = "running"     # queued | running | done | error | cancelled
+        self.cancelled = False
+        self.run_started = None     # 대기열을 지나 실제로 시작한 시각
         self.phase = "준비 중"
         self.progress = None        # {"current", "total", "label", "elapsed"}
         self.logs = []
@@ -552,7 +600,7 @@ class Job:
                     "phase": self.phase, "progress": self.progress, "logs": self.logs[-60:],
                     "error": self.error, "method": self.method, "source": self.source,
                     "version": self.version, "started": self.started,
-                    "elapsed": int((self.finished or time.time()) - self.started)}
+                    "elapsed": int((self.finished or time.time()) - (self.run_started or self.started))}
 
 
 class Jobs:
@@ -560,10 +608,20 @@ class Jobs:
         self.store = store
         self.items = {}
         self.lock = threading.Lock()
+        self.server_slots = {}
+        self.llm_slot = FifoSlot("LLM 분석")
 
-    def start(self, job, target):
+    def server_slot(self, name):
+        with self.lock:
+            return self.server_slots.setdefault(name, FifoSlot("서버 작업"))
+
+    def start(self, job, target, reserve=None):
+        """reserve에 대기열을 주면 요청한 순서대로 자리를 잡아 둡니다(여러 개를 한 번에 시작할 때 순서 보장)."""
         with self.lock:
             self.items[job.id] = job
+        if reserve is not None:
+            reserve.reserve(job)
+            job.status, job.phase = "queued", "%s 대기 중" % reserve.label
         thread = threading.Thread(target=self._run, args=(job, target), daemon=True)
         thread.start()
         return job
@@ -577,14 +635,26 @@ class Jobs:
 
     def recent(self):
         with self.lock:
-            jobs = sorted(self.items.values(), key=lambda j: j.started, reverse=True)[:20]
-        return [j.to_dict() for j in jobs]
+            jobs = sorted(self.items.values(), key=lambda j: j.started, reverse=True)
+        # 진행 중이거나 대기 중인 작업은 모두, 끝난 작업은 최근 20개만 돌려줍니다.
+        active = [j for j in jobs if j.status in ("queued", "running")]
+        return [j.to_dict() for j in active + [j for j in jobs if j not in active][:20]]
+
+    def cancel(self, job_id):
+        job = self.get(job_id)
+        if job.status != "queued":
+            raise ApiError(409, "대기 중인 작업만 취소할 수 있습니다.")
+        job.cancelled = True
+        return job
 
     def _run(self, job, target):
         try:
             target(job)
             job.status = "done"
             job.phase = "완료"
+        except JobCancelled:
+            job.status = "cancelled"
+            job.phase = "취소됨" + (" (리포트는 저장됨)" if job.report else "")
         except ApiError as error:
             job.status, job.error = "error", error.message
         except kdump_llm.LLMError as error:
@@ -634,6 +704,12 @@ class Jobs:
 
     def run_report(self, job, llm):
         server = self.store.server(job.server)
+        with self.server_slot(server["name"]).hold(job):
+            self._run_report(job, server)
+        if llm:
+            self.run_llm(job)
+
+    def _run_report(self, job, server):
         job.phase = "서버 확인 중"
         method = server.get("method") or "auto"
         if method == "auto":
@@ -690,13 +766,14 @@ class Jobs:
             if tmpdir:
                 ssh_run(server, ["rm", "-rf", tmpdir])
 
-        if llm:
-            self.run_llm(job)
-
     # ---- 서버의 analyze-kdump 설치·업그레이드
 
     def run_upgrade(self, job):
         server = self.store.server(job.server)
+        with self.server_slot(server["name"]).hold(job):
+            self._run_upgrade(job, server)
+
+    def _run_upgrade(self, job, server):
         settings = self.store.settings()
         repo = settings.get("update_repo") or DEFAULT_SETTINGS["update_repo"]
         branch = settings.get("update_branch") or DEFAULT_SETTINGS["update_branch"]
@@ -725,6 +802,10 @@ class Jobs:
     # ---- LLM 분석
 
     def run_llm(self, job):
+        with self.llm_slot.hold(job):
+            self._run_llm(job)
+
+    def _run_llm(self, job):
         settings = self.store.settings()
         path = self.store.result_path(job.server, job.report)
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -917,21 +998,59 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not vmcore.startswith("/") or "\n" in vmcore:
                     raise ApiError(400, "vmcore 경로가 올바르지 않습니다.")
                 job = Job(kind, server["name"], vmcore=vmcore)
-                app.jobs.start(job, lambda j: app.jobs.run_report(j, kind == "llm"))
+                app.jobs.start(job, lambda j: app.jobs.run_report(j, kind == "llm"),
+                               app.jobs.server_slot(server["name"]))
             elif kind == "upgrade":
                 source = body.get("source")
                 if source not in ("local", "github"):
                     raise ApiError(400, "설치 원본은 local 또는 github여야 합니다.")
                 job = Job(kind, server["name"])
                 job.source = source
-                app.jobs.start(job, app.jobs.run_upgrade)
+                app.jobs.start(job, app.jobs.run_upgrade, app.jobs.server_slot(server["name"]))
             elif kind == "reanalyze":
                 store.result_path(server["name"], body.get("report", ""))
                 job = Job(kind, server["name"], report=body["report"])
-                app.jobs.start(job, app.jobs.run_llm)
+                app.jobs.start(job, app.jobs.run_llm, app.jobs.llm_slot)
             else:
                 raise ApiError(400, "알 수 없는 작업입니다.")
             return self._json(200, job.to_dict())
+        if parts == ["jobs", "batch"] and method == "POST":
+            body = self._body()
+            server = store.server(body.get("server", ""))
+            kind = body.get("kind")
+            vmcores = body.get("vmcores")
+            if kind not in ("report", "llm", "llm-only"):
+                raise ApiError(400, "알 수 없는 작업입니다.")
+            if not isinstance(vmcores, list) or not 1 <= len(vmcores) <= 100:
+                raise ApiError(400, "vmcore를 1~100개 골라 주세요.")
+            for vmcore in vmcores:
+                if not isinstance(vmcore, str) or not vmcore.startswith("/") or "\n" in vmcore:
+                    raise ApiError(400, "vmcore 경로가 올바르지 않습니다.")
+            created, skipped = [], []
+            if kind == "llm-only":
+                # vmcore마다 가장 최근 리포트로 LLM 분석만 합니다(crash를 다시 실행하지 않음).
+                latest = {}
+                for record in store.history(server["name"]):
+                    rep_ = record.get("report") or {}
+                    path_ = rep_.get("vmcore")
+                    if path_ and (path_ not in latest or rep_["mtime"] > latest[path_]["mtime"]):
+                        latest[path_] = rep_
+                for vmcore in vmcores:
+                    if vmcore not in latest:
+                        skipped.append(vmcore)
+                        continue
+                    job = Job("reanalyze", server["name"], vmcore=vmcore, report=latest[vmcore]["name"])
+                    app.jobs.start(job, app.jobs.run_llm, app.jobs.llm_slot)
+                    created.append(job)
+            else:
+                for vmcore in vmcores:
+                    job = Job(kind, server["name"], vmcore=vmcore)
+                    app.jobs.start(job, lambda j, llm=(kind == "llm"): app.jobs.run_report(j, llm),
+                                   app.jobs.server_slot(server["name"]))
+                    created.append(job)
+            return self._json(200, {"jobs": [j.to_dict() for j in created], "skipped": skipped})
+        if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "cancel" and method == "POST":
+            return self._json(200, app.jobs.cancel(parts[1]).to_dict())
         if len(parts) == 2 and parts[0] == "jobs" and method == "GET":
             return self._json(200, app.jobs.get(parts[1]).to_dict())
 

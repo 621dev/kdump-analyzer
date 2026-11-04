@@ -16,6 +16,8 @@ const state = {
   health: {},           // 서버 이름 -> 연결 테스트 결과
   jobs: new Map(),      // 작업 id -> 작업
   vmcores: {},          // 서버 이름 -> 목록 캐시
+  vmcoreRecords: {},    // 서버 이름 -> { vmcore 경로: 기록 요약 }
+  vmcoreSelection: {},  // 서버 이름 -> 선택한 vmcore 경로(Set)
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -278,33 +280,60 @@ async function renderVmcores(server, refresh = false) {
   if (!state.vmcores[server.name] || refresh) {
     body.innerHTML = '<p class="muted"><span class="spinner"></span> 원격 서버에서 vmcore 목록을 읽는 중...</p>';
     try {
-      state.vmcores[server.name] = (await api("GET", `/api/servers/${encodeURIComponent(server.name)}/vmcores`)).vmcores;
+      const [list, hist] = await Promise.all([
+        api("GET", `/api/servers/${encodeURIComponent(server.name)}/vmcores`),
+        api("GET", `/api/history?server=${encodeURIComponent(server.name)}`),
+      ]);
+      state.vmcores[server.name] = list.vmcores;
+      state.vmcoreRecords[server.name] = recordsByVmcore(hist.records);
     } catch (e) {
       body.innerHTML = `<p class="form-error">${esc(e.message)}</p>`;
       return;
     }
   }
-  if (state.selected !== server.name || state.tab !== "vmcores" || state.view) return;
+  if (state.page !== "server" || state.selected !== server.name || state.tab !== "vmcores" || state.view) return;
   const items = state.vmcores[server.name];
+  const records = state.vmcoreRecords[server.name] || {};
+  const selected = state.vmcoreSelection[server.name] || (state.vmcoreSelection[server.name] = new Set());
+  for (const path of [...selected]) if (!items.some(v => v.path === path)) selected.delete(path);
+
   const wrap = h(`<div>
     <div class="viewer-head"><span class="muted">${esc(server.crash_dir)} · ${items.length}개</span>
       <button class="btn small" id="vm-refresh">새로고침</button></div>
+    <div class="batch-bar" id="batch-bar"></div>
   </div>`);
   if (!items.length) {
     wrap.append(h('<p class="muted">vmcore가 없습니다.</p>'));
   } else {
-    const table = h(`<table class="list"><thead><tr><th>시각</th><th>크기</th><th>경로</th><th></th></tr></thead><tbody></tbody></table>`);
+    const table = h(`<table class="list"><thead><tr>
+      <th style="width:28px"><input type="checkbox" id="vm-all" title="모두 선택"></th>
+      <th>시각</th><th>크기</th><th>경로</th><th>기록</th><th></th></tr></thead><tbody></tbody></table>`);
     for (const v of items) {
-      const row = h(`<tr>
+      const rec = records[v.path];
+      const badge = !rec ? '<span class="muted">—</span>'
+        : rec.analyses
+          ? `<button class="tag analysis linkish-tag" data-open="analysis" title="최근 분석 열기">분석 ${rec.analyses}건</button>`
+          : '<button class="tag linkish-tag" data-open="report" title="최근 리포트 열기">리포트만</button>';
+      const row = h(`<tr class="${selected.has(v.path) ? "selected" : ""}">
+        <td><input type="checkbox" class="vm-check" ${selected.has(v.path) ? "checked" : ""}></td>
         <td style="white-space:nowrap">${fmtTime(v.mtime)}</td>
         <td>${fmtSize(v.size)}</td>
-        <td class="path">${esc(v.path)}</td>
+        <td class="path vm-path" title="${esc(v.path)}">${esc(v.path.startsWith(server.crash_dir.replace(/\/+$/, "") + "/") ? v.path.slice(server.crash_dir.replace(/\/+$/, "").length + 1) : v.path)}</td>
+        <td style="white-space:nowrap">${badge}</td>
         <td style="white-space:nowrap;text-align:right">
-          <button class="btn small" data-kind="report">리포트</button>
-          <button class="btn small primary" data-kind="llm">리포트 + LLM 분석</button>
+          <button class="btn small" data-kind="report" title="crash 리포트만 만듭니다">리포트</button>
+          <button class="btn small primary" data-kind="llm" title="crash 리포트를 만든 뒤 LLM으로 분석합니다">+ LLM</button>
         </td></tr>`);
-      row.querySelectorAll("button").forEach(b => b.addEventListener("click", () =>
+      row.querySelector(".vm-check").addEventListener("change", e => {
+        if (e.target.checked) selected.add(v.path); else selected.delete(v.path);
+        row.classList.toggle("selected", e.target.checked);
+        drawBatchBar(server, items);
+      });
+      row.querySelectorAll("[data-kind]").forEach(b => b.addEventListener("click", () =>
         startJob({ kind: b.dataset.kind, server: server.name, vmcore: v.path })));
+      const open = row.querySelector("[data-open]");
+      if (open) open.addEventListener("click", () =>
+        openFile(server.name, open.dataset.open === "analysis" ? rec.latestAnalysis : rec.latestReport));
       table.tBodies[0].append(row);
     }
     wrap.append(table);
@@ -313,6 +342,77 @@ async function renderVmcores(server, refresh = false) {
   body2.innerHTML = "";
   body2.append(wrap);
   $("#vm-refresh").addEventListener("click", () => renderVmcores(server, true));
+  const all = $("#vm-all");
+  if (all) all.addEventListener("change", e => {
+    items.forEach(v => e.target.checked ? selected.add(v.path) : selected.delete(v.path));
+    renderVmcores(server);
+  });
+  drawBatchBar(server, items);
+}
+
+// vmcore 경로별 기록 요약: 리포트·분석 개수와 가장 최근 파일
+function recordsByVmcore(records) {
+  const map = {};
+  for (const r of records) {
+    const path = r.report && r.report.vmcore;
+    if (!path) continue;
+    const m = map[path] || (map[path] = { reports: 0, analyses: 0, latestReport: null, latestAnalysis: null, reportTime: 0, analysisTime: 0 });
+    m.reports++;
+    if (r.report.mtime > m.reportTime) { m.reportTime = r.report.mtime; m.latestReport = r.report.name; }
+    for (const a of r.analyses) {
+      m.analyses++;
+      if (a.mtime > m.analysisTime) { m.analysisTime = a.mtime; m.latestAnalysis = a.name; }
+    }
+  }
+  return map;
+}
+
+function drawBatchBar(server, items) {
+  const bar = $("#batch-bar");
+  if (!bar) return;
+  const selected = state.vmcoreSelection[server.name] || new Set();
+  const records = state.vmcoreRecords[server.name] || {};
+  const all = $("#vm-all");
+  if (all) {
+    all.checked = items.length > 0 && selected.size === items.length;
+    all.indeterminate = selected.size > 0 && selected.size < items.length;
+  }
+  bar.innerHTML = "";
+  if (!selected.size) {
+    bar.append(h('<span class="muted">여러 개를 한 번에 분석하려면 체크박스로 고르세요. 같은 서버의 작업은 하나씩 차례로 실행됩니다.</span>'));
+    return;
+  }
+  const withReport = [...selected].filter(p => records[p]).length;
+  const el = h(`<div class="batch-inner">
+    <b>${selected.size}개 선택</b>
+    <button class="btn small" data-batch="report">리포트</button>
+    <button class="btn small primary" data-batch="llm">리포트 + LLM 분석</button>
+    <button class="btn small" data-batch="llm-only" ${withReport ? "" : "disabled"}
+      title="crash를 다시 실행하지 않고, vmcore마다 가장 최근 리포트로 LLM 분석만 합니다.">LLM 분석만 (기존 리포트 ${withReport}개)</button>
+    <button class="btn small ghost" data-batch="clear">선택 해제</button>
+  </div>`);
+  el.querySelectorAll("[data-batch]").forEach(b => b.addEventListener("click", () => {
+    const kind = b.dataset.batch;
+    if (kind === "clear") { selected.clear(); renderVmcores(server); return; }
+    startBatch(server, kind, [...selected]);
+  }));
+  bar.append(el);
+}
+
+async function startBatch(server, kind, vmcores) {
+  const label = { report: "리포트", llm: "리포트 + LLM 분석", "llm-only": "LLM 분석" }[kind];
+  try {
+    const r = await api("POST", "/api/jobs/batch", { server: server.name, kind, vmcores });
+    for (const job of r.jobs) state.jobs.set(job.id, job);
+    renderJobs();
+    pollJobs();
+    const skipped = r.skipped.length ? ` (기존 리포트가 없어 ${r.skipped.length}개 건너뜀)` : "";
+    toast(`${label} ${r.jobs.length}건을 대기열에 넣었습니다${skipped}.`);
+    (state.vmcoreSelection[server.name] || new Set()).clear();
+    if (state.page === "server" && state.selected === server.name && state.tab === "vmcores" && !state.view) renderVmcores(server);
+  } catch (e) {
+    toast(e.message);
+  }
 }
 
 async function renderResults(server) {
@@ -638,7 +738,7 @@ function drawServerVersions() {
   for (const s of state.servers) {
     const info = state.serverVersions[s.name];
     const st = serverStatus(info);
-    const running = [...state.jobs.values()].some(j => j.kind === "upgrade" && j.server === s.name && j.status === "running");
+    const running = [...state.jobs.values()].some(j => j.kind === "upgrade" && j.server === s.name && isActive(j));
     const installed = info && info.ok && info.installed;
     const verb = installed ? "업그레이드" : "설치";
     const row = h(`<tr>
@@ -859,12 +959,12 @@ let polling = false;
 async function pollJobs() {
   if (polling) return;
   polling = true;
-  while ([...state.jobs.values()].some(j => j.status === "running")) {
+  while ([...state.jobs.values()].some(isActive)) {
     await new Promise(r => setTimeout(r, 1000));
-    for (const job of [...state.jobs.values()].filter(j => j.status === "running")) {
+    for (const job of [...state.jobs.values()].filter(isActive)) {
       try {
         const next = await api("GET", `/api/jobs/${job.id}`);
-        const finished = next.status !== "running";
+        const finished = !isActive(next);
         state.jobs.set(job.id, Object.assign(next, { showLog: job.showLog }));
         if (finished) onJobFinished(next);
       } catch (_) { /* 다음 주기에 다시 시도 */ }
@@ -874,7 +974,17 @@ async function pollJobs() {
   polling = false;
 }
 
+async function cancelJobs(list) {
+  for (const job of list) {
+    try {
+      Object.assign(job, await api("POST", `/api/jobs/${job.id}/cancel`));
+    } catch (e) { toast(e.message); }
+  }
+  renderJobs();
+}
+
 function onJobFinished(job) {
+  if (job.status === "cancelled") { scheduleJobClose(job.id, 2500); return; }
   if (job.kind === "upgrade") {
     toast(job.status === "done" ? `${job.server}: v${job.version || "?"} 설치를 마쳤습니다.` : `${job.server}: 설치에 실패했습니다.`);
     delete state.health[job.server];
@@ -882,8 +992,10 @@ function onJobFinished(job) {
     loadServerVersion(job.server);
     return;
   }
-  toast(job.status === "done" ? `${job.server}: 분석을 마쳤습니다.` : `${job.server}: 실패했습니다.`);
+  const left = [...state.jobs.values()].filter(isActive).length;
+  toast((job.status === "done" ? `${job.server}: 분석을 마쳤습니다.` : `${job.server}: 실패했습니다.`) + (left ? ` 남은 작업 ${left}개` : ""));
   if (job.status === "done") scheduleJobClose(job.id);
+  delete state.vmcores[job.server]; // 기록 배지를 새로 읽도록
   // 기록 목록을 보고 있으면 새 결과가 보이도록 다시 그립니다.
   if (!state.view && (state.page === "history" || (state.selected === job.server && state.tab === "results"))) renderMain();
 }
@@ -903,10 +1015,26 @@ function scheduleJobClose(id, delay = JOB_AUTO_CLOSE_MS) {
   }, delay);
 }
 
+const isActive = job => job.status === "running" || job.status === "queued";
+
 function renderJobs() {
   const box = $("#jobs");
   box.innerHTML = "";
-  for (const job of [...state.jobs.values()].slice(-4)) {
+  // 실행 중 → 대기 중 → 끝난 작업 순으로 최대 5개를 보여주고, 나머지는 한 줄로 요약합니다.
+  const all = [...state.jobs.values()];
+  const rank = j => j.status === "running" ? 0 : j.status === "queued" ? 1 : 2;
+  const sorted = all.map((j, i) => [j, i]).sort((a, b) => rank(a[0]) - rank(b[0]) || (rank(a[0]) === 2 ? b[1] - a[1] : a[1] - b[1])).map(x => x[0]);
+  const shown = sorted.slice(0, 5);
+  const hidden = sorted.slice(5);
+  if (hidden.length) {
+    const queued = hidden.filter(j => j.status === "queued").length;
+    const el = h(`<div class="job summary"><span>그 밖에 ${hidden.length}개${queued ? ` (대기 ${queued}개)` : ""}</span>
+      ${queued ? '<button class="linkish" data-act="cancel-all">대기 중인 작업 모두 취소</button>' : ""}</div>`);
+    const btn = el.querySelector('[data-act="cancel-all"]');
+    if (btn) btn.addEventListener("click", () => cancelJobs(all.filter(j => j.status === "queued")));
+    box.append(el);
+  }
+  for (const job of shown.reverse()) {
     const label = job.kind === "upgrade"
       ? `analyze-kdump 설치 (${job.source === "github" ? "GitHub" : "노트북 버전"})`
       : { report: "리포트 생성", llm: "리포트 + LLM 분석", reanalyze: "LLM 분석" }[job.kind];
@@ -919,7 +1047,7 @@ function renderJobs() {
       : job.phase;
     const el = h(`<div class="job ${job.status}" data-id="${esc(job.id)}">
       <div class="job-head"><span>${esc(job.server)} · ${esc(label)}</span>
-        <span>${job.status === "running" ? '<span class="spinner"></span>' : (job.status === "done" ? "✓" : "✕")}</span></div>
+        <span>${job.status === "running" ? '<span class="spinner"></span>' : job.status === "queued" ? '<span class="muted">대기</span>' : (job.status === "done" ? "✓" : job.status === "cancelled" ? "—" : "✕")}</span></div>
       <div class="job-sub">${esc(job.vmcore || job.report || (job.version ? "설치된 버전: v" + job.version : ""))}</div>
       <div class="bar ${pct === null && job.status === "running" ? "indeterminate" : ""}"><span style="width:${pct ?? 0}%"></span></div>
       <div class="job-foot"><span>${esc(detail)}</span><span>${fmtElapsed(job.elapsed)}</span></div>
@@ -928,8 +1056,9 @@ function renderJobs() {
         <button class="linkish" data-act="log">${job.showLog ? "로그 숨기기" : "로그 보기"}</button>
         <span>
           ${job.analysis ? '<button class="linkish" data-act="analysis">분석 보기</button>' : ""}
-          ${job.report && job.status !== "running" ? ' <button class="linkish" data-act="report">리포트 보기</button>' : ""}
-          ${job.status !== "running" ? ' <button class="linkish" data-act="close">닫기</button>' : ""}
+          ${job.report && !isActive(job) ? ' <button class="linkish" data-act="report">리포트 보기</button>' : ""}
+          ${job.status === "queued" ? ' <button class="linkish" data-act="cancel">취소</button>' : ""}
+          ${!isActive(job) ? ' <button class="linkish" data-act="close">닫기</button>' : ""}
         </span>
       </div>
       ${job.showLog ? `<div class="job-log">${esc(job.logs.join("\n"))}</div>` : ""}
@@ -938,6 +1067,7 @@ function renderJobs() {
       const act = b.dataset.act;
       if (act === "log") { job.showLog = !job.showLog; renderJobs(); }
       if (act === "close") { state.jobs.delete(job.id); renderJobs(); }
+      if (act === "cancel") cancelJobs([job]);
       if (act === "analysis" || act === "report") {
         state.page = "server";
         openFile(job.server, act === "analysis" ? job.analysis : job.report);
@@ -1096,7 +1226,7 @@ async function loadState() {
   state.settings = data.settings;
   state.servers = data.servers;
   // 페이지를 새로 열었을 때는 아직 진행 중인 작업만 다시 보여줍니다.
-  for (const job of data.jobs) if (job.status === "running" && !state.jobs.has(job.id)) state.jobs.set(job.id, job);
+  for (const job of data.jobs) if (isActive(job) && !state.jobs.has(job.id)) state.jobs.set(job.id, job);
   renderVersionBadge();
   if (!state.selected && state.servers.length === 1) state.selected = state.servers[0].name;
   renderSidebar();
