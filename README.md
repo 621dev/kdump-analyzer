@@ -15,6 +15,7 @@
 - 선택적으로 LLM을 연동해 원인분석과 조치 권고 추가 (민감정보 마스킹, 섹션 단위 입력 축소)
 - 자동화에서 결과를 판별할 수 있는 종료 코드
 - 터미널 메뉴 UI(`analyze-kdump-ui`): vmcore 선택, 분석, 결과 보기, 접속 서버 관리, 설정을 메뉴로 처리하고 원격 서버도 SSH로 분석
+- 웹 UI(`webui/kdump-webui.py`): 노트북(Windows·macOS·Linux)의 브라우저에서 서버 관리, 분석 실행(진행 바), LLM 분석 결과(표·제목 포함) 보기, 리포트 검색
 
 ## 디렉터리 구조
 
@@ -31,6 +32,10 @@
 ├── bin/
 │   ├── analyze-kdump
 │   └── analyze-kdump-ui
+├── webui/                     # 노트북에서 실행하는 웹 UI (서버에는 필요 없음)
+│   ├── kdump-webui.py
+│   ├── kdump_llm.py           # LLM 분석 (Python, Windows에서도 동작)
+│   └── static/
 ├── completion/
 │   └── kdump-tools.bash       # bash 자동완성
 ├── logs/
@@ -426,6 +431,46 @@ log
 ```
 
 hung task 패닉을 분석할 때는 D 상태 프로세스의 스택이 핵심이므로 `foreach UN bt`를 추가하는 것을 권장합니다.
+
+## 웹 UI
+
+노트북(Windows·macOS·Linux)에서 실행해 브라우저로 쓰는 화면입니다. 서버 현장에서는 터미널 메뉴를, 평소 분석과 결과 확인은 웹 UI를 쓰는 식으로 함께 씁니다.
+
+```text
+[노트북: 웹 UI + 브라우저] ──SSH──▶ [분석 서버: analyze-kdump -r] ── crash 리포트 생성 (진행 바 실시간 표시)
+          ◀────────────── 리포트 가져오기 ──────────────┘
+          └─▶ LLM 분석 (노트북의 API 키 또는 Claude Code·Codex 구독)
+```
+
+```bash
+python webui/kdump-webui.py
+```
+
+- **요구 사항:** Python 3.8 이상(표준 라이브러리만 사용, 추가 설치 없음), `ssh` 명령(Windows 10/11 기본 OpenSSH 포함). 저장소를 받아 그대로 실행합니다.
+- **접속:** 실행하면 브라우저가 열리고, 콘솔에 `http://127.0.0.1:8730/?t=<토큰>` 주소가 출력됩니다.
+  - `127.0.0.1`에만 열리고, 이 토큰 주소로 들어온 브라우저만 쓸 수 있습니다. 토큰은 실행할 때마다 바뀝니다.
+  - 다른 Host 이름이나 다른 사이트에서 온 요청은 거부합니다(DNS 리바인딩, CSRF 방지).
+- **옵션:** `--port`(기본 8730), `--data-dir`(기본 `~/.kdump-tools-web`), `--no-browser`
+- **저장 위치:** 서버 목록·설정·가져온 리포트와 분석은 데이터 디렉터리에 저장됩니다. API 키와 Claude Code 장기 토큰은 `secrets/`에 저장하고, 화면과 API 응답에는 내용을 보여주지 않습니다.
+
+화면 구성:
+
+| 영역 | 내용 |
+|------|------|
+| 서버 목록 (왼쪽) | 서버 추가·수정·삭제. 입력은 한 장의 양식(이름, user@host, 포트, SSH 키 파일, 원격 analyze-kdump 경로, crash 디렉터리, 분석 방식, sudo) |
+| 서버 화면 | 연결 테스트(호스트, 원격 analyze-kdump 버전, crash 버전, vmcore 개수), vmcore 목록에서 **리포트** 또는 **리포트 + LLM 분석** 실행 |
+| 작업 카드 (오른쪽 아래) | crash 리포트 생성 진행 바(`3/8 bt -a`), vmlinux 읽는 중 표시, LLM 분석 단계, 경과 시간, 로그 |
+| 분석 결과 | LLM 분석을 제목·표·코드가 갖춰진 보고서로 표시, 원본 리포트로 이동 |
+| 리포트 보기 | 섹션별 접기·펼치기, 검색(해당 섹션만 남기고 강조), 리포트를 LLM으로 (다시) 분석 |
+| 설정 | provider·모델(API 모델 목록 불러오기), API 키 저장, 사내 호환 서버 주소, 구독 CLI 경로·장기 토큰, CLI 상태 확인, 연결 테스트, 마스킹·입력 크기·출력 토큰·제한 시간 |
+
+원격 서버 분석 방식은 **원격 설치본 실행**과 **무설치 실행**(스크립트를 원격 임시 디렉터리로 보내 실행한 뒤 지움), 그리고 둘 중 하나를 고르는 **자동 선택**을 지원합니다. SSH 키 인증으로 비밀번호 없이 접속할 수 있어야 하고, sudo를 쓰면 원격 서버에 비밀번호 없는 sudo(NOPASSWD)가 필요합니다. 처음 접속하는 서버의 호스트 키는 자동으로 등록합니다(`StrictHostKeyChecking=accept-new`).
+
+LLM 분석은 `webui/kdump_llm.py`에서 합니다. analyze-kdump와 같은 방식(마스킹, 섹션 단위 축소, provider 호출, 구독 CLI)을 Python으로 옮긴 것이라 Windows에서도 동작하고, 분석 파일 형식도 같습니다.
+- Claude Code는 시스템 프롬프트를 파일(`--system-prompt-file`)로 넘깁니다.
+- Windows에서는 npm 실행기(`claude.cmd`) 대신 안의 실제 `claude.exe`를 실행합니다. `.cmd`를 거치면 cmd.exe가 인자를 다시 해석하기 때문입니다.
+
+웹 UI에 없는 기능: crash 셸 직접 입력, vmcore를 가져와 로컬에서 crash로 분석하는 기능(Windows에서는 crash가 동작하지 않음), 구독 CLI 설치와 로그인(노트북에서 `claude auth login`이나 `codex login`으로 직접 로그인하거나, 설정에서 장기 토큰을 붙여넣음).
 
 ## 터미널 메뉴 UI
 
