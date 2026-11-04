@@ -329,3 +329,11 @@ table.list input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; 
 .job.cancelled { opacity: .7; }
 .job.summary { display: flex; justify-content: space-between; align-items: center; font-size: 12.5px; color: var(--muted); padding: 8px 14px; }
 .vm-path { word-break: normal; overflow-wrap: anywhere; }
+
+/* ---------------- 서버 재시작 안내 */
+.restart-banner { background: #fff4e0; color: #7c4a03; border-bottom: 1px solid #fcd9a0; padding: 10px 20px; font-size: 13.5px; }
+.restart-banner code { background: rgba(0,0,0,.06); padding: 0 5px; border-radius: 4px; }
+.restart-banner[hidden] { display: none; }
+@media (prefers-color-scheme: dark) {
+  .restart-banner { background: #3a2a10; color: #fbbf24; border-color: #5c4012; }
+}

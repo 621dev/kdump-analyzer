@@ -35,6 +35,9 @@ import kdump_llm  # noqa: E402
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(APP_DIR)
+# 화면(app.js)과 서버가 주고받는 API의 판. API를 바꿀 때 app.js의 API_LEVEL과 함께 올립니다.
+# 업데이트 뒤 서버를 다시 시작하지 않으면 화면이 이 값의 차이로 알아채고 안내합니다.
+API_LEVEL = 2
 STATIC_DIR = os.path.join(APP_DIR, "static")
 ANALYZE_SCRIPT = os.path.join(REPO_DIR, "bin", "analyze-kdump")
 
@@ -837,6 +840,7 @@ class App:
         self.jobs = Jobs(store)
         self.port = port
         self.token = secrets.token_urlsafe(24)
+        self.started_version = version_text()  # 이 서버 프로세스를 시작할 때의 버전
         self.latest = None
         threading.Thread(target=self.check_latest, daemon=True).start()
 
@@ -964,7 +968,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if parts == ["state"] and method == "GET":
             return self._json(200, {"version": version_text(), "settings": app.public_settings(),
                                     "servers": store.servers(), "jobs": app.jobs.recent(),
-                                    "platform": sys.platform})
+                                    "platform": sys.platform, "api": API_LEVEL,
+                                    "running_version": app.started_version})
 
         if parts == ["servers"] and method == "POST":
             body = self._body()
@@ -1110,7 +1115,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 reply = kdump_llm.call_api(settings, "Reply with exactly: OK", "ping")
             return self._json(200, {"reply": reply[-300:], "elapsed": round(time.time() - started, 1)})
 
-        raise ApiError(404, "not found")
+        raise ApiError(404, "알 수 없는 API입니다: %s %s" % (method, path))
 
 
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
