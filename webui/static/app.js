@@ -208,9 +208,68 @@ function openFile(server, name) {
   window.scrollTo(0, 0);
 }
 
+// ---------------------------------------------------------------- 주소(#)와 뒤로 가기
+// 화면을 바꿀 때마다 주소 끝에 #/... 위치를 남겨서, 브라우저의 뒤로·앞으로 가기와 새로고침이
+// 웹 UI 안의 이전 화면으로 동작하게 합니다.
+//   #/history  #/history/file/<서버>/<파일>  #/versions
+//   #/server/<서버>/vmcores  #/server/<서버>/results  #/server/<서버>/file/<파일>
+
+let restoringRoute = false;
+
+function routeOf() {
+  const e = encodeURIComponent;
+  if (state.page === "versions") return "#/versions";
+  if (state.page === "history") {
+    return state.view ? `#/history/file/${e(state.view.server)}/${e(state.view.name)}` : "#/history";
+  }
+  if (!state.selected) return "#/";
+  if (state.view) return `#/server/${e(state.selected)}/file/${e(state.view.name)}`;
+  return `#/server/${e(state.selected)}/${state.tab}`;
+}
+
+function applyRoute(hash) {
+  const parts = (hash || "").replace(/^#\/?/, "").split("/").map(p => {
+    try { return decodeURIComponent(p); } catch (_) { return ""; }
+  });
+  state.view = null;
+  if (parts[0] === "versions") {
+    state.page = "versions";
+  } else if (parts[0] === "history") {
+    state.page = "history";
+    if (parts[1] === "file" && parts[2] && parts[3]) state.view = { server: parts[2], name: parts[3] };
+  } else if (parts[0] === "server" && state.servers.some(s => s.name === parts[1])) {
+    state.page = "server";
+    state.selected = parts[1];
+    if (parts[2] === "file" && parts[3]) state.view = { server: parts[1], name: parts[3] };
+    else if (parts[2] === "results" || parts[2] === "vmcores") state.tab = parts[2];
+  } else {
+    state.page = "server";
+  }
+}
+
+// 화면이 바뀌었으면 방문 기록을 하나 남깁니다. 뒤로 가기로 되돌아온 경우에는 남기지 않습니다.
+function syncRoute() {
+  const route = routeOf();
+  if (route === location.hash || (route === "#/" && !location.hash)) return;
+  if (restoringRoute) history.replaceState(null, "", route);
+  else history.pushState(null, "", route);
+}
+
+window.addEventListener("popstate", () => {
+  restoringRoute = true;
+  try {
+    applyRoute(location.hash);
+    renderSidebar();
+    renderMain();
+  } finally {
+    restoringRoute = false;
+  }
+});
+
 // ---------------------------------------------------------------- 메인 화면
 
 function renderMain() {
+  syncRoute();
   const main = $("#main");
   main.innerHTML = "";
   if (state.page === "versions") return renderVersions(main);
@@ -1250,6 +1309,16 @@ async function loadState() {
   renderSidebar();
 }
 
-loadState().then(() => { renderMain(); renderJobs(); pollJobs(); loadVersions().then(() => { if (state.page === "versions") renderMain(); }); }).catch(e => {
+loadState().then(() => {
+  // 새로고침했거나 주소로 바로 들어온 경우 그 화면을 다시 엽니다.
+  // 첫 화면은 방문 기록을 새로 쌓지 않고 현재 기록을 바꿉니다(뒤로 가기 한 번이 헛돌지 않도록).
+  restoringRoute = true;
+  if (location.hash && location.hash !== "#/") {
+    applyRoute(location.hash);
+    renderSidebar();
+  }
+  renderMain();
+  restoringRoute = false;
+  renderJobs(); pollJobs(); loadVersions().then(() => { if (state.page === "versions") renderMain(); }); }).catch(e => {
   $("#main").innerHTML = `<div class="card"><p class="form-error">${esc(e.message)}</p></div>`;
 });

@@ -22,6 +22,7 @@ DEFAULT_MODELS = {"openai": "gpt-4o-mini", "claude": "claude-sonnet-5-5"}
 
 DEFAULT_PROMPT = """You are a senior Linux kernel crash dump analyst.
 Analyze the crash report and write a concise Korean incident report.
+Start the report with exactly one line in the form "판정: <one Korean sentence stating the probable root cause>" before any heading or table.
 Include: probable root cause, evidence, impacted subsystem/process, confidence, and recommended next actions.
 If evidence is insufficient, say what additional crash commands or data are needed."""
 
