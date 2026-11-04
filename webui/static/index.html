@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kdump-tools</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <img src="icon.svg" alt="" class="brand-icon">
+    <span class="brand-name">kdump-tools</span>
+    <span class="badge" id="version"></span>
+  </div>
+  <div class="topbar-actions">
+    <button class="chip" id="llm-chip" title="LLM 설정">LLM</button>
+    <button class="btn ghost" id="open-settings">설정</button>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-head">
+      <span>서버</span>
+      <button class="btn small" id="add-server">+ 추가</button>
+    </div>
+    <ul class="server-list" id="server-list"></ul>
+  </aside>
+
+  <main class="main" id="main"></main>
+</div>
+
+<div class="jobs" id="jobs"></div>
+
+<dialog id="server-dialog" class="modal">
+  <form id="server-form" method="dialog">
+    <h2 id="server-dialog-title">서버 추가</h2>
+    <input type="hidden" name="original">
+    <div class="grid">
+      <label>이름<input name="name" required pattern="[A-Za-z0-9._-]+" placeholder="db01"></label>
+      <label>접속 대상<input name="target" required placeholder="ops@10.0.0.11"></label>
+      <label>SSH 포트<input name="port" type="number" min="1" max="65535" value="22"></label>
+      <label>SSH 키 파일 <span class="hint">(비우면 기본 키)</span><input name="key_file" placeholder="C:\Users\me\.ssh\id_ed25519"></label>
+      <label>원격 analyze-kdump 경로<input name="tool" value="/opt/kdump-tools/bin/analyze-kdump"></label>
+      <label>crash 디렉터리<input name="crash_dir" value="/var/crash"></label>
+      <label>분석 방식
+        <select name="method">
+          <option value="auto">자동 선택 (설치본 → 무설치)</option>
+          <option value="installed">원격 설치본 실행</option>
+          <option value="upload">무설치 실행 (스크립트를 임시로 보내 실행)</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" name="sudo" checked> 원격 명령을 sudo로 실행 <span class="hint">(비밀번호 없는 sudo 필요)</span></label>
+    </div>
+    <p class="form-error" id="server-error"></p>
+    <div class="modal-actions">
+      <button class="btn ghost" value="cancel" formnovalidate>취소</button>
+      <button class="btn primary" id="server-save" value="save">저장</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="settings-dialog" class="modal wide">
+  <form id="settings-form" method="dialog">
+    <h2>설정</h2>
+    <section class="settings-section">
+      <h3>LLM</h3>
+      <div class="grid">
+        <label>Provider
+          <select name="provider">
+            <option value="openai">OpenAI / 호환 API (API 키)</option>
+            <option value="gemini">Google Gemini (API 키)</option>
+            <option value="claude">Anthropic Claude (API 키)</option>
+            <option value="claude-code">Claude Code CLI (Claude 구독)</option>
+            <option value="codex">Codex CLI (ChatGPT 구독)</option>
+          </select>
+        </label>
+        <label>모델 <span class="hint">(비우면 기본값)</span>
+          <div class="inline">
+            <input name="model" list="model-options" placeholder="기본값">
+            <datalist id="model-options"></datalist>
+            <button type="button" class="btn small" id="load-models">목록</button>
+          </div>
+        </label>
+      </div>
+      <div class="grid api-only">
+        <label>API 엔드포인트 <span class="hint">(비우면 기본값, 사내 호환 서버 등)</span><input name="base_url" placeholder="https://..."></label>
+        <label>API 키 <span class="hint" id="api-key-state"></span>
+          <div class="inline">
+            <input type="password" id="api-key-input" placeholder="새 키를 입력하면 이 컴퓨터에 저장" autocomplete="off">
+            <button type="button" class="btn small" id="save-api-key">저장</button>
+          </div>
+        </label>
+      </div>
+      <div class="grid cli-only">
+        <label>CLI 경로 <span class="hint">(비우면 PATH에서 찾음)</span><input name="cli_path" placeholder="claude / codex"></label>
+        <label class="claude-only">Claude Code 장기 토큰 <span class="hint" id="cli-token-state"></span>
+          <div class="inline">
+            <input type="password" id="cli-token-input" placeholder="claude setup-token 출력" autocomplete="off">
+            <button type="button" class="btn small" id="save-cli-token">저장</button>
+          </div>
+        </label>
+      </div>
+      <div class="cli-status cli-only" id="cli-status"></div>
+      <div class="inline-actions">
+        <button type="button" class="btn small" id="cli-refresh">CLI 상태 확인</button>
+        <button type="button" class="btn small" id="llm-test">연결 테스트</button>
+        <span class="hint" id="llm-test-result"></span>
+      </div>
+    </section>
+    <section class="settings-section">
+      <h3>분석 입력</h3>
+      <div class="grid three">
+        <label class="check"><input type="checkbox" name="mask"> 민감정보 마스킹</label>
+        <label>최대 입력 글자 수<input name="max_report_chars" type="number" min="1000"></label>
+        <label>최대 출력 토큰<input name="max_tokens" type="number" min="256"></label>
+        <label>제한 시간(초)<input name="timeout" type="number" min="10"></label>
+      </div>
+    </section>
+    <p class="form-error" id="settings-error"></p>
+    <div class="modal-actions">
+      <button class="btn ghost" value="cancel" formnovalidate>닫기</button>
+      <button class="btn primary" id="settings-save" value="save">저장</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
