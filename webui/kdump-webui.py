@@ -37,7 +37,13 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(APP_DIR)
 # 화면(app.js)과 서버가 주고받는 API의 판. API를 바꿀 때 app.js의 API_LEVEL과 함께 올립니다.
 # 업데이트 뒤 서버를 다시 시작하지 않으면 화면이 이 값의 차이로 알아채고 안내합니다.
-API_LEVEL = 2
+API_LEVEL = 3
+
+# 화면의 "다시 시작"은 감시 프로세스가 서버를 새 코드로 다시 띄우는 방식입니다.
+RESTART_EXIT = 75                     # 서버가 이 코드로 끝나면 감시 프로세스가 다시 띄웁니다
+ENV_WORKER = "KDUMP_WEBUI_WORKER"     # 감시 프로세스가 띄운 서버임을 표시
+ENV_TOKEN = "KDUMP_WEBUI_TOKEN"       # 다시 시작해도 같은 토큰(브라우저 쿠키 유지)
+ENV_PORT = "KDUMP_WEBUI_PORT"         # 다시 시작해도 같은 포트
 STATIC_DIR = os.path.join(APP_DIR, "static")
 ANALYZE_SCRIPT = os.path.join(REPO_DIR, "bin", "analyze-kdump")
 
@@ -889,11 +895,15 @@ class Jobs:
 # ---------------------------------------------------------------- HTTP
 
 class App:
-    def __init__(self, store, port):
+    def __init__(self, store, port, token=None, supervised=False):
         self.store = store
         self.jobs = Jobs(store)
         self.port = port
-        self.token = secrets.token_urlsafe(24)
+        self.token = token or secrets.token_urlsafe(24)
+        self.supervised = supervised      # 감시 프로세스 아래에서 실행 중이면 화면에서 다시 시작할 수 있음
+        self.started_at = time.time()
+        self.httpd = None
+        self.restart_requested = False
         self.started_version = version_text()  # 이 서버 프로세스를 시작할 때의 버전
         self.latest = None
         threading.Thread(target=self.check_latest, daemon=True).start()
@@ -1023,7 +1033,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(200, {"version": version_text(), "settings": app.public_settings(),
                                     "servers": store.servers(), "jobs": app.jobs.recent(),
                                     "platform": sys.platform, "api": API_LEVEL,
-                                    "running_version": app.started_version})
+                                    "running_version": app.started_version,
+                                    "supervised": app.supervised, "started_at": app.started_at})
+        if parts == ["restart"] and method == "POST":
+            body = self._body()
+            if not app.supervised:
+                raise ApiError(409, "이 웹 UI는 화면에서 다시 시작할 수 없는 방식으로 실행되었습니다. "
+                                    "콘솔에서 Ctrl+C로 끈 뒤 python webui/kdump-webui.py로 다시 실행해 주세요.")
+            with app.jobs.lock:
+                active = [j for j in app.jobs.items.values() if j.status in ("queued", "running")]
+            if active and not body.get("force"):
+                raise ApiError(409, "진행 중이거나 대기 중인 작업이 %d개 있습니다. 끝난 뒤 다시 시작해 주세요." % len(active))
+            app.restart_requested = True
+            # 응답을 보낸 뒤 서버를 멈춥니다. serve_forever가 끝나면 RESTART_EXIT로 종료합니다.
+            threading.Timer(0.3, app.httpd.shutdown).start()
+            return self._json(200, {"ok": True, "version": version_text()})
 
         if parts == ["servers"] and method == "POST":
             body = self._body()
@@ -1174,41 +1198,127 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
-    allow_reuse_address = False
+    # 다시 시작할 때 같은 포트를 바로 쓰려면 리눅스·macOS에서는 SO_REUSEADDR가 필요합니다.
+    # Windows의 SO_REUSEADDR는 다른 프로그램이 쓰는 포트까지 빼앗을 수 있어 켜지 않습니다.
+    allow_reuse_address = os.name != "nt"
 
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser(description="kdump-tools 웹 UI")
     parser.add_argument("--port", type=int, default=8730)
     parser.add_argument("--data-dir", default=os.path.join(os.path.expanduser("~"), ".kdump-tools-web"))
     parser.add_argument("--no-browser", action="store_true")
-    args = parser.parse_args()
+    parser.add_argument("--no-supervisor", action="store_true",
+                        help="감시 프로세스 없이 실행합니다(화면의 다시 시작 버튼을 쓸 수 없음)")
+    return parser.parse_args()
 
-    store = Store(args.data_dir)
-    httpd = None
-    port = args.port
-    for candidate in range(args.port, args.port + 10):
+
+def bind_free_port(start):
+    for candidate in range(start, start + 10):
         try:
-            httpd = Server(("127.0.0.1", candidate), Handler)
-            port = candidate
-            break
+            return Server(("127.0.0.1", candidate), Handler), candidate
         except OSError:
             continue
-    if not httpd:
-        sys.exit("사용할 수 있는 포트가 없습니다 (%d~%d)." % (args.port, args.port + 9))
+    sys.exit("사용할 수 있는 포트가 없습니다 (%d~%d)." % (start, start + 9))
 
-    Handler.app = App(store, port)
-    url = "http://127.0.0.1:%d/?t=%s" % (port, Handler.app.token)
+
+def bind_exact_port(port, wait=20):
+    """다시 시작할 때는 앞 서버가 막 놓은 포트를 다시 잡습니다. 잠깐 사용 중일 수 있어 기다립니다."""
+    deadline = time.time() + wait
+    while True:
+        try:
+            return Server(("127.0.0.1", port), Handler)
+        except OSError:
+            if time.time() > deadline:
+                raise
+            time.sleep(0.5)
+
+
+def print_banner(data_dir, url):
     print("kdump-tools 웹 UI v%s" % version_text())
-    print("데이터: %s" % args.data_dir)
+    print("데이터: %s" % data_dir)
     print("접속 주소 (이 주소로만 접속할 수 있습니다):")
     print("  " + url, flush=True)
-    if not args.no_browser:
-        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+
+
+def watch_supervisor():
+    """감시 프로세스가 사라지면(창을 닫거나 강제 종료) 연결된 표준 입력이 닫히므로 서버도 끝냅니다."""
+    try:
+        sys.stdin.buffer.read()
+    except Exception:  # noqa: BLE001
+        pass
+    os._exit(0)
+
+
+def serve(args, supervised=False):
+    store = Store(args.data_dir)
+    if supervised:
+        port = int(os.environ[ENV_PORT])
+        httpd = bind_exact_port(port)
+        token = os.environ[ENV_TOKEN]
+    else:
+        httpd, port = bind_free_port(args.port)
+        token = None
+    app = App(store, port, token=token, supervised=supervised)
+    app.httpd = httpd
+    Handler.app = app
+    if supervised:
+        threading.Thread(target=watch_supervisor, daemon=True).start()
+    else:
+        url = "http://127.0.0.1:%d/?t=%s" % (port, app.token)
+        print_banner(args.data_dir, url)
+        if not args.no_browser:
+            threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
+        pass
+    httpd.server_close()
+    if app.restart_requested:
+        os._exit(RESTART_EXIT)
+    if not supervised:
         print("\n종료합니다.")
+
+
+def supervise(args):
+    """콘솔을 맡아 서버 프로세스를 띄웁니다. 서버가 RESTART_EXIT로 끝나면 디스크에 있는 (업데이트된) 코드로
+    다시 띄웁니다. 토큰과 포트는 처음 정한 값을 계속 써서 브라우저가 다시 로그인하지 않아도 됩니다."""
+    probe, port = bind_free_port(args.port)
+    probe.server_close()
+    token = secrets.token_urlsafe(24)
+    url = "http://127.0.0.1:%d/?t=%s" % (port, token)
+    print_banner(args.data_dir, url)
+    if not args.no_browser:
+        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
+
+    env = dict(os.environ, **{ENV_WORKER: "1", ENV_TOKEN: token, ENV_PORT: str(port)})
+    argv = [sys.executable, os.path.abspath(__file__)] + sys.argv[1:]
+    while True:
+        child = subprocess.Popen(argv, env=env, stdin=subprocess.PIPE)
+        try:
+            code = child.wait()
+        except KeyboardInterrupt:
+            # Ctrl+C는 같은 콘솔의 서버 프로세스에도 전달되므로 끝나기를 잠깐 기다립니다.
+            try:
+                child.wait(timeout=5)
+            except (subprocess.TimeoutExpired, KeyboardInterrupt):
+                child.kill()
+            print("\n종료합니다.")
+            return
+        if code == RESTART_EXIT:
+            print("다시 시작합니다: v%s" % version_text(), flush=True)
+            continue
+        sys.exit(code)
+
+
+def main():
+    args = parse_args()
+    if os.environ.get(ENV_WORKER) == "1":
+        serve(args, supervised=True)
+    elif args.no_supervisor:
+        serve(args)
+    else:
+        supervise(args)
 
 
 if __name__ == "__main__":
