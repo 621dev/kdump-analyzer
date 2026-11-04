@@ -37,19 +37,26 @@ ANALYSIS_PREFIX="kdump-analysis"
 # 설정하지 않으면 스크립트 기본 명령 목록을 사용합니다.
 # 각 명령 출력은 "===== crash> <명령> =====" 섹션으로 저장되므로
 # 명령에 직접 > 리다이렉션을 쓰지 않습니다.
-# 모듈 심볼이 필요하면 맨 앞에 mod -S, hung task 분석에는 foreach UN bt를 추가합니다.
+# 아래는 기본 목록입니다. 모듈 심볼이 필요하면 set scroll off 다음에 mod -S를 추가합니다.
 # REPORT_COMMANDS="
 # set scroll off
-# mod -S
 # sys
 # bt
 # bt -a
+# foreach UN bt
 # ps
 # log
 # kmem -i
+# mod -t
+# runq
+# dev -d
 # mount
 # files
 # "
+
+# 선택 사항: taint된 모듈(외부·서명 없음 등)의 함수가 콜스택에 있는 태스크를
+# foreach bt 결과에서 골라 "taint 모듈 관련 태스크" 섹션으로 붙입니다. 끄려면 0.
+# REPORT_TAINTED_TASKS=1
 
 # 선택 사항: 별도 파일로 관리하는 crash 명령 목록.
 # 설정하면 REPORT_COMMANDS보다 우선합니다.
