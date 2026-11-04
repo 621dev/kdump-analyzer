@@ -1,5 +1,8 @@
 "use strict";
 
+// 서버(kdump-webui.py)의 API_LEVEL과 같아야 합니다. 다르면 업데이트 뒤 서버를 다시 시작하지 않은 것입니다.
+const API_LEVEL = 2;
+
 // ---------------------------------------------------------------- 상태와 공통
 
 const state = {
@@ -15,6 +18,7 @@ const state = {
   historyFilter: { server: "", text: "", kind: "all" },
   health: {},           // 서버 이름 -> 연결 테스트 결과
   jobs: new Map(),      // 작업 id -> 작업
+  apiMismatch: false,   // 화면과 서버의 API 판이 다름(서버 재시작 필요)
   vmcores: {},          // 서버 이름 -> 목록 캐시
   vmcoreRecords: {},    // 서버 이름 -> { vmcore 경로: 기록 요약 }
   vmcoreSelection: {},  // 서버 이름 -> 선택한 vmcore 경로(Set)
@@ -35,7 +39,12 @@ async function api(method, path, body) {
   });
   let data = {};
   try { data = await res.json(); } catch (_) { /* 비어 있는 응답 */ }
-  if (!res.ok) throw new Error(data.error || `요청 실패 (${res.status})`);
+  if (!res.ok) {
+    if (res.status === 404 && path.startsWith("/api/") && state.apiMismatch) {
+      throw new Error("웹 UI 서버가 이전 버전으로 실행 중이라 이 기능을 쓸 수 없습니다. 웹 UI를 다시 시작해 주세요.");
+    }
+    throw new Error(data.error || `요청 실패 (${res.status})`);
+  }
   return data;
 }
 
@@ -1225,6 +1234,15 @@ async function loadState() {
   state.version = data.version;
   state.settings = data.settings;
   state.servers = data.servers;
+  state.apiMismatch = data.api !== API_LEVEL;
+  const banner = $("#restart-banner");
+  if (state.apiMismatch) {
+    const running = data.running_version ? `v${data.running_version}` : "이전 버전";
+    banner.innerHTML = `<b>웹 UI를 다시 시작해 주세요.</b> 화면은 새 버전으로 바뀌었지만 서버는 ${esc(running)}으로 실행 중이라 일부 기능이 동작하지 않습니다. 웹 UI를 실행한 콘솔에서 <code>Ctrl+C</code>로 끈 뒤 <code>python webui/kdump-webui.py</code>로 다시 실행하고, 새로 나온 주소로 접속하세요.`;
+    banner.hidden = false;
+  } else {
+    banner.hidden = true;
+  }
   // 페이지를 새로 열었을 때는 아직 진행 중인 작업만 다시 보여줍니다.
   for (const job of data.jobs) if (isActive(job) && !state.jobs.has(job.id)) state.jobs.set(job.id, job);
   renderVersionBadge();
