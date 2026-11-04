@@ -12,7 +12,7 @@
   <div class="brand">
     <img src="icon.svg" alt="" class="brand-icon">
     <span class="brand-name">kdump-tools</span>
-    <span class="badge" id="version"></span>
+    <button class="badge" id="version" type="button" title="버전·업데이트"></button>
   </div>
   <div class="topbar-actions">
     <button class="chip" id="llm-chip" title="LLM 설정">LLM</button>
@@ -25,6 +25,10 @@
     <button class="nav-item" id="nav-history" type="button">
       <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5a6.5 6.5 0 1 1-6.1 4.3M3.5 3.5v4h4M10 6.5V10l2.5 1.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
       <span>분석 기록</span>
+    </button>
+    <button class="nav-item" id="nav-versions" type="button">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15.5v-10M5.5 9.5 10 5l4.5 4.5M4 17h12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>버전·업데이트</span><span class="nav-dot" id="nav-update-dot" hidden></span>
     </button>
     <div class="sidebar-head">
       <span>서버</span>
