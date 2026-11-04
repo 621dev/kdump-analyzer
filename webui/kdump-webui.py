@@ -159,6 +159,44 @@ class Store:
         items.sort(key=lambda i: i["mtime"], reverse=True)
         return items
 
+    def history(self, server=None):
+        """리포트별로 LLM 분석을 묶은 분석 기록. 삭제한 서버의 기록도 포함합니다."""
+        base = os.path.join(self.dir, "reports")
+        servers = [server] if server else (sorted(os.listdir(base)) if os.path.isdir(base) else [])
+        records = []
+        for srv in servers:
+            folder = os.path.join(base, srv)
+            if not NAME_RE.match(srv) or not os.path.isdir(folder):
+                continue
+            reports, analyses = {}, []
+            for name in os.listdir(folder):
+                if not FILE_RE.match(name):
+                    continue
+                full = os.path.join(folder, name)
+                info = parse_result_head(full)
+                info.update(name=name, mtime=os.path.getmtime(full))
+                if "-analysis-" in name:
+                    analyses.append(info)
+                else:
+                    reports[name] = info
+            grouped = {}
+            for a in analyses:
+                source = a.pop("source_report", "")
+                key = re.split(r"[\\/]", source)[-1] if source else ""
+                grouped.setdefault(key if key in reports else "?" + a["name"], []).append(a)
+            for name, rep in reports.items():
+                records.append(self._record(srv, rep, grouped.pop(name, [])))
+            for items in grouped.values():  # 원본 리포트가 지워진 분석
+                records.append(self._record(srv, None, items))
+        records.sort(key=lambda r: r["time"], reverse=True)
+        return records
+
+    @staticmethod
+    def _record(server, report, analyses):
+        analyses.sort(key=lambda a: a["mtime"], reverse=True)
+        times = [a["mtime"] for a in analyses] + ([report["mtime"]] if report else [])
+        return {"server": server, "time": max(times), "report": report, "analyses": analyses}
+
     def result_path(self, server, name):
         if not NAME_RE.match(server or "") or not FILE_RE.match(name or ""):
             raise ApiError(400, "잘못된 파일 이름입니다.")
@@ -166,6 +204,47 @@ class Store:
         if not os.path.exists(path):
             raise ApiError(404, "파일을 찾을 수 없습니다: %s" % name)
         return path
+
+
+HEAD_KEYS = ("vmcore", "kernel", "generated", "provider", "model", "source_report")
+VERDICT_RE = re.compile(r"^\|\s*\**\s*(판정|결론|verdict|root cause)\s*\**\s*\|\s*(.+?)\s*\|?\s*$", re.I)
+
+
+def _plain(text):
+    text = re.sub(r"[*`]", "", text).strip()
+    return text if len(text) <= 200 else text[:199] + "…"
+
+
+def parse_result_head(path):
+    """리포트·분석 파일 앞부분에서 기록 화면에 보일 정보를 읽습니다."""
+    info = {}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            head = f.read(16384)
+    except OSError:
+        return info
+    lines = head.splitlines()
+    for line in lines[:12]:
+        key, sep, value = line.partition(":")
+        if sep and key.strip() in HEAD_KEYS:
+            info[key.strip()] = value.strip()
+    if "-analysis-" in os.path.basename(path):
+        body = head.split("\n\n", 1)[-1]
+        verdict = ""
+        for line in body.splitlines():
+            m = VERDICT_RE.match(line)
+            if m:
+                verdict = m.group(2)
+                break
+        if not verdict:  # 표가 없는 분석은 제목이 아닌 첫 문장을 씁니다.
+            verdict = next((l for l in body.splitlines()
+                            if l.strip() and not l.lstrip().startswith(("#", "|", "```", "---"))), "")
+        info["verdict"] = _plain(verdict.lstrip("-*> 0123456789."))
+    else:
+        m = re.search(r'^\s*PANIC:\s*"?(.*?)"?\s*$', head, re.M)
+        if m and m.group(1):
+            info["panic"] = _plain(m.group(1))
+    return info
 
 
 class ApiError(Exception):
@@ -609,6 +688,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             server = query.get("server", [""])[0]
             store.server(server)
             return self._json(200, {"results": store.results(server)})
+        if parts == ["history"] and method == "GET":
+            server = query.get("server", [""])[0]
+            if server and not NAME_RE.match(server):
+                raise ApiError(400, "잘못된 서버 이름입니다.")
+            return self._json(200, {"records": store.history(server or None)})
         if parts == ["file"] and method == "GET":
             path_ = store.result_path(query.get("server", [""])[0], query.get("name", [""])[0])
             with open(path_, encoding="utf-8", errors="replace") as f:

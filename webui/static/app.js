@@ -6,9 +6,11 @@ const state = {
   version: "",
   settings: {},
   servers: [],
+  page: "server",       // server | history
   selected: null,       // 서버 이름
   tab: "vmcores",       // vmcores | results
-  view: null,           // { name } 결과 파일 보기
+  view: null,           // { server, name } 결과 파일 보기
+  historyFilter: { server: "", text: "", kind: "all" },
   health: {},           // 서버 이름 -> 연결 테스트 결과
   jobs: new Map(),      // 작업 id -> 작업
   vmcores: {},          // 서버 이름 -> 목록 캐시
@@ -152,10 +154,11 @@ function renderSidebar() {
   if (!state.servers.length) {
     list.append(h('<li class="muted" style="padding:8px 10px;font-size:13px">등록된 서버가 없습니다.</li>'));
   }
+  $("#nav-history").classList.toggle("active", state.page === "history");
   for (const s of state.servers) {
     const health = state.health[s.name];
     const dot = health ? (health.ok ? "ok" : "err") : "";
-    const item = h(`<li class="server-item ${state.selected === s.name ? "active" : ""}">
+    const item = h(`<li class="server-item ${state.page === "server" && state.selected === s.name ? "active" : ""}">
       <span class="dot ${dot}"></span>
       <div style="min-width:0"><div class="name">${esc(s.name)}</div><div class="sub">${esc(s.target)}</div></div>
     </li>`);
@@ -168,10 +171,27 @@ function renderSidebar() {
 }
 
 function selectServer(name) {
+  state.page = "server";
   state.selected = name;
   state.view = null;
   renderSidebar();
   renderMain();
+}
+
+function openHistory() {
+  state.page = "history";
+  state.view = null;
+  renderSidebar();
+  renderMain();
+}
+
+// 결과 파일을 엽니다. 분석 기록 화면에서 열면 돌아갈 때도 기록 화면으로 갑니다.
+function openFile(server, name) {
+  if (state.page === "server") state.selected = server;
+  state.view = { server, name };
+  renderSidebar();
+  renderMain();
+  window.scrollTo(0, 0);
 }
 
 // ---------------------------------------------------------------- 메인 화면
@@ -179,6 +199,10 @@ function selectServer(name) {
 function renderMain() {
   const main = $("#main");
   main.innerHTML = "";
+  if (state.page === "history") {
+    if (state.view) return renderViewer(main, state.view.server);
+    return renderHistory(main);
+  }
   if (!state.servers.length) {
     main.append(h(`<div class="card empty">
       <h2>kdump-tools 웹 UI</h2>
@@ -231,7 +255,7 @@ function renderMain() {
   $("#srv-edit").addEventListener("click", () => openServerDialog(server));
   $("#srv-del").addEventListener("click", () => deleteServer(server.name));
 
-  if (state.view) return renderViewer(main, server);
+  if (state.view) return renderViewer(main, server.name);
 
   const panel = h(`<div class="card">
     <div class="tabs">
@@ -290,52 +314,166 @@ async function renderVmcores(server, refresh = false) {
 async function renderResults(server) {
   const body = $("#tab-body");
   body.innerHTML = '<p class="muted"><span class="spinner"></span> 불러오는 중...</p>';
-  let results;
+  let records;
   try {
-    results = (await api("GET", `/api/results?server=${encodeURIComponent(server.name)}`)).results;
+    records = (await api("GET", `/api/history?server=${encodeURIComponent(server.name)}`)).records;
   } catch (e) {
     body.innerHTML = `<p class="form-error">${esc(e.message)}</p>`;
     return;
   }
-  if (state.selected !== server.name || state.tab !== "results" || state.view) return;
+  if (state.page !== "server" || state.selected !== server.name || state.tab !== "results" || state.view) return;
   body.innerHTML = "";
-  if (!results.length) {
+  if (!records.length) {
     body.append(h('<p class="muted">아직 분석 결과가 없습니다. vmcore 탭에서 분석을 실행하세요.</p>'));
     return;
   }
-  const table = h(`<table class="list"><thead><tr><th>종류</th><th>파일</th><th>시각</th><th>크기</th></tr></thead><tbody></tbody></table>`);
-  for (const r of results) {
-    const row = h(`<tr class="clickable">
-      <td><span class="tag ${r.kind}">${r.kind === "analysis" ? "LLM 분석" : "리포트"}</span></td>
-      <td class="path">${esc(r.name)}</td>
-      <td style="white-space:nowrap">${fmtTime(r.mtime)}</td>
-      <td>${fmtSize(r.size)}</td></tr>`);
-    row.addEventListener("click", () => { state.view = { name: r.name }; renderMain(); });
-    table.tBodies[0].append(row);
+  body.append(recordList(records, false));
+}
+
+// ---------------------------------------------------------------- 분석 기록
+
+// 기록 하나 = 리포트 한 건 + 그 리포트로 만든 LLM 분석들(최신 순)
+function recordList(records, showServer) {
+  const list = h('<div class="records"></div>');
+  for (const r of records) {
+    const latest = r.analyses[0];
+    const rep = r.report;
+    const known = state.servers.some(s => s.name === r.server);
+    const verdict = latest
+      ? `<div class="verdict">${esc(latest.verdict || "(판정 문장을 찾지 못했습니다)")}</div>`
+      : '<div class="verdict none">LLM 분석 없음 · 리포트만 생성됨</div>';
+    const facts = [];
+    if (rep && rep.panic) facts.push(`<span class="panic">${esc(rep.panic)}</span>`);
+    if (rep && rep.vmcore) facts.push(`<span class="path">${esc(rep.vmcore)}</span>`);
+    if (!rep) facts.push('<span>원본 리포트가 없습니다</span>');
+    const llm = latest ? `${esc(PROVIDER_LABEL[latest.provider] || latest.provider || "LLM")}${latest.model ? " · " + esc(latest.model) : ""}` : "";
+    const item = h(`<div class="record">
+      <div class="record-body">
+        <div class="record-top">
+          ${showServer ? `<span class="tag server${known ? "" : " gone"}" title="${known ? "" : "삭제된 서버"}">${esc(r.server)}</span>` : ""}
+          <span>${fmtTime(r.time)}</span>
+          ${rep && rep.kernel ? `<span class="muted">${esc(rep.kernel)}</span>` : ""}
+        </div>
+        ${verdict}
+        <div class="record-facts">${facts.join("")}</div>
+        ${llm ? `<div class="record-llm">${llm}${r.analyses.length > 1 ? ` · 분석 ${r.analyses.length}건` : ""}</div>` : ""}
+        ${r.analyses.length > 1 ? `<div class="record-more">${r.analyses.slice(1).map((a, i) =>
+          `<button class="linkish" data-older="${i + 1}">${fmtTime(a.mtime)} ${esc(PROVIDER_LABEL[a.provider] || a.provider || "")}</button>`).join("")}</div>` : ""}
+      </div>
+      <div class="record-actions">
+        ${latest ? '<button class="btn small primary" data-act="analysis">분석 보기</button>' : ""}
+        ${rep ? '<button class="btn small" data-act="report">리포트</button>' : ""}
+        ${rep && known ? `<button class="btn small" data-act="llm">${latest ? "다시 분석" : "LLM 분석"}</button>` : ""}
+      </div>
+    </div>`);
+    item.querySelectorAll("[data-act]").forEach(b => b.addEventListener("click", e => {
+      e.stopPropagation();
+      const act = b.dataset.act;
+      if (act === "analysis") openFile(r.server, latest.name);
+      if (act === "report") openFile(r.server, rep.name);
+      if (act === "llm") startJob({ kind: "reanalyze", server: r.server, report: rep.name });
+    }));
+    item.querySelectorAll("[data-older]").forEach(b => b.addEventListener("click", e => {
+      e.stopPropagation();
+      openFile(r.server, r.analyses[Number(b.dataset.older)].name);
+    }));
+    item.addEventListener("click", () => openFile(r.server, latest ? latest.name : rep.name));
+    list.append(item);
   }
-  body.append(table);
+  return list;
+}
+
+async function renderHistory(main) {
+  const card = h(`<div class="card">
+    <div class="card-head">
+      <div><h2>분석 기록</h2><div class="meta">이 노트북에 저장된 리포트와 LLM 분석입니다. 리포트별로 묶어 최신 순으로 보여줍니다.</div></div>
+    </div>
+    <div class="history-tools">
+      <select id="h-server"><option value="">모든 서버</option></select>
+      <select id="h-kind">
+        <option value="all">전체</option><option value="analysis">LLM 분석 있음</option><option value="report">리포트만</option>
+      </select>
+      <input id="h-text" placeholder="판정, panic, vmcore, 커널 버전으로 검색">
+    </div>
+    <div id="h-summary" class="muted history-summary"></div>
+    <div id="h-list"><p class="muted"><span class="spinner"></span> 불러오는 중...</p></div>
+  </div>`);
+  main.append(card);
+  let records;
+  try {
+    records = (await api("GET", "/api/history")).records;
+  } catch (e) {
+    $("#h-list").innerHTML = `<p class="form-error">${esc(e.message)}</p>`;
+    return;
+  }
+  if (state.page !== "history" || state.view || !card.isConnected) return;
+
+  const f = state.historyFilter;
+  const names = [...new Set([...state.servers.map(s => s.name), ...records.map(r => r.server)])];
+  const sel = $("#h-server");
+  for (const n of names) sel.append(h(`<option value="${esc(n)}">${esc(n)}</option>`));
+  sel.value = names.includes(f.server) ? f.server : "";
+  $("#h-kind").value = f.kind;
+  $("#h-text").value = f.text;
+
+  function draw() {
+    const t = f.text.trim().toLowerCase();
+    const shown = records.filter(r => {
+      if (f.server && r.server !== f.server) return false;
+      if (f.kind === "analysis" && !r.analyses.length) return false;
+      if (f.kind === "report" && r.analyses.length) return false;
+      if (!t) return true;
+      const hay = [r.server, ...(r.analyses.map(a => `${a.verdict} ${a.provider} ${a.model}`)),
+        r.report ? `${r.report.panic} ${r.report.vmcore} ${r.report.kernel} ${r.report.name}` : ""].join(" ").toLowerCase();
+      return hay.includes(t);
+    });
+    const analyzed = shown.filter(r => r.analyses.length).length;
+    $("#h-summary").textContent = records.length
+      ? `${shown.length}건 표시 (LLM 분석 ${analyzed}건 · 리포트만 ${shown.length - analyzed}건) / 전체 ${records.length}건`
+      : "";
+    const holder = $("#h-list");
+    holder.innerHTML = "";
+    if (!records.length) {
+      holder.append(h('<p class="muted">아직 분석 기록이 없습니다. 서버의 vmcore 탭에서 분석을 실행하면 여기에 쌓입니다.</p>'));
+    } else if (!shown.length) {
+      holder.append(h('<p class="muted">조건에 맞는 기록이 없습니다.</p>'));
+    } else {
+      holder.append(recordList(shown, true));
+    }
+  }
+  draw();
+  sel.addEventListener("change", () => { f.server = sel.value; draw(); });
+  $("#h-kind").addEventListener("change", e => { f.kind = e.target.value; draw(); });
+  let timer;
+  $("#h-text").addEventListener("input", e => { clearTimeout(timer); timer = setTimeout(() => { f.text = e.target.value; draw(); }, 150); });
 }
 
 // ---------------------------------------------------------------- 결과 보기
 
-async function renderViewer(main, server) {
+async function renderViewer(main, serverName) {
   const name = state.view.name;
   const card = h(`<div class="card"><p class="muted"><span class="spinner"></span> 불러오는 중...</p></div>`);
   main.append(card);
   let content;
   try {
-    content = (await api("GET", `/api/file?server=${encodeURIComponent(server.name)}&name=${encodeURIComponent(name)}`)).content;
+    content = (await api("GET", `/api/file?server=${encodeURIComponent(serverName)}&name=${encodeURIComponent(name)}`)).content;
   } catch (e) {
     card.innerHTML = `<p class="form-error">${esc(e.message)}</p>`;
     return;
   }
   const isAnalysis = name.includes("-analysis-");
+  const fromHistory = state.page === "history";
   card.innerHTML = "";
   const head = h(`<div class="viewer-head">
-    <div><button class="btn small ghost" id="v-back">← 목록</button> <span class="path">${esc(name)}</span></div>
+    <div><button class="btn small ghost" id="v-back">← ${fromHistory ? "분석 기록" : "목록"}</button>
+      ${fromHistory ? `<span class="tag server">${esc(serverName)}</span>` : ""} <span class="path">${esc(name)}</span></div>
     <div class="actions"></div></div>`);
   card.append(head);
-  $("#v-back").addEventListener("click", () => { state.view = null; state.tab = "results"; renderMain(); });
+  $("#v-back").addEventListener("click", () => {
+    state.view = null;
+    if (!fromHistory) state.tab = "results";
+    renderMain();
+  });
   const actions = head.querySelector(".actions");
 
   if (isAnalysis) {
@@ -347,7 +485,7 @@ async function renderViewer(main, server) {
     const reportName = source.split(/[\\/]/).pop();
     if (reportName) {
       const btn = h('<button class="btn small">원본 리포트 보기</button>');
-      btn.addEventListener("click", () => { state.view = { name: reportName }; renderMain(); });
+      btn.addEventListener("click", () => openFile(serverName, reportName));
       actions.append(btn);
     }
     const shortMeta = meta.split("\n").filter(l => !l.startsWith("source_report:") && !l.startsWith("kdump llm")).join("\n");
@@ -356,9 +494,11 @@ async function renderViewer(main, server) {
     return;
   }
 
-  const btn = h('<button class="btn small primary">LLM으로 분석</button>');
-  btn.addEventListener("click", () => startJob({ kind: "reanalyze", server: server.name, report: name }));
-  actions.append(btn);
+  if (state.servers.some(s => s.name === serverName)) {
+    const btn = h('<button class="btn small primary">LLM으로 분석</button>');
+    btn.addEventListener("click", () => startJob({ kind: "reanalyze", server: serverName, report: name }));
+    actions.append(btn);
+  }
 
   const parts = content.split(/^===== (.+?) =====$/m);
   const preamble = parts[0].trim();
@@ -490,7 +630,24 @@ async function pollJobs() {
 
 function onJobFinished(job) {
   toast(job.status === "done" ? `${job.server}: 분석을 마쳤습니다.` : `${job.server}: 실패했습니다.`);
-  if (state.selected === job.server && state.tab === "results" && !state.view) renderMain();
+  if (job.status === "done") scheduleJobClose(job.id);
+  // 기록 목록을 보고 있으면 새 결과가 보이도록 다시 그립니다.
+  if (!state.view && (state.page === "history" || (state.selected === job.server && state.tab === "results"))) renderMain();
+}
+
+// 성공한 작업 카드는 잠시 뒤 자동으로 닫습니다. 실패한 카드는 오류를 읽을 수 있게 직접 닫을 때까지 둡니다.
+// 마우스를 올려 두었거나 로그를 펼쳐 둔 카드는 닫지 않고 기다립니다.
+const JOB_AUTO_CLOSE_MS = 8000;
+function scheduleJobClose(id, delay = JOB_AUTO_CLOSE_MS) {
+  setTimeout(() => {
+    const job = state.jobs.get(id);
+    if (!job) return;
+    const el = document.querySelector(`.job[data-id="${id}"]`);
+    if (job.showLog || (el && el.matches(":hover"))) return scheduleJobClose(id, 3000);
+    if (!el) { state.jobs.delete(id); return; }
+    el.classList.add("leaving");
+    setTimeout(() => { state.jobs.delete(id); renderJobs(); }, 300);
+  }, delay);
 }
 
 function renderJobs() {
@@ -505,7 +662,7 @@ function renderJobs() {
     const detail = job.status === "running" && job.progress
       ? `${job.progress.current}/${job.progress.total} ${job.progress.label || ""}`
       : job.phase;
-    const el = h(`<div class="job ${job.status}">
+    const el = h(`<div class="job ${job.status}" data-id="${esc(job.id)}">
       <div class="job-head"><span>${esc(job.server)} · ${esc(label)}</span>
         <span>${job.status === "running" ? '<span class="spinner"></span>' : (job.status === "done" ? "✓" : "✕")}</span></div>
       <div class="job-sub">${esc(job.vmcore || job.report || "")}</div>
@@ -527,10 +684,8 @@ function renderJobs() {
       if (act === "log") { job.showLog = !job.showLog; renderJobs(); }
       if (act === "close") { state.jobs.delete(job.id); renderJobs(); }
       if (act === "analysis" || act === "report") {
-        state.selected = job.server;
-        state.view = { name: act === "analysis" ? job.analysis : job.report };
-        renderSidebar();
-        renderMain();
+        state.page = "server";
+        openFile(job.server, act === "analysis" ? job.analysis : job.report);
       }
     }));
     box.append(el);
@@ -674,6 +829,7 @@ $("#llm-test").addEventListener("click", async () => {
 });
 
 $("#add-server").addEventListener("click", () => openServerDialog());
+$("#nav-history").addEventListener("click", openHistory);
 
 // ---------------------------------------------------------------- 시작
 
