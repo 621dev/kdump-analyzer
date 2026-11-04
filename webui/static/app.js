@@ -1,7 +1,7 @@
 "use strict";
 
 // 서버(kdump-webui.py)의 API_LEVEL과 같아야 합니다. 다르면 업데이트 뒤 서버를 다시 시작하지 않은 것입니다.
-const API_LEVEL = 2;
+const API_LEVEL = 3;
 
 // ---------------------------------------------------------------- 상태와 공통
 
@@ -19,6 +19,8 @@ const state = {
   health: {},           // 서버 이름 -> 연결 테스트 결과
   jobs: new Map(),      // 작업 id -> 작업
   apiMismatch: false,   // 화면과 서버의 API 판이 다름(서버 재시작 필요)
+  supervised: false,    // 서버가 감시 프로세스 아래에서 실행 중(화면에서 다시 시작 가능)
+  startedAt: null,      // 서버 프로세스 시작 시각(다시 시작 확인용)
   vmcores: {},          // 서버 이름 -> 목록 캐시
   vmcoreRecords: {},    // 서버 이름 -> { vmcore 경로: 기록 요약 }
   vmcoreSelection: {},  // 서버 이름 -> 선택한 vmcore 경로(Set)
@@ -719,7 +721,7 @@ function renderVersions(main) {
         <h2>이 노트북의 kdump-tools</h2>
         <div class="meta">웹 UI와, 서버에 '무설치 실행'·'노트북 버전 설치'로 보내는 스크립트의 버전입니다.</div>
       </div>
-      <div class="actions"><button class="btn small" id="ver-check">최신 버전 확인</button></div>
+      <div class="actions" id="ver-actions"><button class="btn small" id="ver-check">최신 버전 확인</button></div>
     </div>
     <div class="version-grid">
       <div class="version-box">
@@ -750,6 +752,12 @@ function renderVersions(main) {
   </div>`);
   main.append(card);
 
+  if (state.supervised) {
+    const btn = restartButton();
+    btn.classList.remove("primary");
+    btn.title = "웹 UI 서버를 디스크에 있는 코드로 다시 실행합니다";
+    $("#ver-actions").append(btn);
+  }
   const action = $("#ver-action");
   if (st.cls === "up" && local.git) {
     const btn = h('<button class="btn small primary">업데이트 (git pull)</button>');
@@ -848,17 +856,79 @@ async function selfUpdate(btn) {
     renderVersionBadge();
     renderMain();
     const msg = r.restart
-      ? "웹 UI 서버 코드가 바뀌었습니다. 콘솔에서 Ctrl+C로 끈 뒤 다시 실행해 주세요."
+      ? (state.supervised ? "웹 UI 서버 코드가 바뀌었습니다. 아래 버튼으로 다시 시작하면 적용됩니다."
+        : "웹 UI 서버 코드가 바뀌었습니다. 콘솔에서 Ctrl+C로 끈 뒤 다시 실행해 주세요.")
       : "화면 파일만 바뀌었습니다. 새로고침(Ctrl+F5)하면 적용됩니다.";
-    $("#ver-result").append(h(`<div class="notice ok"><b>업데이트를 마쳤습니다: ${esc(short(r.before))} → ${esc(short(r.local.commit))} (v${esc(r.local.version)})</b>
+    const notice = h(`<div class="notice ok"><b>업데이트를 마쳤습니다: ${esc(short(r.before))} → ${esc(short(r.local.commit))} (v${esc(r.local.version)})</b>
       <div>${r.changed.length ? esc(msg) : "바뀐 파일이 없습니다."}</div>
-      ${r.changed.length ? `<details><summary>바뀐 파일 ${r.changed.length}개</summary><pre>${esc(r.changed.join("\n"))}</pre></details>` : ""}</div>`));
+      ${r.changed.length ? `<details><summary>바뀐 파일 ${r.changed.length}개</summary><pre>${esc(r.changed.join("\n"))}</pre></details>` : ""}</div>`);
+    if (r.restart && state.supervised) {
+      const row = h('<div style="margin-top:8px"></div>');
+      row.append(restartButton("지금 다시 시작"));
+      notice.append(row);
+    }
+    $("#ver-result").append(notice);
   } catch (e) {
     btn.disabled = false;
     btn.textContent = "업데이트 (git pull)";
     $("#ver-result").innerHTML = "";
     $("#ver-result").append(h(`<div class="notice err"><b>업데이트하지 못했습니다</b><pre>${esc(e.message)}</pre></div>`));
   }
+}
+
+
+// ---------------------------------------------------------------- 웹 UI 다시 시작
+// 서버에 다시 시작을 요청한 뒤, 새 서버가 뜰 때까지 기다렸다가 페이지를 새로 엽니다.
+// 토큰은 그대로이므로 다시 로그인하지 않아도 됩니다.
+
+function restartButton(label = "웹 UI 다시 시작") {
+  const btn = h(`<button class="btn small primary">${esc(label)}</button>`);
+  btn.addEventListener("click", () => restartWebui());
+  return btn;
+}
+
+async function restartWebui() {
+  const active = [...state.jobs.values()].filter(isActive).length;
+  if (active) {
+    toast(`진행 중이거나 대기 중인 작업이 ${active}개 있습니다. 끝난 뒤 다시 시작해 주세요.`);
+    return;
+  }
+  if (!confirm("웹 UI 서버를 다시 시작할까요?\n\n디스크에 있는 최신 코드로 다시 실행하고, 이 페이지는 자동으로 새로 열립니다.")) return;
+  const overlay = h(`<div class="overlay"><div class="overlay-box">
+    <div><span class="spinner"></span> <b>웹 UI를 다시 시작하는 중...</b></div>
+    <div class="muted" id="restart-status">서버에 요청하는 중</div></div></div>`);
+  document.body.append(overlay);
+  const status = t => { overlay.querySelector("#restart-status").textContent = t; };
+  try {
+    await api("POST", "/api/restart", {});
+  } catch (e) {
+    overlay.remove();
+    toast(e.message);
+    return;
+  }
+  const before = state.startedAt;
+  const deadline = Date.now() + 60000;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      const res = await fetch("/api/state");
+      if (res.ok) {
+        const data = await res.json();
+        if (data.started_at && data.started_at !== before) {
+          status(`v${data.version}로 다시 시작했습니다. 페이지를 새로 엽니다.`);
+          location.reload();
+          return;
+        }
+      }
+      status("새 서버를 기다리는 중");
+    } catch (_) {
+      status("새 서버를 기다리는 중");
+    }
+  }
+  overlay.querySelector(".overlay-box").innerHTML = `<b>다시 시작하지 못했습니다.</b>
+    <div>웹 UI를 실행한 콘솔에 오류가 있는지 확인하고, 필요하면 Ctrl+C로 끈 뒤 직접 다시 실행해 주세요.</div>
+    <div style="margin-top:10px"><button class="btn small" id="overlay-close">닫기</button></div>`;
+  overlay.querySelector("#overlay-close").addEventListener("click", () => overlay.remove());
 }
 
 // ---------------------------------------------------------------- 결과 보기
@@ -1294,10 +1364,17 @@ async function loadState() {
   state.settings = data.settings;
   state.servers = data.servers;
   state.apiMismatch = data.api !== API_LEVEL;
+  state.supervised = !!data.supervised;
+  state.startedAt = data.started_at;
   const banner = $("#restart-banner");
   if (state.apiMismatch) {
     const running = data.running_version ? `v${data.running_version}` : "이전 버전";
-    banner.innerHTML = `<b>웹 UI를 다시 시작해 주세요.</b> 화면은 새 버전으로 바뀌었지만 서버는 ${esc(running)}으로 실행 중이라 일부 기능이 동작하지 않습니다. 웹 UI를 실행한 콘솔에서 <code>Ctrl+C</code>로 끈 뒤 <code>python webui/kdump-webui.py</code>로 다시 실행하고, 새로 나온 주소로 접속하세요.`;
+    if (state.supervised) {
+      banner.innerHTML = `<b>웹 UI를 다시 시작해 주세요.</b> 화면은 새 버전으로 바뀌었지만 서버는 ${esc(running)}으로 실행 중이라 일부 기능이 동작하지 않습니다. `;
+      banner.append(restartButton("지금 다시 시작"));
+    } else {
+      banner.innerHTML = `<b>웹 UI를 다시 시작해 주세요.</b> 화면은 새 버전으로 바뀌었지만 서버는 ${esc(running)}으로 실행 중이라 일부 기능이 동작하지 않습니다. 웹 UI를 실행한 콘솔에서 <code>Ctrl+C</code>로 끈 뒤 <code>python webui/kdump-webui.py</code>로 다시 실행하고, 새로 나온 주소로 접속하세요.`;
+    }
     banner.hidden = false;
   } else {
     banner.hidden = true;
