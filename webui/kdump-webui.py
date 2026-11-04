@@ -217,12 +217,76 @@ class Store:
 
 
 HEAD_KEYS = ("vmcore", "kernel", "generated", "provider", "model", "source_report")
-VERDICT_RE = re.compile(r"^\|\s*\**\s*(판정|결론|verdict|root cause)\s*\**\s*\|\s*(.+?)\s*\|?\s*$", re.I)
+
+# 분석 기록에 보일 "판정" 한 줄을 찾습니다. LLM마다 보고서 형식이 달라 우선순위대로 찾습니다.
+#   1) "판정: ..." / "결론: ..." 줄 (기본 프롬프트가 첫 줄에 쓰도록 요청함)
+#   2) 요약 표의 판정·결론·근본 원인 행
+#   3) "추정 근본 원인: ..." 같은 항목
+#   4) "근본 원인"·"결론"·"판정" 제목 바로 아래의 첫 문장
+#   5) 제목이 아닌 첫 문장
+VERDICT_LABELS = r"(판정|결론|verdict|conclusion)"
+CAUSE_LABELS = r"(추정\s*근본\s*원인|추정\s*원인|근본\s*원인|직접\s*원인|root\s*cause|probable\s*root\s*cause)"
+LIST_MARK_RE = re.compile(r"^\s*(?:[-*+>]\s+|\d+[.)]\s+)+")
+TABLE_ROW_RE = re.compile(r"^\|\s*\**\s*(?P<label>[^|*]+?)\s*\**\s*\|\s*(?P<value>.+?)\s*\|?\s*$")
+LABEL_LINE_RE = re.compile(r"^\**\s*(?P<label>[^:*]{1,30}?)\s*\**\s*[:：]\s*\**\s*(?P<value>.+)$")
+MD_HEADING_RE = re.compile(r"^\s*#{1,6}\s+")
+BOLD_LINE_RE = re.compile(r"^\s*\*\*[^*]+\*\*\s*$")
+TITLE_WORDS = re.compile(r"(분석\s*보고|보고서|report|요약|summary)\s*(—|-|:|$)", re.I)
+
+
+def _is_heading(line):
+    """# 제목이거나, 짧고 문장으로 끝나지 않는 굵은 줄(**장애 분석 보고**)을 제목으로 봅니다."""
+    if MD_HEADING_RE.match(line):
+        return True
+    text = _plain(line)
+    return bool(BOLD_LINE_RE.match(line)) and len(text) < 40 and not re.search(r"(다|요|음|함|됨|임)\.?$|\.$", text)
 
 
 def _plain(text):
     text = re.sub(r"[*`]", "", text).strip()
     return text if len(text) <= 200 else text[:199] + "…"
+
+
+def _clean(line):
+    return LIST_MARK_RE.sub("", line).strip()
+
+
+def _first_sentence(text):
+    text = _plain(text)
+    m = re.search(r"(다|요|음|함|됨|임)\.(\s|$)|\.\s", text)
+    return text[:m.end()].strip() if m else text
+
+
+def find_verdict(body):
+    lines = [l for l in body.splitlines()]
+    cleaned = [_clean(l) for l in lines]
+
+    for line in cleaned:  # 1) 판정·결론 줄
+        m = LABEL_LINE_RE.match(line)
+        if m and re.fullmatch(VERDICT_LABELS, m.group("label").strip(), re.I):
+            return _plain(m.group("value"))
+    rows = [m for m in (TABLE_ROW_RE.match(l.strip()) for l in lines)
+            if m and not re.fullmatch(r"[-:\s]+", m.group("value"))]
+    for pattern in (VERDICT_LABELS, CAUSE_LABELS):  # 2) 요약 표의 판정 행, 없으면 근본 원인 행
+        for m in rows:
+            if re.fullmatch(r"\s*(\d+[.)]\s*)?" + pattern + r"(\s*\(.*\))?\s*", m.group("label"), re.I):
+                return _plain(m.group("value"))
+    for line in cleaned:  # 3) 근본 원인 항목
+        m = LABEL_LINE_RE.match(line)
+        if m and re.fullmatch(CAUSE_LABELS, m.group("label").strip(), re.I):
+            return _first_sentence(m.group("value"))
+    for i, line in enumerate(cleaned):  # 4) 근본 원인·결론 제목 아래 첫 문장
+        if _is_heading(lines[i]) and re.search(VERDICT_LABELS + "|" + CAUSE_LABELS, line, re.I):
+            for nxt in cleaned[i + 1:]:
+                if nxt and not _is_heading(nxt) and not nxt.startswith(("|", "```", "---")):
+                    return _first_sentence(nxt)
+    for i, line in enumerate(cleaned):  # 5) 제목이 아닌 첫 문장
+        if not line or line.startswith(("|", "```", "---")) or _is_heading(lines[i]):
+            continue
+        if TITLE_WORDS.search(_plain(line)) and len(_plain(line)) < 60:
+            continue
+        return _first_sentence(line)
+    return ""
 
 
 def parse_result_head(path):
@@ -239,17 +303,7 @@ def parse_result_head(path):
         if sep and key.strip() in HEAD_KEYS:
             info[key.strip()] = value.strip()
     if "-analysis-" in os.path.basename(path):
-        body = head.split("\n\n", 1)[-1]
-        verdict = ""
-        for line in body.splitlines():
-            m = VERDICT_RE.match(line)
-            if m:
-                verdict = m.group(2)
-                break
-        if not verdict:  # 표가 없는 분석은 제목이 아닌 첫 문장을 씁니다.
-            verdict = next((l for l in body.splitlines()
-                            if l.strip() and not l.lstrip().startswith(("#", "|", "```", "---"))), "")
-        info["verdict"] = _plain(verdict.lstrip("-*> 0123456789."))
+        info["verdict"] = find_verdict(head.split("\n\n", 1)[-1])
     else:
         m = re.search(r'^\s*PANIC:\s*"?(.*?)"?\s*$', head, re.M)
         if m and m.group(1):
