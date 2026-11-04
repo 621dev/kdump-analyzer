@@ -231,3 +231,48 @@ label.check { flex-direction: row; align-items: center; gap: 8px; font-weight: 5
   .jobs { left: 12px; right: 12px; width: auto; }
   .grid, .grid.three { grid-template-columns: 1fr; }
 }
+
+/* ---------------- 분석 기록 */
+.nav-item {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  border: none; background: none; text-align: left; cursor: pointer;
+  padding: 9px 10px; border-radius: 10px; font-weight: 600; margin-bottom: 14px;
+}
+.nav-item svg { width: 18px; height: 18px; color: var(--muted); flex: none; }
+.nav-item:hover { background: var(--panel-2); }
+.nav-item.active { background: var(--accent-weak); color: var(--accent); }
+.nav-item.active svg { color: var(--accent); }
+
+.history-tools { display: flex; gap: 8px; margin: 14px 0 8px; flex-wrap: wrap; }
+.history-tools select, .history-tools input {
+  padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+}
+.history-tools input { flex: 1; min-width: 200px; }
+.history-summary { font-size: 12.5px; margin-bottom: 10px; }
+
+.records { display: flex; flex-direction: column; gap: 10px; }
+.record {
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 16px;
+  border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.record:hover { border-color: var(--accent); background: var(--panel-2); }
+.record-body { min-width: 0; flex: 1; }
+.record-top { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 12.5px; }
+.verdict { font-weight: 600; font-size: 14.5px; margin: 5px 0 4px; }
+.verdict.none { color: var(--muted); font-weight: 500; }
+.record-facts { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; color: var(--muted); }
+.record-facts .panic { color: var(--err); }
+.record-llm { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.record-more { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; }
+.record-actions { display: flex; gap: 6px; flex: none; flex-wrap: wrap; justify-content: flex-end; }
+.tag.server { background: var(--accent-weak); color: var(--accent); border-color: transparent; font-weight: 600; }
+.tag.server.gone { background: var(--panel-2); color: var(--muted); text-decoration: line-through; }
+
+.job { transition: opacity .3s, transform .3s; }
+.job.leaving { opacity: 0; transform: translateY(8px); }
+
+@media (max-width: 860px) {
+  .record { flex-direction: column; }
+  .record-actions { justify-content: flex-start; }
+}
