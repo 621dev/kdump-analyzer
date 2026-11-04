@@ -42,6 +42,8 @@ SECTION_POLICY = {
     "crash> sys": (2, "head"),
     "crash> bt": (3, "head"),
     "crash> bt -a": (2, "head"),
+    "crash> foreach UN bt": (2, "head"),
+    "taint 모듈 관련 태스크 (foreach bt에서 추림)": (2, "head"),
     "crash> log": (3, "tail"),
     "crash> ps": (1, "head"),
 }

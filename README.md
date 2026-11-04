@@ -207,7 +207,15 @@ analysis: /opt/kdump-tools/logs/kdump-analysis-20260701-100000-12345.txt
 
 리포트와 분석 파일은 같은 실행 ID(`<timestamp>-<pid>`)를 쓰므로 짝을 쉽게 찾을 수 있고, 같은 초에 여러 번 실행해도 덮어쓰지 않습니다.
 
-리포트에는 기본 메타데이터와 함께 `sys`, `bt`, `bt -a`, `ps`, `log`, `kmem -i`, `mount`, `files` 명령 결과가 `===== crash> <명령> =====` 섹션으로 구분되어 들어갑니다. 마지막 `===== crash 실행 로그 =====` 섹션에는 crash 시작 메시지, 경고, 명령 오류가 남습니다.
+리포트에는 기본 메타데이터와 함께 `sys`, `bt`, `bt -a`, `foreach UN bt`, `ps`, `log`, `kmem -i`, `mod -t`, `runq`, `dev -d`, `mount`, `files` 명령 결과가 `===== crash> <명령> =====` 섹션으로 구분되어 들어갑니다.
+
+| 섹션 | 보는 것 |
+|------|---------|
+| `foreach UN bt` | D 상태(uninterruptible) 태스크의 콜스택. hung task, I/O hang |
+| `mod -t` | taint된 모듈(외부, 서명 없음, 강제 로드 등). 서드파티 드라이버가 원인인지 |
+| `runq` | CPU별 실행 대기열. soft lockup, 스케줄링 기아 |
+| `dev -d` | 디스크별 진행 중인 I/O. 스토리지 hang |
+| taint 모듈 관련 태스크 | `foreach bt` 결과 중 taint 모듈의 함수가 콜스택에 있는 태스크만 골라 붙인 섹션. 잠금을 쥐고 잠든 태스크처럼 실행 중도 D 상태도 아닌 원인을 찾는 데 씁니다(`REPORT_TAINTED_TASKS=0`으로 끔) | 마지막 `===== crash 실행 로그 =====` 섹션에는 crash 시작 메시지, 경고, 명령 오류가 남습니다.
 
 각 명령의 출력은 crash의 `명령 > 파일` 리다이렉션으로 따로 받습니다. 따라서 `REPORT_COMMANDS`에 직접 `>` 리다이렉션을 쓴 명령은 리포트 섹션이 비어 있게 됩니다. `set scroll off`처럼 `set`으로 시작하는 명령은 섹션을 만들지 않습니다.
 
@@ -459,7 +467,7 @@ python webui/kdump-webui.py
 |------|------|
 | 서버 목록 (왼쪽) | 서버 추가·수정·삭제. 입력은 한 장의 양식(이름, user@host, 포트, SSH 키 파일, 원격 analyze-kdump 경로, crash 디렉터리, 분석 방식, sudo) |
 | 서버 화면 | 연결 테스트(호스트, 원격 analyze-kdump 버전, crash 버전, vmcore 개수), vmcore 목록에서 **리포트** 또는 **리포트 + LLM 분석** 실행 |
-| 작업 카드 (오른쪽 아래) | crash 리포트 생성 진행 바(`3/8 bt -a`), vmlinux 읽는 중 표시, LLM 분석 단계, 경과 시간, 로그. 성공한 카드는 8초 뒤 자동으로 닫힘(마우스를 올려 두거나 로그를 펼치면 유지). 실패한 카드는 직접 닫을 때까지 남음 |
+| 작업 카드 (오른쪽 아래) | crash 리포트 생성 진행 바(`3/12 bt -a`), vmlinux 읽는 중 표시, LLM 분석 단계, 경과 시간, 로그. 성공한 카드는 8초 뒤 자동으로 닫힘(마우스를 올려 두거나 로그를 펼치면 유지). 실패한 카드는 직접 닫을 때까지 남음 |
 | 분석 기록 (왼쪽 위) | 모든 서버의 기록을 리포트 단위로 묶어 최신 순으로 표시: 판정 요약, panic 문자열, vmcore, 커널, LLM provider·모델. 서버·종류(LLM 분석 있음/리포트만) 필터와 검색, 이전 분석 열기, 다시 분석. 삭제한 서버의 기록도 볼 수 있음. 서버 화면의 "분석 결과" 탭은 같은 목록을 해당 서버만 보여줌 |
 | 버전·업데이트 (왼쪽 위, 상단 버전 배지) | 노트북 kdump-tools의 현재 버전·커밋과 GitHub 최신 버전 비교, 새 커밋 목록, **업데이트(git pull)**. 서버마다 설치된 analyze-kdump 버전·설치 위치·설치 원본을 확인하고 **노트북 버전 설치/업그레이드** 또는 **GitHub 최신 설치/업그레이드** 실행 |
 | 분석 결과 | LLM 분석을 제목·표·코드가 갖춰진 보고서로 표시, 원본 리포트로 이동 |
@@ -503,7 +511,7 @@ sudo analyze-kdump-ui
 | 리포트·분석 보기 | ↑↓ PgUp PgDn으로 이동, `/`로 검색, **`q`로 이전 화면으로 돌아갑니다**(하단에 항상 안내 표시) |
 | 리포트 생성이 끝난 뒤 | Enter를 누르면 결과 화면으로 넘어갑니다 |
 
-진행 표시: crash 리포트 생성은 진행 바와 현재 명령(`[####....] 3/8 bt -a (12초)`)으로, 처음 vmlinux를 읽는 동안은 `crash 시작 중`과 경과 시간으로 보여줍니다. LLM 분석은 회전 표시와 경과 시간, vmcore 가져오기는 진행 바와 받은 크기로 보여줍니다. 원격 서버 확인 중에는 안내 화면이 뜹니다.
+진행 표시: crash 리포트 생성은 진행 바와 현재 명령(`[####....] 3/12 bt -a (12초)`)으로, 처음 vmlinux를 읽는 동안은 `crash 시작 중`과 경과 시간으로 보여줍니다. LLM 분석은 회전 표시와 경과 시간, vmcore 가져오기는 진행 바와 받은 크기로 보여줍니다. 원격 서버 확인 중에는 안내 화면이 뜹니다.
 
 | 메뉴 | 내용 |
 |------|------|
@@ -586,6 +594,36 @@ sudo ./tests/vm/kdump-vm-test.sh verify   # debuginfo 설치, analyze-kdump -r �
 ```
 
 `verify --llm`을 쓰면 `LLM_API_KEY` 등 LLM 설정으로 분석 파일 생성까지 확인합니다.
+
+### 장애 유형별 검증
+
+`tests/vm/fault-module/`의 테스트 커널 모듈(`kdump_fault`)로 여러 장애를 재현할 수 있습니다.
+- **테스트 VM 전용입니다.** 모듈을 올리는 즉시 커널이 패닉합니다.
+- 서명하지 않은 모듈이므로 VM의 Secure Boot를 꺼야 합니다(Hyper-V: `Set-VMFirmware -VMName <VM> -EnableSecureBoot Off`).
+- 빌드에는 `kernel-devel-$(uname -r)`, `gcc`, `make`가 필요합니다.
+
+```bash
+cd tests/vm/fault-module && make
+sudo sysctl -w kernel.softlockup_panic=1 kernel.hung_task_panic=1 kernel.hung_task_timeout_secs=30
+sync; sudo insmod kdump_fault.ko type=hungtask quiet=1
+```
+
+| type | 재현하는 장애 | 커널 메시지 |
+|------|---------------|-------------|
+| `null` | NULL 포인터 역참조 | `BUG: kernel NULL pointer dereference` |
+| `bug` | `BUG()` 호출 | `kernel BUG at ...` |
+| `gpf` | non-canonical 주소 쓰기 | `general protection fault` |
+| `listcorrupt` | 연결 리스트 손상 | `list_add corruption` |
+| `softlockup` | 선점을 끈 무한 루프 | `soft lockup - CPU#N stuck` |
+| `hungtask` | mutex를 쥔 채 잠드는 스레드와 그 mutex를 기다리는 스레드 | `blocked for more than N seconds` |
+
+`quiet=1`을 주면 모듈이 로그 메시지를 남기지 않습니다. 실제 장애처럼 리포트만으로 원인을 찾을 수 있는지 볼 때 씁니다.
+
+모듈 없이 만들 수 있는 장애도 있습니다.
+- **OOM 패닉:** `vm.panic_on_oom=1`을 켠 뒤 메모리를 고갈시킵니다.
+- **I/O hang:** 루프 장치 파일시스템을 `fsfreeze -f`로 멈춘 뒤 그 파일시스템에 씁니다.
+
+2026-11 Rocky Linux 9.8(커널 5.14.0-687) VM에서 위 8가지와 SysRq-c로 만든 vmcore 9건을 리포트와 LLM(Claude Code)으로 분석했습니다. 9건 모두 원인을 맞게 판정했습니다. `quiet=1`로 만든 hung task도 `foreach UN bt`와 "taint 모듈 관련 태스크" 섹션으로 잠금을 쥔 스레드까지 찾았습니다.
 
 ## 로그 디렉터리
 
