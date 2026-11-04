@@ -37,7 +37,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(APP_DIR)
 # 화면(app.js)과 서버가 주고받는 API의 판. API를 바꿀 때 app.js의 API_LEVEL과 함께 올립니다.
 # 업데이트 뒤 서버를 다시 시작하지 않으면 화면이 이 값의 차이로 알아채고 안내합니다.
-API_LEVEL = 3
+API_LEVEL = 4
 
 # 화면의 "다시 시작"은 감시 프로세스가 서버를 새 코드로 다시 띄우는 방식입니다.
 RESTART_EXIT = 75                     # 서버가 이 코드로 끝나면 감시 프로세스가 다시 띄웁니다
@@ -372,8 +372,9 @@ def test_server(server):
     code, out = ssh_text(server, ["sh", "-c", """
 echo "host=$(hostname)"; echo "user=$(id -un)"
 if [ -x "$1" ]; then echo "tool=$("$1" --version 2>/dev/null | grep '^analyze-kdump ' | head -n 1)"; [ -n "$("$1" --version 2>/dev/null | grep '^analyze-kdump ')" ] || echo "tool=installed (version unknown)"; else echo "tool="; fi
-if command -v crash >/dev/null 2>&1; then v=$(crash --version 2>&1 | grep -m 1 .); echo "crash=${v:-installed}"; else echo "crash="; fi
-echo "vmcores=$(ls -1 "$2"/*/vmcore 2>/dev/null | wc -l)"
+# crash --version은 실행 중 /dev/mem을 열어 보다 Secure Boot lockdown 경고를 커널 로그에 남기므로 패키지 정보로 버전을 읽습니다.
+if command -v crash >/dev/null 2>&1; then v=$(rpm -q --qf '%{VERSION}-%{RELEASE}' crash 2>/dev/null) || v=$(dpkg-query -W -f='${Version}' crash 2>/dev/null) || v=; echo "crash=crash ${v:-installed}"; else echo "crash="; fi
+echo "vmcores=$(ls -1 "$2"/*/vmcore "$2"/*/dump.[0-9]* 2>/dev/null | wc -l)"
 """, "sh", server["tool"], server["crash_dir"]], timeout=40)
     info = {"ok": code == 0, "raw": out.strip()[-600:]}
     for line in out.splitlines():
@@ -386,7 +387,9 @@ echo "vmcores=$(ls -1 "$2"/*/vmcore 2>/dev/null | wc -l)"
 
 
 def list_vmcores(server):
-    code, out = ssh_text(server, ["sh", "-c", 'stat -c "%Y %s %n" "$1"/*/vmcore 2>/dev/null | sort -rn',
+    # 덤프 파일 이름: RHEL·SUSE는 <디렉터리>/vmcore, Ubuntu·Debian(kdump-tools)은 <YYYYMMDDHHMM>/dump.<YYYYMMDDHHMM>
+    code, out = ssh_text(server, ["sh", "-c", 'for f in "$1"/*/vmcore "$1"/*/dump.[0-9]*; do '
+                                  '[ -f "$f" ] && stat -c "%Y %s %n" "$f"; done | sort -rn',
                                   "sh", server["crash_dir"]], timeout=40)
     if code != 0:
         raise ApiError(502, "vmcore 목록을 읽지 못했습니다: %s" % out.strip()[-300:])
@@ -507,6 +510,268 @@ fi
         if not info.get("installed_at"):
             info["installed_at"] = match.group(3) or ""
     return info
+
+
+# ---------------------------------------------------------------- 서버 준비 (kdump 환경 점검·설치)
+
+# 점검만 합니다(바꾸는 것 없음). $1 crash 디렉터리, $2 vmlinux 보관 디렉터리
+REMOTE_CHECK = r"""
+. /etc/os-release 2>/dev/null
+echo "os_id=${ID:-}"; echo "os_like=${ID_LIKE:-}"; echo "os_name=${PRETTY_NAME:-}"; echo "codename=${VERSION_CODENAME:-}"
+k=$(uname -r); echo "kernel=$k"; echo "uid=$(id -u)"
+if command -v dnf >/dev/null 2>&1; then pm=dnf; elif command -v yum >/dev/null 2>&1; then pm=yum
+elif command -v apt-get >/dev/null 2>&1; then pm=apt; elif command -v zypper >/dev/null 2>&1; then pm=zypper; else pm=; fi
+echo "pkg=$pm"
+if command -v kdumpctl >/dev/null 2>&1; then
+  echo "kdump_tool=kdumpctl"; svc=kdump
+  if kdumpctl status >/dev/null 2>&1; then echo "kdump_ready=1"; else echo "kdump_ready=0"; fi
+  next=$(grubby --info=DEFAULT 2>/dev/null | grep -o 'crashkernel=[^ "]*' | head -n 1)
+elif command -v kdump-config >/dev/null 2>&1; then
+  echo "kdump_tool=kdump-config"; svc=kdump-tools
+  # "Not ready to kdump"도 "ready to kdump"를 포함하므로 상태 줄 전체를 맞춥니다.
+  if kdump-config status 2>/dev/null | grep -Eqi "current state[[:space:]]*:[[:space:]]*ready to kdump"; then echo "kdump_ready=1"; else echo "kdump_ready=0"; fi
+  echo "use_kdump=$(sed -n 's/^USE_KDUMP=//p' /etc/default/kdump-tools 2>/dev/null | tr -d '\"' | tail -n 1)"
+  next=$(cat /etc/default/grub /etc/default/grub.d/*.cfg 2>/dev/null | grep -v '^[[:space:]]*#' | grep -o 'crashkernel=[^ "]*' | tail -n 1)
+else
+  echo "kdump_tool="; svc=; next=
+fi
+if [ -n "$svc" ]; then echo "kdump_active=$(systemctl is-active $svc 2>/dev/null)"; echo "kdump_enabled=$(systemctl is-enabled $svc 2>/dev/null)"; fi
+echo "crashkernel_now=$(grep -o 'crashkernel=[^ ]*' /proc/cmdline | head -n 1)"
+echo "crashkernel_next=$next"
+echo "crashkernel_bytes=$(cat /sys/kernel/kexec_crash_size 2>/dev/null)"
+# crash --version은 실행 중 /dev/mem을 열어 보다 Secure Boot lockdown 경고를 커널 로그에 남기므로 패키지 정보로 버전을 읽습니다.
+if command -v crash >/dev/null 2>&1; then v=$(rpm -q --qf '%{VERSION}-%{RELEASE}' crash 2>/dev/null) || v=$(dpkg-query -W -f='${Version}' crash 2>/dev/null) || v=; echo "crash=crash ${v:-installed}"; else echo "crash="; fi
+v=
+for p in "/usr/lib/debug/lib/modules/$k/vmlinux" "/usr/lib/debug/boot/vmlinux-$k" "$2/$k/vmlinux"; do
+  if [ -f "$p" ]; then v=$p; break; fi
+done
+echo "vmlinux=$v"
+echo "mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
+echo "swap_kb=$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo)"
+d="$1"; while [ -n "$d" ] && [ ! -d "$d" ]; do d=$(dirname "$d"); done
+echo "disk_kb=$(df -Pk "${d:-/}" 2>/dev/null | awk 'NR == 2 {print $4}')"
+"""
+
+# 설치 동작 하나를 실행합니다. $1 동작, $2 vmlinux 보관 디렉터리
+REMOTE_PREPARE = r"""
+action="$1"
+. /etc/os-release 2>/dev/null
+k=$(uname -r)
+[ "$(id -u)" -eq 0 ] || { echo "root 권한이 필요합니다. 서버 설정에서 sudo를 켜 주세요(비밀번호 없는 sudo 필요)."; exit 4; }
+if command -v dnf >/dev/null 2>&1; then pm=dnf; elif command -v yum >/dev/null 2>&1; then pm=yum
+elif command -v apt-get >/dev/null 2>&1; then pm=apt; else echo "지원하지 않는 배포판입니다(dnf·yum·apt-get 없음)."; exit 10; fi
+export DEBIAN_FRONTEND=noninteractive
+apt_get() { apt-get -q -y -o DPkg::Lock::Timeout=300 -o Dpkg::Options::=--force-confold "$@"; }
+updated=0
+apt_update() { [ "$updated" = 1 ] || { apt_get update && updated=1; }; }
+case "$action" in
+crash)
+  if [ "$pm" = apt ]; then apt_update && apt_get install crash; else $pm -y install crash; fi
+  ;;
+kdump)
+  if [ "$pm" = apt ]; then
+    echo "kdump-tools kdump-tools/use_kdump boolean true" | debconf-set-selections
+    apt_update && apt_get install kdump-tools kexec-tools makedumpfile || exit 1
+    [ -f /etc/default/kdump-tools ] && sed -i 's/^USE_KDUMP=.*/USE_KDUMP=1/' /etc/default/kdump-tools
+    systemctl enable kdump-tools
+    svc=kdump-tools
+  else
+    $pm -y install kexec-tools || exit 1
+    systemctl enable kdump
+    svc=kdump
+  fi
+  if [ "$(cat /sys/kernel/kexec_crash_size 2>/dev/null || echo 0)" -gt 0 ]; then
+    # crashkernel이 이미 예약되어 있으면 서비스를 다시 시작해 재부팅 없이 바로 준비 상태로 만듭니다.
+    if ! systemctl restart "$svc"; then
+      echo "kdump 서비스를 시작하지 못했습니다. 원인: journalctl -u $svc -b --no-pager | tail -30"
+      journalctl -u "$svc" -b --no-pager 2>/dev/null | tail -15
+      exit 1
+    fi
+    echo "kdump 서비스를 다시 시작했습니다."
+    if command -v kdump-config >/dev/null 2>&1; then kdump-config status; else kdumpctl status; fi
+  else
+    echo "kdump는 crashkernel 메모리가 예약된 뒤(재부팅 후)부터 동작합니다."
+  fi
+  ;;
+crashkernel)
+  if command -v grubby >/dev/null 2>&1; then
+    v=$(kdumpctl get-default-crashkernel 2>/dev/null)
+    [ -n "$v" ] || v=auto
+    echo "crashkernel=$v (모든 커널)"
+    grubby --update-kernel=ALL --args="crashkernel=$v" || exit 1
+  elif [ "$pm" = apt ]; then
+    # 패키지 기본값은 2G부터라 메모리 2GB 서버에서는 예약되지 않으므로 1G부터 잡습니다.
+    v="1G-4G:320M,4G-32G:512M,32G-64G:1024M,64G-128G:2048M,128G-:4096M"
+    f=/etc/default/grub.d/kdump-tools.cfg
+    mkdir -p /etc/default/grub.d
+    if [ -f "$f" ] && grep -q 'crashkernel=' "$f"; then
+      sed -i "s/crashkernel=[^ \"']*/crashkernel=$v/" "$f"
+    else
+      echo "GRUB_CMDLINE_LINUX_DEFAULT=\"\$GRUB_CMDLINE_LINUX_DEFAULT crashkernel=$v\"" > "$f"
+    fi
+    echo "$f:"; cat "$f"
+    update-grub || exit 1
+  else
+    echo "crashkernel을 자동으로 설정할 수 없는 배포판입니다."; exit 10
+  fi
+  echo "재부팅해야 적용됩니다."
+  ;;
+debuginfo)
+  # 디버그 패키지는 수백 MB~2GB라 받는 동안 화면이 멈춘 것처럼 보이므로, 받은 크기를 10초마다 알립니다.
+  ( while sleep 10; do
+      mb=$(du -sm /var/cache/apt/archives/partial /var/cache/dnf /var/cache/yum 2>/dev/null | awk '{s += $1} END {print s + 0}')
+      echo "내려받는 중: ${mb} MB"
+    done ) &
+  watcher=$!
+  trap 'kill $watcher 2>/dev/null' EXIT
+  if [ "$pm" = apt ]; then
+    case "${ID:-}" in
+    ubuntu)
+      apt_update && apt_get install ubuntu-dbgsym-keyring || true
+      printf 'deb http://ddebs.ubuntu.com %s main restricted universe multiverse\ndeb http://ddebs.ubuntu.com %s-updates main restricted universe multiverse\n' \
+        "$VERSION_CODENAME" "$VERSION_CODENAME" > /etc/apt/sources.list.d/ddebs.list
+      apt_get update || exit 1
+      apt_get install "linux-image-unsigned-$k-dbgsym" || apt_get install "linux-image-$k-dbgsym" || exit 1
+      ;;
+    debian)
+      printf 'deb http://deb.debian.org/debian-debug/ %s-debug main\n' "$VERSION_CODENAME" > /etc/apt/sources.list.d/debian-debug.list
+      apt_get update || exit 1
+      apt_get install "linux-image-$k-dbg" || exit 1
+      ;;
+    *) echo "이 배포판의 디버그 커널 패키지를 알 수 없습니다: ${ID:-}"; exit 10 ;;
+    esac
+    # 내려받은 디버그 패키지(최대 2GB)가 apt 캐시에 남아 덤프 저장 공간을 차지하므로 지웁니다.
+    rm -f /var/cache/apt/archives/*-dbgsym_*.ddeb /var/cache/apt/archives/*-dbg_*.deb
+  else
+    $pm -y install dnf-plugins-core >/dev/null 2>&1 || true
+    $pm -y debuginfo-install "kernel-$k" || exit 1
+  fi
+  for p in "/usr/lib/debug/lib/modules/$k/vmlinux" "/usr/lib/debug/boot/vmlinux-$k"; do
+    [ -f "$p" ] && { echo "vmlinux: $p"; exit 0; }
+  done
+  echo "패키지는 설치했지만 vmlinux를 찾지 못했습니다."; exit 1
+  ;;
+swap)
+  f=/swapfile-kdump
+  if swapon --show=NAME --noheadings 2>/dev/null | grep -qx "$f"; then echo "이미 사용 중입니다: $f"; exit 0; fi
+  rm -f "$f"
+  if ! { fallocate -l 2G "$f" 2>/dev/null && chmod 600 "$f" && mkswap "$f" >/dev/null && swapon "$f" 2>/dev/null; }; then
+    # 일부 파일시스템은 fallocate로 만든 파일을 swap으로 쓰지 못해 dd로 다시 만듭니다.
+    swapoff "$f" 2>/dev/null; rm -f "$f"
+    dd if=/dev/zero of="$f" bs=1M count=2048 status=none && chmod 600 "$f" && mkswap "$f" >/dev/null && swapon "$f" || exit 1
+  fi
+  grep -q "^$f " /etc/fstab || echo "$f none swap defaults 0 0" >> /etc/fstab
+  echo "swap 2GB 추가: $f"
+  ;;
+*) echo "알 수 없는 동작: $action"; exit 2 ;;
+esac
+"""
+
+PREPARE_ACTIONS = ("kdump", "crashkernel", "crash", "debuginfo", "swap", "tool")
+PREPARE_LABELS = {"kdump": "kdump 서비스 설치·활성화", "crashkernel": "crashkernel 메모리 예약 설정",
+                  "crash": "crash 설치", "debuginfo": "디버그 커널(vmlinux) 설치",
+                  "swap": "swap 2GB 추가", "tool": "analyze-kdump 설치 (노트북 버전)"}
+
+
+def vmlinux_base(server):
+    tool = server.get("tool") or ""
+    if tool.endswith("/bin/analyze-kdump"):
+        return tool[:-len("/bin/analyze-kdump")] + "/vmlinux"
+    return "/opt/kdump-tools/vmlinux"
+
+
+def _kv(out):
+    info = {}
+    for line in out.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and re.fullmatch(r"[a-z_]+", key):
+            info[key] = value.strip()
+    return info
+
+
+def _num(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def prepare_check(server):
+    """서버의 kdump 분석 환경을 점검해 항목 목록으로 돌려줍니다. 서버에서 바꾸는 것은 없습니다."""
+    code, out = ssh_text(server, ["sh", "-c", REMOTE_CHECK, "sh", server["crash_dir"], vmlinux_base(server)],
+                         timeout=60)
+    if code != 0 and "os_id=" not in out:
+        raise ApiError(502, "서버를 점검하지 못했습니다: %s" % (out.strip().splitlines() or ["SSH 접속 실패"])[-1][-300:])
+    i = _kv(out)
+    tool = server_version(server)
+    debian = i.get("pkg") == "apt"
+    family = "Ubuntu·Debian" if debian else ("RHEL 계열" if i.get("pkg") in ("dnf", "yum") else (i.get("pkg") or "알 수 없음"))
+    mem_kb, swap_kb = _num(i.get("mem_kb")), _num(i.get("swap_kb"))
+    reserved = _num(i.get("crashkernel_bytes"))
+    items = []
+
+    def add(item_id, label, status, detail, action=None, note=None):
+        items.append({"id": item_id, "label": label, "status": status, "detail": detail,
+                      "action": action, "note": note})
+
+    if not i.get("kdump_tool"):
+        add("kdump", "kdump 서비스", "missing", "설치되어 있지 않음 (%s)" % ("kdump-tools" if debian else "kexec-tools"), "kdump")
+    elif debian and i.get("use_kdump") not in ("1", "true", "yes"):
+        add("kdump", "kdump 서비스", "missing", "설치됨, 꺼져 있음 (/etc/default/kdump-tools: USE_KDUMP=%s)"
+            % (i.get("use_kdump") or "없음"), "kdump", "USE_KDUMP=1로 켜고 서비스를 다시 시작합니다.")
+    elif i.get("kdump_active") == "failed":
+        add("kdump", "kdump 서비스", "missing", "시작 실패 (%s)" % i.get("kdump_tool"), "kdump",
+            "원인은 서버에서 journalctl -u %s -b 로 확인합니다. 다시 시도하면 서비스를 다시 시작합니다."
+            % ("kdump-tools" if debian else "kdump"))
+    elif i.get("kdump_enabled") != "enabled":
+        add("kdump", "kdump 서비스", "missing", "설치됨, 부팅 때 켜지지 않음 (%s)" % i.get("kdump_enabled", "?"), "kdump")
+    else:
+        add("kdump", "kdump 서비스", "ok", "%s · %s" % (i.get("kdump_tool"), i.get("kdump_active") or "?"))
+
+    if reserved > 0:
+        add("crashkernel", "crashkernel 예약", "ok", "%d MB 예약됨 (%s)" % (reserved // 1048576, i.get("crashkernel_now") or "?"))
+    elif i.get("crashkernel_next"):
+        add("crashkernel", "crashkernel 예약", "warn", "설정됨(%s), 아직 예약 안 됨: 재부팅 필요" % i["crashkernel_next"],
+            None, "재부팅하면 적용됩니다. 메모리 크기가 설정 범위에 들지 않으면 재부팅 후에도 예약되지 않습니다.")
+    else:
+        add("crashkernel", "crashkernel 예약", "missing", "설정 없음", "crashkernel", "설정 뒤 재부팅해야 적용됩니다.")
+
+    if i.get("kdump_ready") == "1":
+        add("ready", "kdump 동작 준비", "ok", "패닉이 나면 vmcore를 저장할 수 있는 상태")
+    else:
+        add("ready", "kdump 동작 준비", "warn", "아직 준비 안 됨 (위 두 항목을 마치고 재부팅하면 준비됩니다)")
+
+    if i.get("crash"):
+        add("crash", "crash", "ok", i["crash"])
+    else:
+        add("crash", "crash", "missing", "설치되어 있지 않음 (이 서버에서 분석하려면 필요)", "crash")
+
+    if i.get("vmlinux"):
+        add("debuginfo", "디버그 커널 (실행 중인 커널)", "ok", i["vmlinux"])
+    else:
+        add("debuginfo", "디버그 커널 (실행 중인 커널)", "missing", "%s 용 vmlinux 없음" % i.get("kernel", "?"), "debuginfo",
+            "수백 MB~1GB를 받습니다. %s" % ("dbgsym 저장소(ddebs.ubuntu.com)를 추가합니다." if i.get("os_id") == "ubuntu"
+                                         else "debug 저장소를 추가합니다." if debian else "debuginfo 저장소를 사용합니다."))
+
+    if mem_kb and mem_kb < 3 * 1048576 and swap_kb < 1536 * 1024:
+        add("swap", "메모리·swap", "warn", "메모리 %.1f GB, swap %.1f GB: crash 실행 중 OOM 위험" % (mem_kb / 1048576, swap_kb / 1048576),
+            "swap", "crash는 디버그 정보를 읽을 때 약 1.5GB를 씁니다.")
+    else:
+        add("swap", "메모리·swap", "ok", "메모리 %.1f GB, swap %.1f GB" % (mem_kb / 1048576, swap_kb / 1048576))
+
+    disk_kb = _num(i.get("disk_kb"))
+    if disk_kb and mem_kb and disk_kb < mem_kb:
+        add("disk", "덤프 저장 공간", "warn", "%s 여유 %.1f GB (메모리보다 작음)" % (server["crash_dir"], disk_kb / 1048576))
+    else:
+        add("disk", "덤프 저장 공간", "ok", "%s 여유 %.1f GB" % (server["crash_dir"], disk_kb / 1048576))
+
+    if tool.get("installed"):
+        add("tool", "analyze-kdump", "ok", "v%s %s" % (tool.get("version"), tool.get("commit") or ""))
+    else:
+        add("tool", "analyze-kdump", "info", "설치 안 됨 (무설치 실행으로도 분석 가능)", "tool")
+
+    return {"os": i.get("os_name") or i.get("os_id") or "?", "family": family, "kernel": i.get("kernel"),
+            "pkg": i.get("pkg"), "root": i.get("uid") == "0", "items": items}
 
 
 # 서버에 보낼 설치 묶음. install.sh가 복사하는 파일만 담습니다.
@@ -648,6 +913,8 @@ class Job:
         self.error = None
         self.method = None
         self.source = None          # upgrade: local | github
+        self.actions = []           # prepare: 실행할 준비 동작
+        self.step_label = ""        # prepare: 지금 실행 중인 동작 이름
         self.version = None         # upgrade: 설치 후 서버 버전
         self.started = time.time()
         self.finished = None
@@ -665,7 +932,7 @@ class Job:
             return {"id": self.id, "kind": self.kind, "server": self.server, "vmcore": self.vmcore,
                     "report": self.report, "analysis": self.analysis, "status": self.status,
                     "phase": self.phase, "progress": self.progress, "logs": self.logs[-60:],
-                    "error": self.error, "method": self.method, "source": self.source,
+                    "error": self.error, "method": self.method, "source": self.source, "actions": self.actions,
                     "version": self.version, "started": self.started,
                     "elapsed": int((self.finished or time.time()) - (self.run_started or self.started))}
 
@@ -756,6 +1023,8 @@ class Jobs:
                     break
                 segment, sep, buffer = buffer[:match.start()], match.group(), buffer[match.end():]
                 segment = ANSI_RE.sub("", segment)
+                if segment.startswith("내려받는 중:") and job.progress:
+                    job.progress = dict(job.progress, label="%s · %s" % (job.step_label, segment.strip()))
                 progress = PROGRESS_RE.search(segment)
                 if progress:
                     job.progress = {"current": int(progress.group(1)), "total": int(progress.group(2)),
@@ -834,6 +1103,32 @@ class Jobs:
                 ssh_run(server, ["rm", "-rf", tmpdir])
 
     # ---- 서버의 analyze-kdump 설치·업그레이드
+
+    def run_prepare(self, job):
+        server = self.store.server(job.server)
+        with self.server_slot(server["name"]).hold(job):
+            failed = []
+            for n, action in enumerate(job.actions, 1):
+                job.phase = "%d/%d %s" % (n, len(job.actions), PREPARE_LABELS[action])
+                job.step_label = PREPARE_LABELS[action]
+                job.progress = {"current": n - 1, "total": len(job.actions), "label": job.step_label, "elapsed": 0}
+                job.log("===== %s =====" % PREPARE_LABELS[action])
+                if action == "tool":
+                    job.source = "local"
+                    try:
+                        self._run_upgrade(job, server)
+                    except ApiError as error:
+                        job.log(error.message)
+                        failed.append(action)
+                    continue
+                code, _ = self._stream(job, server, ["sh", "-c", REMOTE_PREPARE, "sh", action, vmlinux_base(server)])
+                if code != 0:
+                    job.log("실패 (종료 코드 %d)" % code)
+                    failed.append(action)
+            job.progress = {"current": len(job.actions), "total": len(job.actions), "label": "완료", "elapsed": 0}
+            if failed:
+                raise ApiError(502, "일부 항목이 실패했습니다: %s. 로그를 확인해 주세요."
+                               % ", ".join(PREPARE_LABELS[a] for a in failed))
 
     def run_upgrade(self, job):
         server = self.store.server(job.server)
@@ -1061,6 +1356,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(200, {"ok": True})
         if len(parts) == 3 and parts[0] == "servers" and parts[2] == "test" and method == "POST":
             return self._json(200, test_server(store.server(parts[1])))
+        if len(parts) == 3 and parts[0] == "servers" and parts[2] == "prepare" and method == "GET":
+            return self._json(200, prepare_check(store.server(parts[1])))
         if len(parts) == 3 and parts[0] == "servers" and parts[2] == "version" and method == "GET":
             return self._json(200, server_version(store.server(parts[1])))
         if parts == ["versions"] and method == "GET":
@@ -1087,6 +1384,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 job = Job(kind, server["name"], vmcore=vmcore)
                 app.jobs.start(job, lambda j: app.jobs.run_report(j, kind == "llm"),
                                app.jobs.server_slot(server["name"]))
+            elif kind == "prepare":
+                actions = body.get("actions")
+                if not isinstance(actions, list) or not actions or any(a not in PREPARE_ACTIONS for a in actions):
+                    raise ApiError(400, "준비 항목을 골라 주세요.")
+                job = Job(kind, server["name"])
+                job.actions = [a for a in PREPARE_ACTIONS if a in actions]  # 정해진 순서로 실행
+                app.jobs.start(job, app.jobs.run_prepare, app.jobs.server_slot(server["name"]))
             elif kind == "upgrade":
                 source = body.get("source")
                 if source not in ("local", "github"):

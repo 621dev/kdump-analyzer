@@ -360,13 +360,15 @@ server_result_dir() {
 # ---------------------------------------------------------------- vmcore 분석
 
 # 출력: "<mtime> <size> <경로>" (최근 순)
+# 덤프 파일 이름: RHEL·SUSE는 <디렉터리>/vmcore, Ubuntu·Debian(kdump-tools)은 <YYYYMMDDHHMM>/dump.<YYYYMMDDHHMM>
+DUMP_LIST_SH='for f in "$1"/*/vmcore "$1"/*/dump.[0-9]*; do [ -f "$f" ] && stat -c "%Y %s %n" "$f"; done | sort -rn'
 list_vmcores() {
     local dir
     dir=$(server_crash_dir "$1")
     if [ "$1" = "local" ]; then
-        stat -c '%Y %s %n' "$dir"/*/vmcore 2>/dev/null | sort -rn
+        sh -c "$DUMP_LIST_SH" sh "$dir"
     else
-        remote_run "$1" sh -c 'stat -c "%Y %s %n" "$1"/*/vmcore 2>/dev/null | sort -rn' sh "$dir"
+        remote_run "$1" sh -c "$DUMP_LIST_SH" sh "$dir"
     fi
 }
 
@@ -575,7 +577,11 @@ analyze_remote_fetch() {
         fi
         mv "$dest.part" "$dest"
         chmod 600 "$dest"
-        dmesg="$(dirname "$vmcore")/vmcore-dmesg.txt"
+        # 커널 로그: RHEL은 vmcore-dmesg.txt, Ubuntu·Debian은 dump.<시각> 옆의 dmesg.<시각>
+        case "$(basename "$vmcore")" in
+            dump.*) dmesg="$(dirname "$vmcore")/dmesg.$(basename "$vmcore" | cut -d. -f2-)" ;;
+            *) dmesg="$(dirname "$vmcore")/vmcore-dmesg.txt" ;;
+        esac
         remote_run "$server" cat "$dmesg" > "$dest_dir/vmcore-dmesg.txt" 2>/dev/null || rm -f "$dest_dir/vmcore-dmesg.txt"
         echo "[$server] 가져오기 완료: $dest"
     fi
@@ -835,8 +841,9 @@ test_server() {
         else
             echo "analyze-kdump: 없음 ($1)"
         fi
-        if command -v crash >/dev/null 2>&1; then echo "crash: OK ($(crash --version 2>/dev/null | head -n 1))"; else echo "crash: 없음"; fi
-        n=$(ls -1 "$2"/*/vmcore 2>/dev/null | wc -l); echo "vmcore: ${n}개 ($2)"
+        # crash --version은 /dev/mem을 열어 보다 lockdown 경고를 커널 로그에 남기므로 패키지 정보로 버전을 읽습니다.
+        if command -v crash >/dev/null 2>&1; then v=$(rpm -q --qf "%{VERSION}-%{RELEASE}" crash 2>/dev/null) || v=$(dpkg-query -W -f="\${Version}" crash 2>/dev/null) || v=; echo "crash: OK (crash ${v:-설치됨})"; else echo "crash: 없음"; fi
+        n=$(ls -1 "$2"/*/vmcore "$2"/*/dump.[0-9]* 2>/dev/null | wc -l); echo "vmcore: ${n}개 ($2)"
     ' sh "$tool" "$(server_crash_dir "$name")" 2>&1)
     status=$?
     if [ "$status" -ne 0 ] && [ -z "$out" ]; then
@@ -1962,8 +1969,18 @@ menu_kdump_guide() {
   path /
   (NFS 공유를 이 서버의 $crash_dir 에 마운트해 두면 바로 목록에 보입니다)
 
+[운영 서버가 Ubuntu·Debian일 때] /etc/default/kdump-tools (SSH 전송)
+  SSH="kdump@$addr"
+  SSH_KDUMP_KEY=/root/.ssh/kdump_id_rsa
+  KDUMP_COREDIR="$crash_dir"
+
+  kdump-config propagate   # SSH 키를 이 서버에 등록
+  systemctl restart kdump-tools
+  kdump-config show        # "ready to kdump" 확인
+
 저장 위치
-  $crash_dir/<운영 서버 IP>-<시각>/vmcore
+  $crash_dir/<운영 서버 IP>-<시각>/vmcore             (RHEL 계열)
+  $crash_dir/<YYYYMMDDHHMM>/dump.<YYYYMMDDHHMM>      (Ubuntu·Debian, 로컬 저장 시)
   SSH 전송은 makedumpfile의 flattened 형식(vmcore.flat)으로 저장될 수 있습니다.
   이 경우 다음처럼 변환한 뒤 분석합니다.
     makedumpfile -R $crash_dir/<디렉터리>/vmcore < $crash_dir/<디렉터리>/vmcore.flat
