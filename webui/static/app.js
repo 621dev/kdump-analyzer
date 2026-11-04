@@ -1,7 +1,7 @@
 "use strict";
 
 // 서버(kdump-webui.py)의 API_LEVEL과 같아야 합니다. 다르면 업데이트 뒤 서버를 다시 시작하지 않은 것입니다.
-const API_LEVEL = 3;
+const API_LEVEL = 4;
 
 // ---------------------------------------------------------------- 상태와 공통
 
@@ -23,6 +23,7 @@ const state = {
   startedAt: null,      // 서버 프로세스 시작 시각(다시 시작 확인용)
   vmcores: {},          // 서버 이름 -> 목록 캐시
   vmcoreRecords: {},    // 서버 이름 -> { vmcore 경로: 기록 요약 }
+  prepare: {},          // 서버 이름 -> 서버 준비 점검 결과
   vmcoreSelection: {},  // 서버 이름 -> 선택한 vmcore 경로(Set)
 };
 
@@ -243,7 +244,7 @@ function applyRoute(hash) {
     state.page = "server";
     state.selected = parts[1];
     if (parts[2] === "file" && parts[3]) state.view = { server: parts[1], name: parts[3] };
-    else if (parts[2] === "results" || parts[2] === "vmcores") state.tab = parts[2];
+    else if (["results", "vmcores", "prepare"].includes(parts[2])) state.tab = parts[2];
   } else {
     state.page = "server";
   }
@@ -337,12 +338,15 @@ function renderMain() {
     <div class="tabs">
       <button class="tab ${state.tab === "vmcores" ? "active" : ""}" data-tab="vmcores">vmcore</button>
       <button class="tab ${state.tab === "results" ? "active" : ""}" data-tab="results">분석 결과</button>
+      <button class="tab ${state.tab === "prepare" ? "active" : ""}" data-tab="prepare">서버 준비</button>
     </div>
     <div id="tab-body"></div>
   </div>`);
   main.append(panel);
   panel.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => { state.tab = b.dataset.tab; renderMain(); }));
-  if (state.tab === "vmcores") renderVmcores(server); else renderResults(server);
+  if (state.tab === "vmcores") renderVmcores(server);
+  else if (state.tab === "prepare") renderPrepare(server);
+  else renderResults(server);
 }
 
 async function renderVmcores(server, refresh = false) {
@@ -373,7 +377,7 @@ async function renderVmcores(server, refresh = false) {
     <div class="batch-bar" id="batch-bar"></div>
   </div>`);
   if (!items.length) {
-    wrap.append(h('<p class="muted">vmcore가 없습니다.</p>'));
+    wrap.append(h('<p class="muted">vmcore가 없습니다. (찾는 파일: &lt;디렉터리&gt;/vmcore, Ubuntu·Debian은 &lt;시각&gt;/dump.&lt;시각&gt;)</p>'));
   } else {
     const table = h(`<table class="list"><thead><tr>
       <th style="width:28px"><input type="checkbox" id="vm-all" title="모두 선택"></th>
@@ -502,6 +506,84 @@ async function renderResults(server) {
     return;
   }
   body.append(recordList(records, false));
+}
+
+
+// ---------------------------------------------------------------- 서버 준비 (kdump 환경 점검·설치)
+
+const PREPARE_STATUS = { ok: ["ok", "정상"], warn: ["warn", "확인 필요"], missing: ["err", "없음"], info: ["muted", "선택"] };
+const PREPARE_WARN = {
+  crashkernel: "부팅 설정(커널 명령줄)을 바꿉니다. 서버를 재부팅해야 적용됩니다. 재부팅은 직접 하셔야 합니다.",
+  debuginfo: "디버그 커널 패키지를 받습니다(수백 MB~1GB). 서버에서 패키지 저장소에 접근할 수 있어야 합니다.",
+  kdump: "kdump 패키지를 설치하고 부팅 때 켜지도록 설정합니다.",
+  crash: "crash 패키지를 설치합니다.",
+  swap: "2GB swap 파일(/swapfile-kdump)을 만들고 /etc/fstab에 등록합니다.",
+  tool: "노트북의 analyze-kdump를 서버에 설치합니다.",
+};
+
+async function renderPrepare(server, refresh = false) {
+  const body = $("#tab-body");
+  if (!state.prepare[server.name] || refresh) {
+    body.innerHTML = '<p class="muted"><span class="spinner"></span> 서버를 점검하는 중... (바꾸는 것은 없습니다)</p>';
+    try {
+      state.prepare[server.name] = await api("GET", `/api/servers/${encodeURIComponent(server.name)}/prepare`);
+    } catch (e) {
+      body.innerHTML = `<p class="form-error">${esc(e.message)}</p>`;
+      return;
+    }
+  }
+  if (state.page !== "server" || state.selected !== server.name || state.tab !== "prepare" || state.view) return;
+  const r = state.prepare[server.name];
+  const running = [...state.jobs.values()].some(j => j.kind === "prepare" && j.server === server.name && isActive(j));
+  const wrap = h(`<div>
+    <div class="viewer-head">
+      <span class="muted">${esc(r.os)} · ${esc(r.family)} · 커널 ${esc(r.kernel || "?")}${r.root ? "" : ' · <span class="warn-text">root 권한 없음(서버 설정의 sudo를 켜야 설치 가능)</span>'}</span>
+      <button class="btn small" id="pr-refresh">다시 점검</button>
+    </div>
+    <table class="list prepare"><thead><tr><th style="width:28px"></th><th>항목</th><th>상태</th><th>내용</th></tr></thead><tbody></tbody></table>
+    <div class="batch-bar" id="pr-bar"></div>
+  </div>`);
+  const tbody = wrap.querySelector("tbody");
+  for (const it of r.items) {
+    const [cls, text] = PREPARE_STATUS[it.status] || ["", it.status];
+    const fixable = it.action && it.status !== "ok";
+    const row = h(`<tr>
+      <td>${fixable ? `<input type="checkbox" class="pr-check" data-action="${esc(it.action)}" ${it.status === "missing" || it.status === "warn" ? "checked" : ""}>` : ""}</td>
+      <td style="white-space:nowrap;font-weight:600">${esc(it.label)}</td>
+      <td><span class="pill ${cls}">${esc(text)}</span></td>
+      <td>${esc(it.detail)}${it.note ? `<div class="muted" style="font-size:12px">${esc(it.note)}</div>` : ""}</td></tr>`);
+    tbody.append(row);
+  }
+  const body2 = $("#tab-body");
+  body2.innerHTML = "";
+  body2.append(wrap);
+  $("#pr-refresh").addEventListener("click", () => renderPrepare(server, true));
+
+  const bar = $("#pr-bar");
+  const draw = () => {
+    const picked = [...wrap.querySelectorAll(".pr-check:checked")].map(c => c.dataset.action);
+    bar.innerHTML = "";
+    if (!wrap.querySelector(".pr-check")) {
+      bar.append(h('<span class="muted">설치할 항목이 없습니다. kdump로 vmcore를 저장하고 이 서버에서 분석할 준비가 되어 있습니다.</span>'));
+      return;
+    }
+    const el = h(`<div class="batch-inner"><b>${picked.length}개 선택</b>
+      <button class="btn small primary" id="pr-run" ${picked.length && !running && r.root ? "" : "disabled"}>선택 항목 설치</button>
+      <span class="muted">${running ? "준비 작업이 진행 중입니다." : "점검은 서버를 바꾸지 않습니다. 설치는 확인을 거친 뒤 실행합니다."}</span></div>`);
+    el.querySelector("#pr-run").addEventListener("click", () => runPrepare(server, picked));
+    bar.append(el);
+  };
+  wrap.querySelectorAll(".pr-check").forEach(c => c.addEventListener("change", draw));
+  draw();
+}
+
+async function runPrepare(server, actions) {
+  const lines = actions.map(a => `• ${PREPARE_WARN[a] || a}`).join("\n");
+  const reboot = actions.includes("crashkernel") || actions.includes("kdump")
+    ? "\n\n설치 뒤 서버를 재부팅해야 kdump가 동작합니다. 운영 서버라면 점검 시간에 진행하세요." : "";
+  if (!confirm(`${server.name}에서 다음을 실행할까요?\n\n${lines}${reboot}`)) return;
+  const job = await startJob({ kind: "prepare", server: server.name, actions });
+  if (job) renderPrepare(server);
 }
 
 // ---------------------------------------------------------------- 분석 기록
@@ -1123,6 +1205,14 @@ async function cancelJobs(list) {
 
 function onJobFinished(job) {
   if (job.status === "cancelled") { scheduleJobClose(job.id, 2500); return; }
+  if (job.kind === "prepare") {
+    toast(job.status === "done" ? `${job.server}: 서버 준비를 마쳤습니다.` : `${job.server}: 서버 준비 중 일부가 실패했습니다.`);
+    if (job.status === "done") scheduleJobClose(job.id);
+    delete state.prepare[job.server];
+    delete state.health[job.server];
+    if (state.page === "server" && state.selected === job.server && state.tab === "prepare" && !state.view) renderPrepare(state.servers.find(s => s.name === job.server), true);
+    return;
+  }
   if (job.kind === "upgrade") {
     toast(job.status === "done" ? `${job.server}: v${job.version || "?"} 설치를 마쳤습니다.` : `${job.server}: 설치에 실패했습니다.`);
     delete state.health[job.server];
@@ -1173,7 +1263,8 @@ function renderJobs() {
     box.append(el);
   }
   for (const job of shown.reverse()) {
-    const label = job.kind === "upgrade"
+    const label = job.kind === "prepare" ? `서버 준비 (${(job.actions || []).length}개 항목)`
+      : job.kind === "upgrade"
       ? `analyze-kdump 설치 (${job.source === "github" ? "GitHub" : "노트북 버전"})`
       : { report: "리포트 생성", llm: "리포트 + LLM 분석", reanalyze: "LLM 분석" }[job.kind];
     let pct = null;

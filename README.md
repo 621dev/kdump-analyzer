@@ -10,7 +10,7 @@
 - 커널 버전에 맞는 `vmlinux` 경로 자동 매칭 (`VMLINUX_BASE`, 설치된 debuginfo 경로 순으로 탐색)
 - 매칭되는 `vmlinux`가 없을 때 필요한 설치 명령 안내 (RHEL 계열, Debian/Ubuntu)
 - `crash <vmlinux> <vmcore>` 실행 자동화
-- `/var/crash` 같은 덤프 디렉터리를 지정하면 가장 최근 `vmcore` 자동 선택
+- `/var/crash` 같은 덤프 디렉터리를 지정하면 가장 최근 `vmcore` 자동 선택 (RHEL·SUSE의 `<디렉터리>/vmcore`, Ubuntu·Debian `kdump-tools`의 `<YYYYMMDDHHMM>/dump.<YYYYMMDDHHMM>` 모두 인식)
 - `-report` 옵션으로 셸 진입 없이 명령별 섹션으로 구분된 요약 리포트 파일 생성
 - 선택적으로 LLM을 연동해 원인분석과 조치 권고 추가 (민감정보 마스킹, 섹션 단위 입력 축소)
 - 자동화에서 결과를 판별할 수 있는 종료 코드
@@ -61,6 +61,23 @@ RHEL 계열 시스템에서는 보통 `crash`와 `debuginfo-install`을 사용�
 ```bash
 dnf install -y crash dnf-plugins-core
 ```
+
+Ubuntu·Debian에서는 `crash`와 `kdump-tools`를 설치합니다. vmlinux는 dbgsym(ddebs) 저장소의 `linux-image-<커널 버전>-dbgsym` 패키지에 들어 있습니다. 설치하면 `/usr/lib/debug/boot/vmlinux-<커널 버전>`을 자동으로 찾습니다.
+
+```bash
+apt-get install -y crash kdump-tools
+```
+
+| 배포판 | 덤프 저장 위치 | 커널 로그 |
+|--------|----------------|-----------|
+| RHEL·Rocky·Alma·SUSE | `/var/crash/<IP>-<날짜-시각>/vmcore` | `vmcore-dmesg.txt` |
+| Ubuntu·Debian (`kdump-tools`) | `/var/crash/<YYYYMMDDHHMM>/dump.<YYYYMMDDHHMM>` | `dmesg.<YYYYMMDDHHMM>` |
+
+Ubuntu 26.04 Server는 `kdump-tools`, `crash`, crashkernel 예약을 기본으로 설치하지만 `/etc/default/kdump-tools`의 `USE_KDUMP=0`으로 꺼 둡니다. 웹 UI의 **서버 준비**가 이를 찾아 켜고(서비스 재시작), dbgsym 디버그 커널도 설치합니다. 26.04 커널의 dbgsym은 약 2.1GB이므로 디스크 여유를 확인하세요(설치 뒤 내려받은 패키지 파일은 지웁니다).
+
+Hyper-V VM에서는 **동적 메모리를 끄세요.** Ubuntu 26.04 커널(7.0)에서 동적 메모리로 추가된 메모리가 CMA로 집계되어(`CmaTotal: 0`인데 `CmaFree`가 큼), kdump 커널을 올리는 kexec가 메모리가 남아 있는데도 OOM으로 실패했습니다(`kdump-tools.service: Failed with result 'oom-kill'`).
+
+Ubuntu가 `/var/crash`에 함께 저장하는 사용자 프로그램 크래시 보고서(apport의 `*.crash`)와, 저장이 끝나지 않은 `dump-incomplete`는 목록에 넣지 않습니다.
 
 ## 설치
 
@@ -471,6 +488,7 @@ python webui/kdump-webui.py
 |------|------|
 | 서버 목록 (왼쪽) | 서버 추가·수정·삭제. 입력은 한 장의 양식(이름, user@host, 포트, SSH 키 파일, 원격 analyze-kdump 경로, crash 디렉터리, 분석 방식, sudo) |
 | 서버 화면 | 연결 테스트(호스트, 원격 analyze-kdump 버전, crash 버전, vmcore 개수). vmcore 목록에서 **리포트** 또는 **리포트 + LLM 분석** 실행. 기록 칸에는 vmcore마다 만들어 둔 리포트와 분석 개수가 보이고, 누르면 최근 결과가 열림 |
+| 서버 준비 (서버 화면의 탭) | 서버의 kdump 분석 환경을 점검합니다: kdump 서비스, crashkernel 예약, kdump 동작 준비, crash, 실행 중인 커널의 디버그 커널(vmlinux), 메모리·swap, 덤프 저장 공간, analyze-kdump. 점검은 서버를 바꾸지 않습니다. 빠진 항목은 골라서 설치할 수 있습니다(RHEL 계열은 dnf, Ubuntu·Debian은 apt). crashkernel 설정은 재부팅해야 적용되며, 재부팅은 직접 합니다 |
 | 여러 vmcore 한 번에 | 체크박스로 고른 뒤 **리포트**, **리포트 + LLM 분석**, **LLM 분석만(기존 리포트)** 중 하나로 실행. "LLM 분석만"은 crash를 다시 돌리지 않고 vmcore마다 가장 최근 리포트로 분석합니다(리포트가 없는 vmcore는 건너뜀) |
 | 작업 대기열 | 같은 서버의 crash 작업(리포트 생성, 설치)은 한 번에 하나씩, LLM 분석은 전체에서 한 번에 하나씩 요청한 순서대로 실행합니다. 앞 작업이 LLM 단계로 넘어가면 다음 작업의 리포트 생성이 바로 시작됩니다. 메모리가 작은 서버에서 crash 여러 개가 동시에 돌다 OOM으로 죽는 것을 막기 위한 것입니다. 대기 중인 작업은 카드에서 취소할 수 있습니다 |
 | 작업 카드 (오른쪽 아래) | crash 리포트 생성 진행 바(`3/12 bt -a`), vmlinux 읽는 중 표시, LLM 분석 단계, 경과 시간, 로그. 성공한 카드는 8초 뒤 자동으로 닫힘(마우스를 올려 두거나 로그를 펼치면 유지). 실패한 카드는 직접 닫을 때까지 남음 |
@@ -632,6 +650,8 @@ sync; sudo insmod kdump_fault.ko type=hungtask quiet=1
 모듈 없이 만들 수 있는 장애도 있습니다.
 - **OOM 패닉:** `vm.panic_on_oom=1`을 켠 뒤 메모리를 고갈시킵니다.
 - **I/O hang:** 루프 장치 파일시스템을 `fsfreeze -f`로 멈춘 뒤 그 파일시스템에 씁니다.
+
+2026-11 Ubuntu 26.04.1 LTS(커널 7.0.0-42, crash 9.0.1) VM에서도 SysRq-c로 만든 `dump.<시각>`을 리포트와 LLM으로 분석해 원인을 맞게 판정했습니다. crash가 이 커널의 패닉 시각은 읽지 못해(`DATE: 1970`) 리포트의 시각은 부팅 후 경과 시간으로 봐야 합니다.
 
 2026-11 Rocky Linux 9.8(커널 5.14.0-687) VM에서 위 8가지와 SysRq-c로 만든 vmcore 9건을 리포트와 LLM(Claude Code)으로 분석했습니다. 9건 모두 원인을 맞게 판정했습니다. `quiet=1`로 만든 hung task도 `foreach UN bt`와 "taint 모듈 관련 태스크" 섹션으로 잠금을 쥔 스레드까지 찾았습니다.
 
