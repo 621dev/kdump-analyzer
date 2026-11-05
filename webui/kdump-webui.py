@@ -31,13 +31,32 @@ import uuid
 import webbrowser
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+def _hide_child_consoles():
+    """콘솔이 없는 프로세스(pythonw)가 ssh·git 같은 콘솔 프로그램을 띄우면 창이 열렸다 닫힙니다.
+    콘솔이 없을 때만 모든 하위 프로세스에 CREATE_NO_WINDOW를 줍니다(콘솔에서 실행할 때는 그대로)."""
+    if os.name != "nt":
+        return
+    import ctypes
+    if ctypes.windll.kernel32.GetConsoleWindow():
+        return
+    original = subprocess.Popen.__init__
+
+    def patched(self, *args, **kwargs):
+        kwargs["creationflags"] = kwargs.get("creationflags", 0) | 0x08000000  # CREATE_NO_WINDOW
+        original(self, *args, **kwargs)
+    subprocess.Popen.__init__ = patched
+
+
+_hide_child_consoles()
 import kdump_llm  # noqa: E402
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(APP_DIR)
 # 화면(app.js)과 서버가 주고받는 API의 판. API를 바꿀 때 app.js의 API_LEVEL과 함께 올립니다.
 # 업데이트 뒤 서버를 다시 시작하지 않으면 화면이 이 값의 차이로 알아채고 안내합니다.
-API_LEVEL = 4
+API_LEVEL = 5
 
 # 화면의 "다시 시작"은 감시 프로세스가 서버를 새 코드로 다시 띄우는 방식입니다.
 RESTART_EXIT = 75                     # 서버가 이 코드로 끝나면 감시 프로세스가 다시 띄웁니다
@@ -1334,6 +1353,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                     "platform": sys.platform, "api": API_LEVEL,
                                     "running_version": app.started_version,
                                     "supervised": app.supervised, "started_at": app.started_at})
+        if parts == ["shutdown"] and method == "POST":
+            body = self._body()
+            with app.jobs.lock:
+                active = [j for j in app.jobs.items.values() if j.status in ("queued", "running")]
+            if active and not body.get("force"):
+                raise ApiError(409, "진행 중이거나 대기 중인 작업이 %d개 있습니다. 끝난 뒤 종료해 주세요." % len(active))
+            threading.Timer(0.3, app.httpd.shutdown).start()
+            return self._json(200, {"ok": True})
         if parts == ["restart"] and method == "POST":
             body = self._body()
             if not app.supervised:
@@ -1518,6 +1545,12 @@ def parse_args():
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--no-supervisor", action="store_true",
                         help="감시 프로세스 없이 실행합니다(화면의 다시 시작 버튼을 쓸 수 없음)")
+    parser.add_argument("--launch", action="store_true",
+                        help="바로가기용: 이미 실행 중이면 그 화면을 열고, 아니면 새로 시작합니다(콘솔 없이 실행할 때 사용)")
+    parser.add_argument("--install-shortcut", action="store_true",
+                        help="Windows 바탕화면과 시작 메뉴에 아이콘 바로가기를 만듭니다")
+    parser.add_argument("--remove-shortcut", action="store_true", help="--install-shortcut으로 만든 바로가기를 지웁니다")
+    parser.add_argument("--shortcut-dir", help="바로가기를 만들 폴더(기본: 바탕화면과 시작 메뉴)")
     return parser.parse_args()
 
 
@@ -1540,6 +1573,150 @@ def bind_exact_port(port, wait=20):
             if time.time() > deadline:
                 raise
             time.sleep(0.5)
+
+
+RUN_INFO = "run.json"
+APP_NAME = "kdump-tools 웹 UI"
+
+
+def run_info_path(data_dir):
+    return os.path.join(data_dir, RUN_INFO)
+
+
+def read_run_info(data_dir):
+    try:
+        with open(run_info_path(data_dir), encoding="utf-8") as f:
+            info = json.load(f)
+        return info if isinstance(info.get("port"), int) and info.get("token") else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def write_run_info(data_dir, port, token):
+    os.makedirs(data_dir, exist_ok=True)
+    path = run_info_path(data_dir)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump({"pid": os.getpid(), "port": port, "token": token, "started": time.time()}, f)
+
+
+def remove_run_info(data_dir):
+    try:
+        info = read_run_info(data_dir)
+        if info and info.get("pid") == os.getpid():
+            os.remove(run_info_path(data_dir))
+    except OSError:
+        pass
+
+
+def instance_alive(info):
+    """저장된 정보의 서버가 실제로 응답하는지 확인합니다(토큰 주소로 접속해 봄)."""
+    # 토큰 주소(/?t=)는 쿠키를 심고 다른 주소로 넘기는 응답이라, 쿠키를 직접 보내 상태 API로 확인합니다.
+    try:
+        request = urllib.request.Request("http://127.0.0.1:%d/api/state" % info["port"],
+                                         headers={"Cookie": "kt=%s" % info["token"]})
+        with urllib.request.urlopen(request, timeout=2) as res:
+            return res.status == 200
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def instance_url(info):
+    return "http://127.0.0.1:%d/?t=%s" % (info["port"], info["token"])
+
+
+def setup_log(data_dir):
+    """콘솔이 없으면(pythonw) 출력할 곳이 없어 print가 실패하므로 데이터 폴더의 로그 파일로 보냅니다."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    os.makedirs(data_dir, exist_ok=True)
+    path = os.path.join(data_dir, "webui.log")
+    try:
+        if os.path.getsize(path) > 1024 * 1024:
+            os.replace(path, path + ".old")
+    except OSError:
+        pass
+    log = open(path, "a", encoding="utf-8", buffering=1)
+    if sys.stdout is None:
+        sys.stdout = log
+    if sys.stderr is None:
+        sys.stderr = log
+
+
+def show_error(message):
+    """콘솔이 없을 때는 오류를 대화 상자로 알립니다."""
+    print(message, file=sys.stderr)
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, message, APP_NAME, 0x10)  # MB_ICONERROR
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def launch(args):
+    """바로가기에서 실행: 이미 떠 있으면 그 화면을 열고, 아니면 새로 시작합니다."""
+    info = read_run_info(args.data_dir)
+    if info and instance_alive(info):
+        if not args.no_browser:
+            webbrowser.open(instance_url(info))
+        print("이미 실행 중입니다: http://127.0.0.1:%d/" % info["port"], flush=True)
+        return
+    supervise(args)
+
+
+def powershell_quote(text):
+    return "'" + str(text).replace("'", "''") + "'"
+
+
+def shortcut_command(args):
+    """바로가기 설치·삭제용 PowerShell 명령. 시스템의 실행 정책은 건드리지 않습니다(-Command)."""
+    if os.name != "nt":
+        sys.exit("바로가기는 Windows에서만 만들 수 있습니다.")
+    python = sys.executable
+    pythonw = os.path.join(os.path.dirname(python), "pythonw.exe")
+    if not os.path.exists(pythonw):
+        sys.exit("pythonw.exe를 찾을 수 없습니다(%s). Python을 다시 설치하거나 'py launcher'를 확인해 주세요." % pythonw)
+    script = os.path.abspath(__file__)
+    repo = os.path.dirname(os.path.dirname(script))
+    icon = os.path.join(repo, "windows", "kdump-tools.ico")
+    arguments = '"%s" --launch' % script
+    if args.data_dir != parse_defaults().data_dir:
+        arguments += ' --data-dir "%s"' % os.path.abspath(args.data_dir)
+    if args.shortcut_dir:
+        folders = "@(%s)" % powershell_quote(os.path.abspath(args.shortcut_dir))
+    else:
+        folders = "@([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))"
+    name = APP_NAME + ".lnk"
+    if args.remove_shortcut:
+        body = "foreach ($f in %s) { $p = Join-Path $f %s; if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p; 'removed: ' + $p } }" % (
+            folders, powershell_quote(name))
+    else:
+        body = ("$sh = New-Object -ComObject WScript.Shell; foreach ($f in %s) { New-Item -ItemType Directory -Force -Path $f | Out-Null; "
+                "$p = Join-Path $f %s; $l = $sh.CreateShortcut($p); $l.TargetPath = %s; $l.Arguments = %s; "
+                "$l.WorkingDirectory = %s; $l.IconLocation = %s; $l.Description = %s; $l.WindowStyle = 7; $l.Save(); 'created: ' + $p }") % (
+            folders, powershell_quote(name), powershell_quote(pythonw), powershell_quote(arguments), powershell_quote(repo),
+            powershell_quote(icon + ",0"), powershell_quote("kdump vmcore 분석 웹 UI"))
+    return body
+
+
+def parse_defaults():
+    class Defaults:
+        data_dir = os.path.join(os.path.expanduser("~"), ".kdump-tools-web")
+    return Defaults
+
+
+def manage_shortcut(args):
+    command = shortcut_command(args)
+    result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                             "[Console]::OutputEncoding = [Text.Encoding]::UTF8; " + command],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    text = result.stdout.decode("utf-8", errors="replace").strip()
+    print(text or ("완료" if result.returncode == 0 else "실패"))
+    if result.returncode != 0:
+        sys.exit(result.returncode)
+    if not args.remove_shortcut:
+        print("\n바탕화면과 시작 메뉴의 '%s' 아이콘을 더블클릭하면 콘솔 없이 실행되고 브라우저가 열립니다." % APP_NAME)
 
 
 def print_banner(data_dir, url):
@@ -1612,37 +1789,57 @@ def supervise(args):
     token = secrets.token_urlsafe(24)
     url = "http://127.0.0.1:%d/?t=%s" % (port, token)
     print_banner(args.data_dir, url)
+    write_run_info(args.data_dir, port, token)
     if not args.no_browser:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
 
     env = dict(os.environ, **{ENV_WORKER: "1", ENV_TOKEN: token, ENV_PORT: str(port)})
-    argv = [sys.executable, os.path.abspath(__file__)] + sys.argv[1:]
-    while True:
-        child = subprocess.Popen(argv, env=env, stdin=subprocess.PIPE)
-        try:
-            code = child.wait()
-        except KeyboardInterrupt:
-            # Ctrl+C는 같은 콘솔의 서버 프로세스에도 전달되므로 끝나기를 잠깐 기다립니다.
+    argv = [sys.executable, os.path.abspath(__file__)] + [a for a in sys.argv[1:] if a != "--launch"]
+    try:
+        while True:
+            # 표준 출력·오류를 명시해야 콘솔이 없을 때(pythonw)도 하위 프로세스가 유효한 핸들을 받습니다.
+            child = subprocess.Popen(argv, env=env, stdin=subprocess.PIPE, stdout=sys.stdout, stderr=sys.stderr)
             try:
-                child.wait(timeout=5)
-            except (subprocess.TimeoutExpired, KeyboardInterrupt):
-                child.kill()
-            print("\n종료합니다.")
-            return
-        if code == RESTART_EXIT:
-            print("다시 시작합니다: v%s" % version_text(), flush=True)
-            continue
-        sys.exit(code)
+                code = child.wait()
+            except KeyboardInterrupt:
+                # 파이프를 닫으면 서버 프로세스가 스스로 끝납니다. 끝나지 않으면 강제로 끝냅니다.
+                try:
+                    child.stdin.close()
+                    child.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
+                    child.kill()
+                print("\n종료합니다.")
+                return
+            if code == RESTART_EXIT:
+                print("다시 시작합니다: v%s" % version_text(), flush=True)
+                continue
+            if code == 0:
+                print("종료했습니다.", flush=True)
+            sys.exit(code)
+    finally:
+        remove_run_info(args.data_dir)
 
 
 def main():
     args = parse_args()
-    if os.environ.get(ENV_WORKER) == "1":
-        serve(args, supervised=True)
-    elif args.no_supervisor:
-        serve(args)
-    else:
-        supervise(args)
+    if args.install_shortcut or args.remove_shortcut:
+        return manage_shortcut(args)
+    setup_log(args.data_dir)
+    try:
+        if os.environ.get(ENV_WORKER) == "1":
+            serve(args, supervised=True)
+        elif args.no_supervisor:
+            serve(args)
+        elif args.launch:
+            launch(args)
+        else:
+            supervise(args)
+    except SystemExit:
+        raise
+    except Exception as error:  # noqa: BLE001 - 콘솔이 없으면 오류가 보이지 않으므로 대화 상자로 알립니다.
+        show_error("웹 UI를 시작하지 못했습니다.\n\n%s: %s\n\n자세한 내용: %s" % (
+            type(error).__name__, error, os.path.join(args.data_dir, "webui.log")))
+        raise
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 "use strict";
 
 // 서버(kdump-webui.py)의 API_LEVEL과 같아야 합니다. 다르면 업데이트 뒤 서버를 다시 시작하지 않은 것입니다.
-const API_LEVEL = 4;
+const API_LEVEL = 5;
 
 // ---------------------------------------------------------------- 상태와 공통
 
@@ -840,6 +840,9 @@ function renderVersions(main) {
     btn.title = "웹 UI 서버를 디스크에 있는 코드로 다시 실행합니다";
     $("#ver-actions").append(btn);
   }
+  const stop = h('<button class="btn small danger" title="웹 UI 서버를 끕니다. 다시 쓰려면 바탕화면 아이콘이나 콘솔에서 다시 실행하세요.">웹 UI 종료</button>');
+  stop.addEventListener("click", () => shutdownWebui());
+  $("#ver-actions").append(stop);
   const action = $("#ver-action");
   if (st.cls === "up" && local.git) {
     const btn = h('<button class="btn small primary">업데이트 (git pull)</button>');
@@ -1011,6 +1014,25 @@ async function restartWebui() {
     <div>웹 UI를 실행한 콘솔에 오류가 있는지 확인하고, 필요하면 Ctrl+C로 끈 뒤 직접 다시 실행해 주세요.</div>
     <div style="margin-top:10px"><button class="btn small" id="overlay-close">닫기</button></div>`;
   overlay.querySelector("#overlay-close").addEventListener("click", () => overlay.remove());
+}
+
+// 웹 UI 서버를 끕니다. 콘솔 없이 아이콘으로 실행했을 때는 이 버튼이 종료 방법입니다.
+async function shutdownWebui() {
+  const active = [...state.jobs.values()].filter(isActive).length;
+  if (active) {
+    toast(`진행 중이거나 대기 중인 작업이 ${active}개 있습니다. 끝난 뒤 종료해 주세요.`);
+    return;
+  }
+  if (!confirm("웹 UI를 종료할까요?" + String.fromCharCode(10, 10) + "저장된 서버 목록, 설정, 분석 결과는 그대로 남습니다.")) return;
+  try {
+    await api("POST", "/api/shutdown", {});
+  } catch (e) {
+    toast(e.message);
+    return;
+  }
+  document.body.append(h(`<div class="overlay"><div class="overlay-box">
+    <b>웹 UI를 종료했습니다.</b>
+    <div class="muted">이 탭은 닫아도 됩니다. 다시 쓰려면 바탕화면의 아이콘을 실행하세요.</div></div></div>`));
 }
 
 // ---------------------------------------------------------------- 결과 보기
