@@ -7,3 +7,5 @@ completion/* text eol=lf
 VERSION text eol=lf
 webui/** text eol=lf
 tests/** text eol=lf
+windows/*.cmd text eol=crlf
+*.ico binary
