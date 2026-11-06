@@ -788,7 +788,8 @@ debuginfo)
   if [ "$pm" = apt ]; then
     case "${ID:-}" in
     ubuntu)
-      apt_update && apt_get install ubuntu-dbgsym-keyring || true
+      # 키링 설치는 실패해도 계속합니다(이미 있거나 저장소에 없을 수 있음).
+      if apt_update; then apt_get install ubuntu-dbgsym-keyring || true; fi
       printf 'deb http://ddebs.ubuntu.com %s main restricted universe multiverse\ndeb http://ddebs.ubuntu.com %s-updates main restricted universe multiverse\n' \
         "$VERSION_CODENAME" "$VERSION_CODENAME" > /etc/apt/sources.list.d/ddebs.list
       apt_get update || exit 1
