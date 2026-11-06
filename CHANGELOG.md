@@ -3,6 +3,11 @@
 버전 번호는 [유의적 버전](https://semver.org/lang/ko/)을 따릅니다. 기능이 추가되면 가운데 자리, 고친 것만 있으면 끝자리를 올립니다.
 GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리스)으로 받을 수 있습니다.
 
+## [1.18.2] - 2026-11-06
+
+### 수정
+- flattened 형식 덤프를 crash가 바로 읽으면 변환하지 않습니다. 1.18.0은 flattened 형식이면 항상 변환해서, 로컬 저장도 이 형식인 Ubuntu·Debian에서는 덤프마다 같은 크기의 `vmcore`를 하나 더 만들었습니다. crash 9.0.1(Rocky 9.8, Ubuntu 26.04)은 flattened 형식을 바로 읽으며, 이제 crash가 읽지 못할 때만 변환합니다.
+
 ## [1.18.1] - 2026-11-06
 
 ### 추가
@@ -137,7 +142,8 @@ GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리�
 - 설치 스크립트(명령 등록)와 상황별 원격 분석 방식 (#3)
 - 분석 진행 표시와 메뉴의 이전 화면 이동 (#4)
 
-[1.18.1]: https://github.com/621dev/kdump-tools/compare/v1.18.0...main
+[1.18.2]: https://github.com/621dev/kdump-tools/compare/v1.18.0...main
+[1.18.1]: https://github.com/621dev/kdump-tools/pull/27
 [1.18.0]: https://github.com/621dev/kdump-tools/compare/v1.17.0...v1.18.0
 [1.17.0]: https://github.com/621dev/kdump-tools/compare/v1.15.1...v1.17.0
 [1.16.0]: https://github.com/621dev/kdump-tools/pull/24

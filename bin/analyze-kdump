@@ -211,7 +211,7 @@ resolve_vmcore() {
 }
 
 # makedumpfile -F(SSH 전송)로 만든 flattened 형식은 파일 맨 앞이 "makedumpfile" 서명입니다.
-# crash는 이 형식을 바로 열지 못하므로 makedumpfile -R로 되돌려야 합니다.
+# 오래된 crash는 이 형식을 열지 못하므로 그때는 makedumpfile -R로 되돌립니다(crash 9.0.1은 바로 읽음).
 is_flat_dump() {
     [ "$(head -c 12 "$1" 2>/dev/null | tr -d '\0')" = "makedumpfile" ]
 }
@@ -1662,27 +1662,33 @@ if [ ! -f "$VMCORE" ]; then
     exit 1
 fi
 
-# SSH 전송으로 받은 flattened 형식이면 일반 덤프로 바꿔서 분석합니다.
-FLAT_SOURCE=""
-if is_flat_dump "$VMCORE"; then
-    if ! is_enabled "${FLAT_CONVERT:-1}"; then
-        echo "makedumpfile flattened 형식 덤프입니다(SSH 전송): $VMCORE" >&2
-        echo "다음처럼 바꾼 뒤 분석하거나, FLAT_CONVERT=1로 자동 변환을 켜 주세요." >&2
-        echo "  makedumpfile -R $(dirname "$VMCORE")/vmcore < $VMCORE" >&2
-        exit 1
-    fi
-    # 변환은 $( ) 안에서 실행되므로 임시 디렉터리는 여기서 만들어야 종료할 때 지워집니다.
-    ensure_work_dir
-    FLAT_SOURCE="$VMCORE"
-    VMCORE=$(convert_flat_dump "$FLAT_SOURCE") || exit 1
-fi
-
 if ! command -v crash >/dev/null 2>&1; then
     echo "crash 명령을 찾을 수 없습니다. crash 패키지를 설치해 주세요." >&2
     exit 1
 fi
 
-if ! KVER_OUTPUT=$(crash --osrelease "$VMCORE" 2>&1); then
+# makedumpfile flattened 형식(SSH 전송, Ubuntu·Debian은 로컬 저장도)은 crash 9.0.1 등 최근 crash가 바로 읽습니다.
+# crash가 읽지 못할 때만 makedumpfile -R로 일반 덤프로 바꿔서 분석합니다.
+FLAT_SOURCE=""
+KVER_OK=1
+KVER_OUTPUT=$(crash --osrelease "$VMCORE" 2>&1) || KVER_OK=0
+if [ "$KVER_OK" -eq 0 ] && is_flat_dump "$VMCORE"; then
+    if ! is_enabled "${FLAT_CONVERT:-1}"; then
+        echo "이 crash가 읽지 못하는 makedumpfile flattened 형식 덤프입니다: $VMCORE" >&2
+        echo "다음처럼 바꾼 뒤 분석하거나, FLAT_CONVERT=1로 자동 변환을 켜 주세요." >&2
+        echo "  makedumpfile -R $(dirname "$VMCORE")/vmcore < $VMCORE" >&2
+        exit 1
+    fi
+    echo "이 crash가 flattened 형식을 바로 읽지 못해 변환합니다." >&2
+    # 변환은 $( ) 안에서 실행되므로 임시 디렉터리는 여기서 만들어야 종료할 때 지워집니다.
+    ensure_work_dir
+    FLAT_SOURCE="$VMCORE"
+    VMCORE=$(convert_flat_dump "$FLAT_SOURCE") || exit 1
+    KVER_OK=1
+    KVER_OUTPUT=$(crash --osrelease "$VMCORE" 2>&1) || KVER_OK=0
+fi
+
+if [ "$KVER_OK" -eq 0 ]; then
     echo "vmcore 커널 버전을 확인할 수 없습니다." >&2
     echo "$KVER_OUTPUT" >&2
     exit 1
