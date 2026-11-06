@@ -75,6 +75,7 @@ DEFAULT_SETTINGS = {
     "provider": "openai", "model": "", "base_url": "", "api_key_file": "",
     "cli_path": "", "cli_token_file": "", "cli_args": "",
     "mask": True, "max_report_chars": 60000, "max_tokens": 8192, "timeout": 300,
+    "crash_timeout": 30,
     "update_repo": "621dev/kdump-tools", "update_branch": "main",
 }
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -351,6 +352,54 @@ def ssh_args(server):
     if server.get("key_file"):
         args += ["-i", server["key_file"]]
     return args + [server["target"]]
+
+
+PREPARE_TIMEOUT = 7200       # 서버 준비·설치(패키지 내려받기 포함)의 최대 실행 시간(초)
+KILL_GRACE = 30              # 원격 timeout이 보낸 종료 신호를 무시할 때 강제 종료까지 기다리는 시간(초)
+
+
+# 원격 명령을 새 세션(프로세스 그룹)에서 실행하고, 제한 시간이 지나면 그룹 전체에 TERM, 잠시 뒤 KILL을 보냅니다.
+# coreutils timeout은 구현마다 다릅니다(Ubuntu 26.04의 uutils timeout은 KILL을 자식 하나에만 보내 TERM을 무시한
+# 손자 프로세스가 남습니다). 그래서 setsid와 kill만으로 직접 처리합니다. 시간 초과면 124로 끝납니다.
+# ssh 연결이 끊겨도 감시 프로세스는 따로 남아 제한 시간에 명령을 끝냅니다.
+REMOTE_TIMEOUT = r"""
+limit=$1 grace=$2
+shift 2
+# 백그라운드 명령의 표준 입력은 /dev/null로 바뀌므로, 원래 입력(설치 번들 등)을 fd 3으로 넘깁니다.
+exec 3<&0
+setsid "$@" 0<&3 3<&- &
+pid=$!
+exec 3<&-
+setsid sh -c 'sleep "$1"; kill -s TERM -- "-$3" 2>/dev/null || exit 0; sleep "$2"; kill -s KILL -- "-$3" 2>/dev/null' \
+    sh "$limit" "$grace" "$pid" </dev/null >/dev/null 2>&1 3<&- &
+watcher=$!
+wait "$pid"
+rc=$?
+kill -s KILL -- "-$watcher" 2>/dev/null
+case $rc in 137|143) exit 124 ;; esac
+exit "$rc"
+"""
+
+
+def with_remote_timeout(argv, seconds):
+    return ["sh", "-c", REMOTE_TIMEOUT, "sh", str(int(seconds)), str(KILL_GRACE)] + list(argv)
+
+
+def crash_timeout_seconds(settings):
+    try:
+        minutes = int(settings.get("crash_timeout") or DEFAULT_SETTINGS["crash_timeout"])
+    except (TypeError, ValueError):
+        minutes = DEFAULT_SETTINGS["crash_timeout"]
+    return max(1, min(minutes, 1440)) * 60
+
+
+def human_duration(seconds):
+    seconds = int(seconds)
+    if seconds % 3600 == 0:
+        return "%d시간" % (seconds // 3600)
+    if seconds % 60 == 0:
+        return "%d분" % (seconds // 60)
+    return "%d초" % seconds
 
 
 def remote_command(server, argv):
@@ -1021,11 +1070,31 @@ class Jobs:
 
     # ---- crash 리포트 생성
 
-    def _stream(self, job, server, argv, stdin=None):
-        """원격 명령의 출력을 읽으면서 진행 표시(\\r로 갱신되는 줄)를 진행률로 바꿉니다."""
+    def _stream(self, job, server, argv, stdin=None, timeout=None):
+        """원격 명령의 출력을 읽으면서 진행 표시(\\r로 갱신되는 줄)를 진행률로 바꿉니다.
+
+        timeout(초)을 주면 원격에서는 REMOTE_TIMEOUT 감시로, 로컬에서는 감시 타이머로 이중으로 끊습니다.
+        시간을 넘기면 (124, 출력)을 돌려주고 job.timed_out을 켭니다.
+        """
+        if timeout:
+            argv = with_remote_timeout(argv, timeout)
         proc = subprocess.Popen(ssh_args(server) + [remote_command(server, argv)],
                                 stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        started = time.time()
+        watchdog = None
+        expired = threading.Event()
+        if timeout:
+            # 네트워크가 끊겨 원격 timeout의 결과가 돌아오지 않는 경우를 위한 로컬 감시
+            def expire():
+                expired.set()
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+            watchdog = threading.Timer(timeout + KILL_GRACE + 30, expire)
+            watchdog.daemon = True
+            watchdog.start()
         if stdin:
             proc.stdin.write(stdin)
             proc.stdin.close()
@@ -1055,7 +1124,15 @@ class Jobs:
             job.log(buffer)
             text_all.append(buffer)
         proc.wait()
-        return proc.returncode, "\n".join(text_all)
+        if watchdog:
+            watchdog.cancel()
+        code = proc.returncode
+        # 원격 timeout은 124(TERM) 또는 137(KILL)로 끝납니다. 다른 코드여도 제한 시간을 다 썼다면 시간 초과로 봅니다.
+        if timeout and (expired.is_set() or code in (124, 137) or (code != 0 and time.time() - started >= timeout)):
+            code = 124
+            job.timed_out = True
+            job.log("시간 제한(%s)을 넘겨 중단했습니다." % human_duration(timeout))
+        return code, "\n".join(text_all)
 
     def run_report(self, job, llm):
         server = self.store.server(job.server)
@@ -1096,12 +1173,16 @@ class Jobs:
 
         try:
             job.phase = "crash 리포트 생성 중"
-            code, text = self._stream(job, server, argv, stdin)
+            limit = crash_timeout_seconds(self.store.settings())
+            code, text = self._stream(job, server, argv, stdin, timeout=limit)
             remote_report = ""
             for line in text.splitlines():
                 if line.startswith("report:"):
                     remote_report = line.split(":", 1)[1].strip()
             if not remote_report:
+                if getattr(job, "timed_out", False):
+                    raise ApiError(504, "crash 실행이 시간 제한(%s)을 넘겨 중단했습니다. 덤프가 크거나 crash가 멈춘 것일 수 있습니다. "
+                                        "설정의 crash 제한 시간을 늘리거나 서버에서 직접 확인해 주세요." % human_duration(limit))
                 raise ApiError(502, "리포트를 만들지 못했습니다 (종료 코드 %d). 로그를 확인해 주세요." % code)
 
             job.phase = "리포트 가져오는 중"
@@ -1140,7 +1221,8 @@ class Jobs:
                         job.log(error.message)
                         failed.append(action)
                     continue
-                code, _ = self._stream(job, server, ["sh", "-c", REMOTE_PREPARE, "sh", action, vmlinux_base(server)])
+                code, _ = self._stream(job, server, ["sh", "-c", REMOTE_PREPARE, "sh", action, vmlinux_base(server)],
+                                       timeout=PREPARE_TIMEOUT)
                 if code != 0:
                     job.log("실패 (종료 코드 %d)" % code)
                     failed.append(action)
@@ -1172,7 +1254,7 @@ class Jobs:
             commit, label, stdin = "", "github:%s@%s" % (repo, branch), None
         job.phase = "설치 중"
         code, _ = self._stream(job, server, ["sh", "-c", REMOTE_INSTALL, "sh", server["tool"], job.source,
-                                             repo, branch, commit, label], stdin)
+                                             repo, branch, commit, label], stdin, timeout=PREPARE_TIMEOUT)
         if code != 0:
             raise ApiError(502, "설치에 실패했습니다 (종료 코드 %d). 로그를 확인해 주세요. 기존 설치는 그대로입니다." % code)
         job.phase = "설치 확인 중"
@@ -1490,9 +1572,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = self._body()
             if "provider" in body and body["provider"] not in kdump_llm.PROVIDERS:
                 raise ApiError(400, "알 수 없는 provider입니다.")
-            for key in ("max_report_chars", "max_tokens", "timeout"):
+            for key in ("max_report_chars", "max_tokens", "timeout", "crash_timeout"):
                 if key in body:
                     body[key] = int(body[key])
+            if "crash_timeout" in body and not 1 <= body["crash_timeout"] <= 1440:
+                raise ApiError(400, "crash 제한 시간은 1~1440분이어야 합니다.")
             if "update_repo" in body and not REPO_RE.match(str(body["update_repo"])):
                 raise ApiError(400, "업데이트 저장소는 owner/repo 형식이어야 합니다.")
             if "update_branch" in body and not BRANCH_RE.match(str(body["update_branch"])):
