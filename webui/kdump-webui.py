@@ -487,7 +487,7 @@ echo "vmcores=$(for f in "$2"/*/vmcore "$2"/*/vmcore.flat "$2"/*/dump.[0-9]*; do
     return info
 
 
-# SSH로 받은 RHEL 덤프는 <디렉터리>/vmcore.flat입니다. 분석할 때 같은 디렉터리의 vmcore로 변환하므로
+# SSH로 받은 RHEL 덤프는 <디렉터리>/vmcore.flat입니다. crash가 읽지 못해 같은 디렉터리의 vmcore로 변환했으면
 # vmcore가 있는 디렉터리의 vmcore.flat·dump.*는 목록에서 뺍니다.
 DUMP_LIST_SH = ('for f in "$1"/*/vmcore "$1"/*/vmcore.flat "$1"/*/dump.[0-9]*; do [ -f "$f" ] || continue; case "$f" in */vmcore) ;; *) [ -f "${f%/*}/vmcore" ] && continue ;; esac; '
                 'stat -c "%Y %s %n" "$f"; done | sort -rn')

@@ -361,7 +361,7 @@ server_result_dir() {
 
 # 출력: "<mtime> <size> <경로>" (최근 순)
 # 덤프 파일 이름: RHEL·SUSE는 <디렉터리>/vmcore, Ubuntu·Debian(kdump-tools)은 <YYYYMMDDHHMM>/dump.<YYYYMMDDHHMM>
-# SSH로 받은 RHEL 덤프는 <디렉터리>/vmcore.flat입니다. 분석할 때 같은 디렉터리의 vmcore로 변환하므로
+# SSH로 받은 RHEL 덤프는 <디렉터리>/vmcore.flat입니다. crash가 읽지 못해 같은 디렉터리의 vmcore로 변환했으면
 # vmcore가 있는 디렉터리의 vmcore.flat·dump.*는 목록에서 뺍니다.
 DUMP_LIST_SH='for f in "$1"/*/vmcore "$1"/*/vmcore.flat "$1"/*/dump.[0-9]*; do [ -f "$f" ] || continue; case "$f" in */vmcore) ;; *) [ -f "${f%/*}/vmcore" ] && continue ;; esac; stat -c "%Y %s %n" "$f"; done | sort -rn'
 list_vmcores() {
@@ -2052,7 +2052,8 @@ menu_kdump_guide() {
   $crash_dir/<운영 서버 IP>-<시각>/vmcore             (RHEL 계열)
   $crash_dir/<YYYYMMDDHHMM>/dump.<YYYYMMDDHHMM>      (Ubuntu·Debian, 로컬 저장 시)
   SSH 전송은 makedumpfile의 flattened 형식(vmcore.flat)으로 저장됩니다.
-  분석할 때 같은 디렉터리의 vmcore로 자동 변환합니다(설정 FLAT_CONVERT, 덤프 크기만큼 공간 필요).
+  crash 9.0.1 등 최근 crash는 그대로 분석하고, 읽지 못하는 crash면 같은 디렉터리의 vmcore로
+  자동 변환합니다(설정 FLAT_CONVERT, 덤프 크기만큼 공간 필요).
 
 분석
   메뉴의 '접속 서버 선택'에서 '이 서버'를 고르고 'vmcore 분석'을 실행합니다.

@@ -75,7 +75,8 @@ ANALYSIS_PREFIX="kdump-analysis"
 # python3가 필요합니다. 끄려면 0.
 # REPORT_JSON=1
 
-# 선택 사항: SSH로 받은 makedumpfile flattened 형식 덤프(vmcore.flat 등)를 makedumpfile -R로 변환해 분석합니다.
+# 선택 사항: makedumpfile flattened 형식 덤프(vmcore.flat, Ubuntu·Debian의 dump.<시각>)를 crash가 읽지 못하면
+# makedumpfile -R로 변환해 분석합니다(crash 9.0.1 등 최근 crash는 바로 읽으므로 변환하지 않음).
 # 변환본은 같은 디렉터리의 vmcore로 남기고, 쓸 수 없으면 임시 디렉터리에 만들어 분석 뒤 지웁니다. 끄려면 0.
 # FLAT_CONVERT=1
 
