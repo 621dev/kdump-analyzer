@@ -4,6 +4,21 @@
 GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리스)으로 받을 수 있습니다.
 1.18.3까지는 프로젝트 이름이 `kdump-tools`였습니다. 아래 기록의 링크는 GitHub이 새 주소로 연결합니다.
 
+## [1.21.0] - 2026-11-06
+
+### 추가
+- 웹 UI가 리포트의 JSON 요약을 씁니다.
+  - 리포트를 가져올 때 같은 이름의 `.json`도 가져와 옆에 둡니다(무설치 실행 포함).
+  - 분석 기록: 장애 유형 배지, 판정 근거, D 상태 태스크 수, taint 모듈을 보여 주고, 장애 유형으로 거를 수 있습니다. 근거와 유형도 검색합니다.
+  - 리포트 보기: 맨 위에 요약 상자(장애 유형, 판정 근거, 패닉 메시지, D 상태 태스크, taint 모듈, 불러온 모듈 심볼, 시스템 값, crash 종료 코드).
+  - JSON이 없는 예전 리포트도 머리글의 `type:`·`evidence:` 줄로 유형을 보여 줍니다.
+- 설치 위치 옮기기: `install.sh --move-to /opt/kdump-analyzer`로 예전 위치(`/opt/kdump-tools`)의 설치를 설정·서버 목록·API 키·vmlinux·리포트까지 통째로 옮깁니다.
+  - 같은 파일 시스템이면 `mv`로 바로 끝나고, 다르면 공간을 확인한 뒤 복사합니다.
+  - `analyze-kdump.conf` 안의 경로를 고치고(원본은 `.before-move`), 예전 경로에는 새 위치를 가리키는 링크를 남깁니다(`--no-link`로 끔).
+  - 명령, 자동완성, 설치 정보를 새 위치로 다시 등록합니다.
+  - 웹 UI 버전·업데이트 화면의 **새 위치로 옮기기**(노트북 버전으로 업그레이드한 뒤 옮기고, 서버 설정의 경로도 바꿈)와 메뉴의 **업데이트 → 설치 위치 옮기기**에서도 할 수 있습니다.
+- `install.sh --help`가 모든 옵션을 보여 줍니다.
+
 ## [1.20.0] - 2026-11-06
 
 ### 변경
@@ -175,7 +190,8 @@ GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리�
 - 설치 스크립트(명령 등록)와 상황별 원격 분석 방식 (#3)
 - 분석 진행 표시와 메뉴의 이전 화면 이동 (#4)
 
-[1.20.0]: https://github.com/621dev/kdump-analyzer/compare/v1.19.0...main
+[1.21.0]: https://github.com/621dev/kdump-analyzer/compare/v1.20.0...main
+[1.20.0]: https://github.com/621dev/kdump-analyzer/compare/v1.19.0...v1.20.0
 [1.19.0]: https://github.com/621dev/kdump-analyzer/compare/v1.18.3...v1.19.0
 [1.18.3]: https://github.com/621dev/kdump-tools/compare/v1.18.2...v1.18.3
 [1.18.2]: https://github.com/621dev/kdump-tools/compare/v1.18.0...v1.18.2

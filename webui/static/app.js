@@ -15,7 +15,7 @@ const state = {
   selected: null,       // 서버 이름
   tab: "vmcores",       // vmcores | results
   view: null,           // { server, name } 결과 파일 보기
-  historyFilter: { server: "", text: "", kind: "all" },
+  historyFilter: { server: "", text: "", kind: "all", type: "" },
   health: {},           // 서버 이름 -> 연결 테스트 결과
   jobs: new Map(),      // 작업 id -> 작업
   apiMismatch: false,   // 화면과 서버의 API 판이 다름(서버 재시작 필요)
@@ -588,6 +588,21 @@ async function runPrepare(server, actions) {
 
 // ---------------------------------------------------------------- 분석 기록
 
+// 서버 설치 위치: 1.20.0부터 새로 설치하면 NEW_PREFIX, 그 전 기본 위치는 LEGACY_PREFIX
+const NEW_PREFIX = "/opt/kdump-analyzer";
+const LEGACY_PREFIX = "/opt/kdump-tools";
+
+// 리포트의 장애 유형(analyze-kdump가 커널 로그로 판정, 1.16.0부터) 표시
+const TYPE_TONE = { oops: "err", mce: "err", hung_task: "warn", soft_lockup: "warn", hard_lockup: "warn",
+  rcu_stall: "warn", oom: "warn", nmi: "warn", other: "warn" };
+const TYPE_SHORT = { hung_task: "hung task", soft_lockup: "soft lockup", hard_lockup: "hard lockup", rcu_stall: "RCU stall",
+  oom: "OOM", oops: "oops", sysrq: "수동 덤프", mce: "MCE", nmi: "NMI", other: "기타 패닉", unknown: "판단 불가" };
+
+function typePill(type, label) {
+  if (!type) return "";
+  return `<span class="pill ${TYPE_TONE[type] || "muted"}" title="${esc(label || "")}">${esc(TYPE_SHORT[type] || type)}</span>`;
+}
+
 // 기록 하나 = 리포트 한 건 + 그 리포트로 만든 LLM 분석들(최신 순)
 function recordList(records, showServer) {
   const list = h('<div class="records"></div>');
@@ -600,6 +615,10 @@ function recordList(records, showServer) {
       : '<div class="verdict none">LLM 분석 없음 · 리포트만 생성됨</div>';
     const facts = [];
     if (rep && rep.panic) facts.push(`<span class="panic">${esc(rep.panic)}</span>`);
+    if (rep && rep.evidence && rep.evidence !== rep.panic) facts.push(`<span class="evidence" title="장애 유형 판정 근거">${esc(rep.evidence)}</span>`);
+    const sum = (rep && rep.summary) || {};
+    if (sum.uninterruptible) facts.push(`<span>D 상태 태스크 ${sum.uninterruptible}개</span>`);
+    if (sum.tainted && sum.tainted.length) facts.push(`<span>taint 모듈: ${esc(sum.tainted.join(", "))}</span>`);
     if (rep && rep.vmcore) facts.push(`<span class="path">${esc(rep.vmcore)}</span>`);
     if (!rep) facts.push('<span>원본 리포트가 없습니다</span>');
     const llm = latest ? `${esc(PROVIDER_LABEL[latest.provider] || latest.provider || "LLM")}${latest.model ? " · " + esc(latest.model) : ""}` : "";
@@ -608,6 +627,7 @@ function recordList(records, showServer) {
         <div class="record-top">
           ${showServer ? `<span class="tag server${known ? "" : " gone"}" title="${known ? "" : "삭제된 서버"}">${esc(r.server)}</span>` : ""}
           <span>${fmtTime(r.time)}</span>
+          ${rep ? typePill(rep.type, rep.type_label) : ""}
           ${rep && rep.kernel ? `<span class="muted">${esc(rep.kernel)}</span>` : ""}
         </div>
         ${verdict}
@@ -649,7 +669,8 @@ async function renderHistory(main) {
       <select id="h-kind">
         <option value="all">전체</option><option value="analysis">LLM 분석 있음</option><option value="report">리포트만</option>
       </select>
-      <input id="h-text" placeholder="판정, panic, vmcore, 커널 버전으로 검색">
+      <select id="h-type"><option value="">모든 장애 유형</option></select>
+      <input id="h-text" placeholder="판정, panic, 근거, vmcore, 커널 버전으로 검색">
     </div>
     <div id="h-summary" class="muted history-summary"></div>
     <div id="h-list"><p class="muted"><span class="spinner"></span> 불러오는 중...</p></div>
@@ -670,6 +691,10 @@ async function renderHistory(main) {
   for (const n of names) sel.append(h(`<option value="${esc(n)}">${esc(n)}</option>`));
   sel.value = names.includes(f.server) ? f.server : "";
   $("#h-kind").value = f.kind;
+  const types = [...new Set(records.map(r => r.report && r.report.type).filter(Boolean))];
+  const tsel = $("#h-type");
+  for (const k of types) tsel.append(h(`<option value="${esc(k)}">${esc(TYPE_SHORT[k] || k)}</option>`));
+  tsel.value = types.includes(f.type) ? f.type : "";
   $("#h-text").value = f.text;
 
   function draw() {
@@ -678,9 +703,10 @@ async function renderHistory(main) {
       if (f.server && r.server !== f.server) return false;
       if (f.kind === "analysis" && !r.analyses.length) return false;
       if (f.kind === "report" && r.analyses.length) return false;
+      if (f.type && !(r.report && r.report.type === f.type)) return false;
       if (!t) return true;
       const hay = [r.server, ...(r.analyses.map(a => `${a.verdict} ${a.provider} ${a.model}`)),
-        r.report ? `${r.report.panic} ${r.report.vmcore} ${r.report.kernel} ${r.report.name}` : ""].join(" ").toLowerCase();
+        r.report ? `${r.report.panic} ${r.report.vmcore} ${r.report.kernel} ${r.report.name} ${r.report.type_label || ""} ${r.report.evidence || ""}` : ""].join(" ").toLowerCase();
       return hay.includes(t);
     });
     const analyzed = shown.filter(r => r.analyses.length).length;
@@ -700,6 +726,7 @@ async function renderHistory(main) {
   draw();
   sel.addEventListener("change", () => { f.server = sel.value; draw(); });
   $("#h-kind").addEventListener("change", e => { f.kind = e.target.value; draw(); });
+  $("#h-type").addEventListener("change", e => { f.type = e.target.value; draw(); });
   let timer;
   $("#h-text").addEventListener("input", e => { clearTimeout(timer); timer = setTimeout(() => { f.text = e.target.value; draw(); }, 150); });
 }
@@ -920,7 +947,9 @@ function drawServerVersions() {
   for (const s of state.servers) {
     const info = state.serverVersions[s.name];
     const st = serverStatus(info);
-    const running = [...state.jobs.values()].some(j => j.kind === "upgrade" && j.server === s.name && isActive(j));
+    const running = [...state.jobs.values()].some(j => (j.kind === "upgrade" || j.kind === "move") && j.server === s.name && isActive(j));
+    // 1.19.0까지의 기본 위치(/opt/kdump-tools)에 설치된 서버는 새 기본 위치로 옮길 수 있습니다.
+    const movable = info && info.ok && info.installed && info.prefix === LEGACY_PREFIX;
     const installed = info && info.ok && info.installed;
     const verb = installed ? "업그레이드" : "설치";
     const row = h(`<tr>
@@ -936,8 +965,19 @@ function drawServerVersions() {
           title="노트북의 v${esc(local.version)}를 SSH로 보내 설치합니다. 서버에 인터넷이 없어도 됩니다.">노트북 버전 ${verb}</button>
         <button class="btn small" data-act="github" ${running || !(info && info.ok) ? "disabled" : ""}
           title="서버가 GitHub에서 직접 받아 설치합니다(${esc(latestTarget(latest) || "최신")}). 서버에 인터넷이 필요합니다.">GitHub ${latest && latest.ok && latest.channel === "release" ? esc(latest.tag) : "최신"} ${verb}</button>
+        ${movable ? `<button class="btn small" data-act="move" ${running ? "disabled" : ""}
+          title="설정·서버 목록·vmlinux·로그를 포함해 ${esc(NEW_PREFIX)}로 옮깁니다. 예전 경로에는 링크를 남깁니다.">새 위치로 옮기기</button>` : ""}
       </div></td></tr>`);
     row.querySelector('[data-act="check"]').addEventListener("click", () => loadServerVersion(s.name));
+    const moveBtn = row.querySelector('[data-act="move"]');
+    if (moveBtn) moveBtn.addEventListener("click", () => {
+      if (!confirm(`${s.name}의 설치를 새 기본 위치로 옮길까요?\n\n${LEGACY_PREFIX} -> ${NEW_PREFIX}\n\n`
+        + `1. 노트북 버전 v${local.version}로 먼저 업그레이드합니다(옮기기 기능이 필요).\n`
+        + `2. 설정, 서버 목록, API 키, vmlinux, 리포트를 통째로 옮기고 설정 파일 안의 경로를 고칩니다.\n`
+        + `3. 예전 경로에는 새 위치를 가리키는 링크를 남겨 다른 곳에 저장된 예전 경로도 계속 동작하게 합니다.\n\n`
+        + `같은 파일 시스템이면 바로 끝나고, 다르면 복사하므로 공간을 먼저 확인합니다.`)) return;
+      startJob({ kind: "move", server: s.name }).then(() => drawServerVersions());
+    });
     row.querySelectorAll('[data-act="local"],[data-act="github"]').forEach(b => b.addEventListener("click", () => {
       const source = b.dataset.act;
       const what = source === "local"
@@ -1058,13 +1098,32 @@ async function shutdownWebui() {
 
 // ---------------------------------------------------------------- 결과 보기
 
+// 리포트 옆의 JSON 요약(analyze-kdump 1.16.0부터)을 리포트 위에 한눈에 보이게 정리합니다.
+function summaryBox(s) {
+  const rows = [];
+  const row = (label, value) => { if (value !== "" && value !== null && value !== undefined) rows.push([label, value]); };
+  row("장애 유형", s.type ? `${typePill(s.type, s.label)} ${esc(s.label || "")}` : "");
+  row("판정 근거", s.evidence ? `<code>${esc(s.evidence)}</code>` : "");
+  row("패닉 메시지", s.panic ? `<span class="panic">${esc(s.panic)}</span>` : "");
+  row("D 상태 태스크", s.uninterruptible === null ? "" : `${s.uninterruptible}개`);
+  row("taint 모듈", s.tainted.length ? esc(s.tainted.join(", ")) : "없음");
+  row("불러온 모듈 심볼", s.modules.length ? esc(s.modules.join(", ")) : "");
+  const sys = Object.entries(s.sys || {}).map(([k, v]) => `${esc(k)} ${esc(v)}`).join(" · ");
+  row("시스템", sys);
+  if (s.crash_exit) row("crash 종료 코드", `<span class="warn-text">${s.crash_exit} (일부 명령이 실패했을 수 있음, 리포트 끝 실행 로그 확인)</span>`);
+  return h(`<div class="summary-box"><div class="label">요약 (JSON)</div>
+    <dl>${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl></div>`);
+}
+
 async function renderViewer(main, serverName) {
   const name = state.view.name;
   const card = h(`<div class="card"><p class="muted"><span class="spinner"></span> 불러오는 중...</p></div>`);
   main.append(card);
-  let content;
+  let content, summary;
   try {
-    content = (await api("GET", `/api/file?server=${encodeURIComponent(serverName)}&name=${encodeURIComponent(name)}`)).content;
+    const data = await api("GET", `/api/file?server=${encodeURIComponent(serverName)}&name=${encodeURIComponent(name)}`);
+    content = data.content;
+    summary = data.summary;
   } catch (e) {
     card.innerHTML = `<p class="form-error">${esc(e.message)}</p>`;
     return;
@@ -1113,6 +1172,7 @@ async function renderViewer(main, serverName) {
   const sections = [];
   for (let i = 1; i < parts.length; i += 2) sections.push({ title: parts[i], body: (parts[i + 1] || "").replace(/^\n|\n+$/g, "") });
 
+  if (summary) card.append(summaryBox(summary));
   card.append(h(`<pre class="path" style="margin:0 0 12px;white-space:pre-wrap">${esc(preamble)}</pre>`));
   const tools = h(`<div class="report-tools"><input placeholder="리포트에서 검색 (예: panic, Oops, hung_task)" id="r-search">
     <button class="btn small" id="r-open">모두 펼치기</button><button class="btn small" id="r-close">모두 접기</button></div>`);
@@ -1256,6 +1316,14 @@ function onJobFinished(job) {
     if (state.page === "server" && state.selected === job.server && state.tab === "prepare" && !state.view) renderPrepare(state.servers.find(s => s.name === job.server), true);
     return;
   }
+  if (job.kind === "move") {
+    toast(job.status === "done" ? `${job.server}: ${NEW_PREFIX}로 옮겼습니다.` : `${job.server}: 설치 위치를 옮기지 못했습니다.`);
+    delete state.health[job.server];
+    if (job.status === "done") scheduleJobClose(job.id);
+    // 서버 설정의 원격 경로가 바뀌었을 수 있으므로 서버 목록을 다시 읽습니다.
+    loadState().then(() => loadServerVersion(job.server)).catch(() => loadServerVersion(job.server));
+    return;
+  }
   if (job.kind === "upgrade") {
     toast(job.status === "done" ? `${job.server}: v${job.version || "?"} 설치를 마쳤습니다.` : `${job.server}: 설치에 실패했습니다.`);
     delete state.health[job.server];
@@ -1309,6 +1377,8 @@ function renderJobs() {
     const label = job.kind === "prepare" ? `서버 준비 (${(job.actions || []).length}개 항목)`
       : job.kind === "upgrade"
       ? `analyze-kdump 설치 (${job.source === "github" ? "GitHub" : "노트북 버전"})`
+      : job.kind === "move"
+      ? `설치 위치 옮기기 (${NEW_PREFIX})`
       : { report: "리포트 생성", llm: "리포트 + LLM 분석", reanalyze: "LLM 분석" }[job.kind];
     let pct = null;
     if (job.status === "running" && job.progress && job.progress.total) {

@@ -322,6 +322,42 @@ def find_verdict(body):
     return ""
 
 
+TYPE_LINE_RE = re.compile(r"^(?P<label>.*?)\s*\[(?P<key>[a-z_]+)\]$")
+SUMMARY_SYS_KEYS = ("UPTIME", "LOAD AVERAGE", "TASKS", "CPUS", "MEMORY")
+
+
+def summary_path(report_path):
+    """리포트 옆에 두는 JSON 요약 파일 경로 (kdump-report-X.txt -> kdump-report-X.json)."""
+    return report_path[:-len(".txt")] + ".json"
+
+
+def load_summary(report_path):
+    """analyze-kdump 1.16.0부터 리포트와 함께 만드는 JSON 요약을 화면에 쓸 만큼만 줄여 읽습니다. 없거나 깨졌으면 None."""
+    try:
+        with open(summary_path(report_path), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    ctype = data.get("crash_type") if isinstance(data.get("crash_type"), dict) else {}
+    sysv = data.get("sys") if isinstance(data.get("sys"), dict) else {}
+
+    def names(key):
+        value = data.get(key)
+        return [str(v) for v in value][:20] if isinstance(value, list) else []
+
+    count = data.get("uninterruptible_tasks")
+    return {
+        "type": str(ctype.get("type") or ""), "label": str(ctype.get("label") or ""),
+        "evidence": str(ctype.get("evidence") or ""), "panic": str(data.get("panic") or ""),
+        "uninterruptible": count if isinstance(count, int) else None,
+        "tainted": names("tainted_modules"), "modules": names("module_symbols"),
+        "crash_exit": data.get("crash_exit") if isinstance(data.get("crash_exit"), int) else None,
+        "sys": {k: str(sysv[k]) for k in SUMMARY_SYS_KEYS if k in sysv},
+    }
+
+
 def parse_result_head(path):
     """리포트·분석 파일 앞부분에서 기록 화면에 보일 정보를 읽습니다."""
     info = {}
@@ -331,16 +367,29 @@ def parse_result_head(path):
     except OSError:
         return info
     lines = head.splitlines()
-    for line in lines[:12]:
+    for line in lines[:14]:
         key, sep, value = line.partition(":")
-        if sep and key.strip() in HEAD_KEYS:
-            info[key.strip()] = value.strip()
+        key, value = key.strip(), value.strip()
+        if sep and key in HEAD_KEYS:
+            info[key] = value
+        elif sep and key == "type" and not info.get("type"):
+            # "type:      hung task (D 상태로 오래 멈춘 태스크) [hung_task]" (analyze-kdump 1.16.0부터)
+            m = TYPE_LINE_RE.match(value)
+            if m:
+                info["type"], info["type_label"] = m.group("key"), m.group("label")
+        elif sep and key == "evidence" and value:
+            info["evidence"] = _plain(value)
     if "-analysis-" in os.path.basename(path):
         info["verdict"] = find_verdict(head.split("\n\n", 1)[-1])
     else:
         m = re.search(r'^\s*PANIC:\s*"?(.*?)"?\s*$', head, re.M)
         if m and m.group(1):
             info["panic"] = _plain(m.group(1))
+        summary = load_summary(path)
+        if summary:
+            info["summary"] = {k: summary[k] for k in ("uninterruptible", "tainted", "crash_exit")}
+            if summary["type"] and not info.get("type"):
+                info["type"], info["type_label"] = summary["type"], summary["label"]
     return info
 
 
@@ -1039,6 +1088,31 @@ exit $status
 """, 1)
 
 
+# 원격 설치를 새 기본 위치로 옮깁니다. 먼저 노트북 버전으로 업그레이드해 install.sh --move-to가 있게 한 뒤 실행합니다.
+# $1 도구 경로, $2 옮길 위치
+MOVE_TARGET = "/opt/kdump-analyzer"
+LEGACY_PREFIX = "/opt/kdump-tools"
+REMOTE_MOVE = with_install_fallback(r"""
+tool="$1"; dest="$2"
+t=$(command -v "$tool" 2>/dev/null || true)
+if [ -n "$t" ]; then t=$(readlink -f "$t"); else t="$tool"; fi
+case "$t" in
+  /*/bin/analyze-kdump) prefix=${t%/bin/analyze-kdump} ;;
+  *) echo "설치 위치를 알 수 없습니다: $tool"; exit 3 ;;
+esac
+[ "$(id -u)" -eq 0 ] || { echo "root 권한이 필요합니다. 서버 설정에서 sudo를 켜 주세요(비밀번호 없는 sudo 필요)."; exit 4; }
+if [ ! -f "$prefix/install.sh" ] || ! grep -q -- '--move-to)' "$prefix/install.sh"; then
+  echo "설치된 install.sh가 설치 위치 옮기기를 지원하지 않습니다: $prefix/install.sh"; exit 5
+fi
+echo "설치 위치 옮기기: $prefix -> $dest"
+bash "$prefix/install.sh" --prefix "$prefix" --move-to "$dest"
+status=$?
+# install.sh는 일부 명령 등록을 건너뛰면 2를 반환하지만 옮기기는 끝난 상태입니다.
+[ "$status" -eq 2 ] && status=0
+exit $status
+""", 1)
+
+
 # ---------------------------------------------------------------- 분석 작업
 
 class JobCancelled(Exception):
@@ -1298,10 +1372,12 @@ class Jobs:
             job.phase = "crash 리포트 생성 중"
             limit = crash_timeout_seconds(self.store.settings())
             code, text = self._stream(job, server, argv, stdin, timeout=limit)
-            remote_report = ""
+            remote_report = remote_json = ""
             for line in text.splitlines():
                 if line.startswith("report:"):
                     remote_report = line.split(":", 1)[1].strip()
+                elif line.startswith("json:"):
+                    remote_json = line.split(":", 1)[1].strip()
             if not remote_report:
                 if getattr(job, "timed_out", False):
                     raise ApiError(504, "crash 실행이 시간 제한(%s)을 넘겨 중단했습니다. 덤프가 크거나 crash가 멈춘 것일 수 있습니다. "
@@ -1315,15 +1391,33 @@ class Jobs:
             name = os.path.basename(remote_report)
             if not FILE_RE.match(name):
                 name = "kdump-report-%s.txt" % time.strftime("%Y%m%d-%H%M%S")
-            with open(os.path.join(self.store.report_dir(server["name"]), name), "wb") as f:
+            local_report = os.path.join(self.store.report_dir(server["name"]), name)
+            with open(local_report, "wb") as f:
                 f.write(data)
             job.report = name
             job.log("리포트 저장: %s" % name)
+            if remote_json:
+                self._fetch_summary(job, server, remote_json, local_report)
             if code != 0:
                 raise ApiError(502, "crash 실행이 실패했습니다 (종료 코드 %d). 리포트 끝의 crash 실행 로그를 확인해 주세요." % code)
         finally:
             if tmpdir:
                 ssh_run(server, ["rm", "-rf", tmpdir])
+
+    def _fetch_summary(self, job, server, remote_json, local_report):
+        """리포트 옆의 JSON 요약을 가져옵니다. 없거나 깨졌으면 리포트만 남기고 넘어갑니다."""
+        code, data = ssh_run(server, ["cat", remote_json], timeout=60, data=True)
+        try:
+            if code != 0:
+                raise ValueError("가져오지 못했습니다")
+            if not isinstance(json.loads(data.decode("utf-8")), dict):
+                raise ValueError("형식이 올바르지 않습니다")
+        except ValueError as error:  # UnicodeDecodeError, JSONDecodeError 포함
+            job.log("JSON 요약은 건너뜁니다: %s" % error)
+            return
+        with open(summary_path(local_report), "wb") as f:
+            f.write(data)
+        job.log("JSON 요약 저장: %s" % os.path.basename(summary_path(local_report)))
 
     # ---- 서버의 analyze-kdump 설치·업그레이드
 
@@ -1391,6 +1485,51 @@ class Jobs:
         info = server_version(server)
         job.version = info.get("version")
         job.log("설치된 버전: %s" % (info.get("version") or "확인 실패"))
+
+    def run_move(self, job):
+        server = self.store.server(job.server)
+        with self.server_slot(server["name"]).hold(job):
+            self._run_move(job, server)
+
+    def _run_move(self, job, server):
+        job.phase = "설치 위치 확인 중"
+        before = server_version(server)
+        if not before.get("ok"):
+            raise ApiError(502, "서버에 접속하지 못했습니다: %s" % before.get("error", ""))
+        if not before.get("installed"):
+            raise ApiError(400, "이 서버에는 analyze-kdump가 설치되어 있지 않습니다.")
+        prefix = before.get("prefix") or ""
+        if prefix != LEGACY_PREFIX:
+            raise ApiError(400, "예전 기본 위치(%s)에 설치된 서버만 옮길 수 있습니다. 지금 위치: %s" % (LEGACY_PREFIX, prefix or "알 수 없음"))
+        job.log("지금 위치: %s (v%s) -> 옮길 위치: %s" % (prefix, before.get("version", "?"), MOVE_TARGET))
+
+        # 1) 옮기기 기능이 있는 install.sh가 필요하므로 노트북 버전으로 먼저 업그레이드합니다.
+        job.log("===== 1/2 노트북 버전으로 업그레이드 =====")
+        job.source = "local"
+        self._run_upgrade(job, server)
+
+        # 2) 설정·서버 목록·vmlinux·로그까지 통째로 옮깁니다.
+        job.log("===== 2/2 설치 위치 옮기기 =====")
+        job.phase = "설치 위치 옮기는 중"
+        code, _ = self._stream(job, server, ["sh", "-c", REMOTE_MOVE, "sh", server["tool"], MOVE_TARGET],
+                               timeout=PREPARE_TIMEOUT)
+        if code != 0:
+            raise ApiError(502, "설치 위치를 옮기지 못했습니다 (종료 코드 %d). 로그를 확인해 주세요. "
+                                "옮기기 전에 멈췄다면 기존 설치는 그대로입니다." % code)
+
+        # 서버 설정의 원격 경로가 예전 위치를 가리키면 새 위치로 바꿉니다(예전 경로 링크로도 동작은 합니다).
+        tool = server.get("tool") or ""
+        if tool.startswith(LEGACY_PREFIX + "/"):
+            updated = dict(server, tool=MOVE_TARGET + tool[len(LEGACY_PREFIX):])
+            self.store.save_server(updated, original=server["name"])
+            job.log("서버 설정의 원격 analyze-kdump 경로를 바꿨습니다: %s" % updated["tool"])
+            server = updated
+        job.phase = "설치 확인 중"
+        info = server_version(server)
+        job.version = info.get("version")
+        job.log("설치 위치: %s, 버전: %s" % (info.get("prefix") or "확인 실패", info.get("version") or "확인 실패"))
+        if info.get("prefix") != MOVE_TARGET:
+            raise ApiError(502, "옮긴 뒤 설치 위치가 %s가 아닙니다. 로그를 확인해 주세요." % MOVE_TARGET)
 
     # ---- LLM 분석
 
@@ -1637,6 +1776,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 job = Job(kind, server["name"])
                 job.source = source
                 app.jobs.start(job, app.jobs.run_upgrade, app.jobs.server_slot(server["name"]))
+            elif kind == "move":
+                job = Job(kind, server["name"])
+                job.source = "local"
+                app.jobs.start(job, app.jobs.run_move, app.jobs.server_slot(server["name"]))
             elif kind == "reanalyze":
                 store.result_path(server["name"], body.get("report", ""))
                 job = Job(kind, server["name"], report=body["report"])
@@ -1696,7 +1839,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if parts == ["file"] and method == "GET":
             path_ = store.result_path(query.get("server", [""])[0], query.get("name", [""])[0])
             with open(path_, encoding="utf-8", errors="replace") as f:
-                return self._json(200, {"content": f.read()})
+                content = f.read()
+            summary = None if "-analysis-" in path_ else load_summary(path_)
+            return self._json(200, {"content": content, "summary": summary})
 
         if parts == ["settings"] and method == "POST":
             body = self._body()

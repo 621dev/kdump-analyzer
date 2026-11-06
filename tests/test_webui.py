@@ -133,6 +133,63 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(m.groups(), ("1.18.0", None, "2026-11-06 04:43"))
 
 
+class ReportSummaryTest(unittest.TestCase):
+    REPORT = ("kdump summary report\n"
+              "generated: 2026-11-06T04:10:43+00:00\n"
+              "vmcore:    /var/crash/x/vmcore\n"
+              "kernel:    5.14.0-687.el9.x86_64\n"
+              "type:      hung task (D 상태로 오래 멈춘 태스크) [hung_task]\n"
+              "evidence:  INFO: task kf_lock_waiter:2082 blocked for more than 30 seconds.\n"
+              "\n===== crash> sys =====\n"
+              '       PANIC: "Kernel panic - not syncing: hung_task: blocked tasks"\n')
+
+    def write(self, d, report=True, summary=None):
+        path = os.path.join(d, "kdump-report-20261106-041043-1843.txt")
+        if report:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.REPORT)
+        if summary is not None:
+            with open(webui.summary_path(path), "w", encoding="utf-8") as f:
+                f.write(summary)
+        return path
+
+    def test_header_type_and_evidence_without_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            info = webui.parse_result_head(self.write(d))
+        self.assertEqual((info["type"], info["type_label"]), ("hung_task", "hung task (D 상태로 오래 멈춘 태스크)"))
+        self.assertIn("blocked for more than 30 seconds", info["evidence"])
+        self.assertIn("hung_task: blocked tasks", info["panic"])
+        self.assertNotIn("summary", info)
+
+    def test_json_summary(self):
+        data = {"crash_type": {"type": "hung_task", "label": "hung task", "evidence": "INFO: task x blocked"},
+                "panic": "Kernel panic - not syncing: hung_task: blocked tasks",
+                "sys": {"UPTIME": "00:52:06", "LOAD AVERAGE": "1.29, 0.56, 0.36", "NODENAME": "db01", "TASKS": "135"},
+                "uninterruptible_tasks": 2, "tainted_modules": ["kdump_fault"], "module_symbols": ["xfs"],
+                "crash_exit": 0}
+        import json
+        with tempfile.TemporaryDirectory() as d:
+            path = self.write(d, summary=json.dumps(data))
+            s = webui.load_summary(path)
+            info = webui.parse_result_head(path)
+        self.assertEqual((s["type"], s["uninterruptible"], s["tainted"], s["modules"]), ("hung_task", 2, ["kdump_fault"], ["xfs"]))
+        # 화면에 보일 sys 값만 남기고 호스트 이름(NODENAME)은 넣지 않습니다.
+        self.assertEqual(s["sys"], {"UPTIME": "00:52:06", "LOAD AVERAGE": "1.29, 0.56, 0.36", "TASKS": "135"})
+        self.assertEqual(info["summary"], {"uninterruptible": 2, "tainted": ["kdump_fault"], "crash_exit": 0})
+
+    def test_broken_or_odd_json_is_ignored(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(webui.load_summary(self.write(d, summary="{not json")))
+            self.assertIsNone(webui.load_summary(self.write(d, summary="[1, 2]")))
+            s = webui.load_summary(self.write(d, summary='{"crash_type": "x", "tainted_modules": "y", "uninterruptible_tasks": "3"}'))
+        self.assertEqual((s["type"], s["tainted"], s["uninterruptible"]), ("", [], None))
+
+    def test_move_script_and_targets(self):
+        self.assertEqual(webui.MOVE_TARGET, "/opt/kdump-analyzer")
+        self.assertTrue(webui.REMOTE_MOVE.startswith(webui.INSTALL_FALLBACK_SH))
+        self.assertIn("--move-to", webui.REMOTE_MOVE)
+
+
 class FetchLatestTest(unittest.TestCase):
     SHA = "e45af84913fee73f8ad27dee9bab870e64beb5d0"
 

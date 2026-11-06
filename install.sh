@@ -11,6 +11,7 @@
 #                   RHEL 계열 sudo의 secure_path에는 /usr/local/* 가 없어서 기본값을 /usr/sbin으로 둡니다.
 #   --commit SHA    설치 정보에 기록할 커밋 (git 저장소가 아닌 원본에서 설치할 때, 메뉴 업데이트가 사용)
 #   --source TEXT   설치 정보에 기록할 원본 설명
+#   --move-to DIR   기존 설치(설정·서버 목록·vmlinux·로그 포함)를 DIR로 옮김 (예전 경로에는 링크를 남김, --no-link로 끔)
 set -e
 
 SRC_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
@@ -19,6 +20,9 @@ DEFAULT_PREFIX="/opt/kdump-analyzer"
 LEGACY_PREFIX="/opt/kdump-tools"
 PREFIX=""
 BIN_DIR="/usr/sbin"
+BIN_DIR_SET=0
+MOVE_TO=""
+MOVE_LINK=1
 COMPLETION_DIR="/etc/bash_completion.d"
 COMPLETION_NAME="kdump-tools"
 ACTION="install"
@@ -27,7 +31,8 @@ COMMIT=""
 SOURCE_LABEL=""
 
 usage() {
-    sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+    # 맨 위 주석(set -e 전까지)을 그대로 보여줍니다.
+    sed -n '2,/^set -e$/p' "$0" | sed -e '/^set -e$/d' -e 's/^# \{0,1\}//'
 }
 
 die() {
@@ -45,7 +50,18 @@ while [ "$#" -gt 0 ]; do
         --bin-dir)
             [ -n "${2:-}" ] || die "--bin-dir에는 디렉터리가 필요합니다."
             BIN_DIR="$2"
+            BIN_DIR_SET=1
             shift 2
+            ;;
+        --move-to)
+            [ -n "${2:-}" ] || die "--move-to에는 옮길 디렉터리가 필요합니다."
+            MOVE_TO="$2"
+            ACTION="move"
+            shift 2
+            ;;
+        --no-link)
+            MOVE_LINK=0
+            shift
             ;;
         --commit)
             [ -n "${2:-}" ] || die "--commit에는 커밋 값이 필요합니다."
@@ -246,8 +262,76 @@ do_uninstall() {
     echo "설치 디렉터리 $PREFIX (설정, 서버 목록, 로그, vmlinux 포함)는 남겨 두었습니다. 필요 없으면 직접 삭제하세요."
 }
 
+# 기존 설치를 통째로 다른 위치로 옮깁니다. 같은 파일 시스템이면 mv라 바로 끝나고 공간도 더 들지 않습니다.
+# 설정 파일 안의 예전 경로를 고치고, 예전 경로에는 새 위치를 가리키는 링크를 남겨(--no-link로 끔)
+# 다른 곳에 저장된 예전 경로(웹 UI의 서버 설정 등)도 계속 동작하게 합니다.
+# 마지막으로 새 위치의 install.sh로 명령·자동완성·설치 정보를 다시 등록합니다.
+do_move() {
+    local dest="$MOVE_TO" parent bin_dir source size free conf pattern
+    local -a args
+
+    case "$dest" in
+        /*) ;;
+        *) die "--move-to에는 절대 경로가 필요합니다: $dest" ;;
+    esac
+    while [ "${#dest}" -gt 1 ] && [ "${dest%/}" != "$dest" ]; do
+        dest="${dest%/}"
+    done
+    if [ -L "$PREFIX" ]; then
+        die "$PREFIX 는 이미 옮긴 뒤 남긴 링크입니다 (실제 위치: $(readlink -f "$PREFIX"))."
+    fi
+    installed_at "$PREFIX" || die "옮길 설치가 없습니다: $PREFIX"
+    if [ "$(readlink -f "$PREFIX")" = "$(readlink -m "$dest")" ]; then
+        die "이미 $dest 에 설치돼 있습니다."
+    fi
+    case "$(readlink -m "$dest")/" in
+        "$(readlink -f "$PREFIX")"/*) die "설치 디렉터리 안으로는 옮길 수 없습니다: $dest" ;;
+    esac
+    if [ -e "$dest" ] && { [ ! -d "$dest" ] || [ -n "$(ls -A "$dest" 2>/dev/null)" ]; }; then
+        die "옮길 위치가 비어 있지 않습니다: $dest"
+    fi
+    parent=$(dirname "$dest")
+    mkdir -p "$parent"
+    if [ "$(stat -c %d "$PREFIX")" != "$(stat -c %d "$parent")" ]; then
+        size=$(du -sk "$PREFIX" | awk '{ print $1 }')
+        free=$(df -Pk "$parent" | awk 'NR == 2 { print $4 }')
+        if [ -z "$free" ] || [ "$free" -le $((size + 65536)) ]; then
+            die "공간이 모자랍니다: 필요 $((size / 1024))MB, $parent 남은 공간 $((${free:-0} / 1024))MB"
+        fi
+        echo "다른 파일 시스템으로 옮기므로 복사합니다 ($((size / 1024))MB)."
+    fi
+
+    bin_dir=$(sed -n 's/^BIN_DIR=//p' "$PREFIX/.install-info" 2>/dev/null | head -n 1)
+    [ "$BIN_DIR_SET" -eq 1 ] && bin_dir="$BIN_DIR"
+    source=$(sed -n 's/^SOURCE=//p' "$PREFIX/.install-info" 2>/dev/null | head -n 1)
+
+    [ -d "$dest" ] && rmdir "$dest"
+    echo "옮기는 중: $PREFIX -> $dest"
+    mv "$PREFIX" "$dest"
+
+    conf="$dest/analyze-kdump.conf"
+    if [ -f "$conf" ] && grep -qF "$PREFIX" "$conf"; then
+        cp -p "$conf" "$conf.before-move"
+        # sed 정규식에서 특별한 문자를 이스케이프합니다(경로 구분자는 '#').
+        pattern=$(printf '%s' "$PREFIX" | sed 's/[][\.*^$#]/\\&/g')
+        sed -i -e "s#${pattern}/#${dest}/#g" -e "s#${pattern}\"#${dest}\"#g" "$conf"
+        echo "설정 파일의 경로를 새 위치로 바꿨습니다: $conf (이전 내용: $conf.before-move)"
+    fi
+    if [ "$MOVE_LINK" -eq 1 ]; then
+        ln -s "$dest" "$PREFIX"
+        echo "예전 경로에 링크를 남깁니다: $PREFIX -> $dest"
+    fi
+    echo
+
+    args=(--prefix "$dest" --bin-dir "${bin_dir:-$BIN_DIR}")
+    [ -n "$source" ] && args+=(--source "$source")
+    exec bash "$dest/install.sh" "${args[@]}"
+}
+
 if [ "$ACTION" = "uninstall" ]; then
     do_uninstall
+elif [ "$ACTION" = "move" ]; then
+    do_move
 else
     do_install
 fi
