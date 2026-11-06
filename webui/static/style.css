@@ -263,6 +263,14 @@ label.check { flex-direction: row; align-items: center; gap: 8px; font-weight: 5
 .verdict.none { color: var(--muted); font-weight: 500; }
 .record-facts { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; color: var(--muted); }
 .record-facts .panic { color: var(--err); }
+.record-facts .evidence { font-family: var(--mono, ui-monospace, monospace); font-size: 12px; }
+.record-top .pill { font-size: 11.5px; padding: 1px 8px; }
+.summary-box { border: 1px solid var(--line); background: var(--panel-2); border-radius: var(--radius); padding: 10px 14px; margin: 0 0 12px; }
+.summary-box .label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.summary-box dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 0; font-size: 13px; }
+.summary-box dt { color: var(--muted); }
+.summary-box dd { margin: 0; overflow-wrap: anywhere; }
+.summary-box .panic { color: var(--err); }
 .record-llm { font-size: 12px; color: var(--muted); margin-top: 4px; }
 .record-more { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; }
 .record-actions { display: flex; gap: 6px; flex: none; flex-wrap: wrap; justify-content: flex-end; }

@@ -1989,6 +1989,33 @@ update_from_dir() {
     finish_update "$?"
 }
 
+# 1.19.0까지의 기본 위치(/opt/kdump-tools)에 설치돼 있으면 새 기본 위치로 옮길 수 있습니다.
+MOVE_TARGET="/opt/kdump-analyzer"
+
+can_move_install() {
+    [ "$INSTALL_DIR" = /opt/kdump-tools ] && [ ! -L /opt/kdump-tools ] && [ -f "$INSTALL_INFO" ] \
+        && grep -q -- '--move-to)' "$INSTALL_DIR/install.sh" 2>/dev/null
+}
+
+# 설정·접속 서버 목록·API 키·vmlinux·리포트를 통째로 새 위치로 옮기고, 새 위치에서 메뉴를 다시 시작합니다.
+move_install() {
+    local status
+
+    can_update || return
+    ui_yesno "설치 위치를 옮길까요?\n\n$INSTALL_DIR → $MOVE_TARGET\n\n설정, 접속 서버 목록, API 키, vmlinux, 리포트를 통째로 옮기고 설정 파일 안의 경로를 고칩니다.\n예전 경로에는 새 위치를 가리키는 링크를 남겨, 다른 곳에 저장된 예전 경로도 계속 동작합니다.\n\n같은 파일 시스템이면 바로 끝나고, 다르면 복사하므로 공간을 먼저 확인합니다." || return
+
+    clear
+    echo "===== 설치 위치 옮기기 ====="
+    bash "$INSTALL_DIR/install.sh" --prefix "$INSTALL_DIR" --move-to "$MOVE_TARGET"
+    status=$?
+    pause
+    if [ "$status" -eq 0 ] || [ "$status" -eq 2 ]; then
+        ui_msg "옮겼습니다: $MOVE_TARGET\n\n새 위치에서 메뉴를 다시 시작합니다."
+        exec "$MOVE_TARGET/bin/analyze-kdump-ui"
+    fi
+    ui_msg "옮기지 못했습니다 (종료 코드 $status).\n화면에 나온 오류를 확인해 주세요. 옮기기 전에 멈췄다면 기존 설치는 그대로입니다."
+}
+
 # 버전 정보는 메인 메뉴에 이미 보이므로 여기서는 업데이트 방법만 고릅니다.
 # 시작할 때 확인한 결과를 쓰고, 확인하지 못했을 때만 다시 확인합니다.
 menu_update() {
@@ -2013,8 +2040,11 @@ menu_update() {
         else
             note="\n\nGitHub에 접속하지 못했습니다(인터넷 차단 또는 curl 없음).\n폐쇄망이라면 저장소를 서버에 복사한 뒤 '디렉터리에서 업데이트'를 사용하세요."
         fi
-        items+=(local "서버의 디렉터리에서 업데이트 (폐쇄망)" \
-            recheck "최신 버전 다시 확인" \
+        items+=(local "서버의 디렉터리에서 업데이트 (폐쇄망)")
+        if can_move_install; then
+            items+=(move "설치 위치 옮기기 ($INSTALL_DIR → $MOVE_TARGET)")
+        fi
+        items+=(recheck "최신 버전 다시 확인" \
             "$BACK" "$BACK_LABEL")
 
         choice=$(ui_menu "현재: $(current_text)${installed:+, 설치 $installed}\n$(latest_status)$note" "${items[@]}") || return
@@ -2037,6 +2067,10 @@ menu_update() {
                 ;;
             local)
                 update_from_dir
+                return
+                ;;
+            move)
+                move_install
                 return
                 ;;
             *)
