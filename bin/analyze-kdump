@@ -7,16 +7,18 @@ set -e
 #   2: crash 리포트 생성 실패
 #   3: 리포트는 생성했지만 LLM 분석 실패
 
-# 기본 경로의 기준: install.sh로 설치한 위치(bin/의 상위에 .install-info가 있음)면 그 위치,
-# 아니면 /opt/kdump-tools입니다. 무설치 실행(/tmp로 보낸 스크립트)이나 저장소에서 바로 실행할 때도
-# 이 서버에 설치해 둔 설정·vmlinux를 쓰도록 /opt/kdump-tools로 둡니다.
+# 기본 경로의 기준: install.sh로 설치한 위치(bin/의 상위에 .install-info가 있음)면 그 위치입니다.
+# 무설치 실행(/tmp로 보낸 스크립트)이나 저장소에서 바로 실행할 때는 이 서버에 설치해 둔 설정·vmlinux를 쓰도록
+# 기본 설치 위치(/opt/kdump-analyzer)를 쓰고, 거기 설치가 없고 예전 위치(/opt/kdump-tools)에 있으면 그곳을 씁니다.
 tool_base() {
     local base
     base=$(cd "$(dirname "$(readlink -f "$0")")/.." 2>/dev/null && pwd) || base=""
     if [ -n "$base" ] && [ -f "$base/.install-info" ]; then
         printf '%s' "$base"
-    else
+    elif [ ! -f /opt/kdump-analyzer/.install-info ] && [ -f /opt/kdump-tools/.install-info ]; then
         printf '%s' /opt/kdump-tools
+    else
+        printf '%s' /opt/kdump-analyzer
     fi
 }
 TOOL_BASE=$(tool_base)

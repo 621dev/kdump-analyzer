@@ -311,7 +311,13 @@ check "설치 위치 기준: 리포트를 설치 위치 logs에 저장" has "$T/
 rm -f "$INST/.install-info"
 env -i PATH="$T/fakebin:/usr/bin:/bin" HOME="$T" TMPDIR="$T" LANG=C.UTF-8 FAKE_KVER="$KVER" \
     bash "$INST/bin/analyze-kdump" -r "$D" > "$T/inst2.out" 2>&1
-check "설치 정보 없으면 /opt/kdump-tools 기준" has "$T/inst2.out" "/opt/kdump-tools/vmlinux/$KVER/vmlinux"
+# 설치 정보가 없으면 기본 설치 위치(/opt/kdump-analyzer), 거기 없고 예전 위치에만 설치돼 있으면 예전 위치
+if [ ! -f /opt/kdump-analyzer/.install-info ] && [ -f /opt/kdump-tools/.install-info ]; then
+    WANT_BASE=/opt/kdump-tools
+else
+    WANT_BASE=/opt/kdump-analyzer
+fi
+check "설치 정보 없으면 기본 설치 위치 기준 ($WANT_BASE)" has "$T/inst2.out" "$WANT_BASE/vmlinux/$KVER/vmlinux"
 
 # 작업이 끝나면 임시 디렉터리를 남기지 않음
 check "임시 작업 디렉터리 정리" bash -c "! ls -d '$T'/analyze-kdump.* >/dev/null 2>&1"

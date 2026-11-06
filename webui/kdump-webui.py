@@ -85,9 +85,12 @@ UPDATE_CHANNELS = ("release", "branch")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
 TOOL_VERSION_RE = re.compile(r"analyze-kdump (\S+?)(?: \(commit ([0-9a-f]+)\))?(?:, 설치 (.+))?$")
+# 새 서버의 기본 원격 경로. 서버에 이 경로가 없고 예전 기본 위치(/opt/kdump-tools)에만 설치돼 있으면
+# 원격 스크립트가 예전 위치를 씁니다(with_install_fallback).
+DEFAULT_TOOL = "/opt/kdump-analyzer/bin/analyze-kdump"
 DEFAULT_SERVER = {
     "name": "", "target": "", "port": 22, "key_file": "", "sudo": True,
-    "tool": "/opt/kdump-tools/bin/analyze-kdump", "crash_dir": "/var/crash", "method": "auto",
+    "tool": DEFAULT_TOOL, "crash_dir": "/var/crash", "method": "auto",
 }
 
 
@@ -415,6 +418,30 @@ exit "$rc"
 """
 
 
+# 원격 스크립트 앞에 붙이는 설치 위치 보정입니다. 경로가 새 기본 설치 위치(/opt/kdump-analyzer) 아래인데
+# 그 서버에는 예전 기본 위치(/opt/kdump-tools)에만 설치돼 있으면(1.19.0 이전에 설치한 서버) 예전 위치의 같은 경로로 바꿉니다.
+INSTALL_FALLBACK_SH = r"""
+legacy_path() {
+  case "$1" in
+    /opt/kdump-analyzer/*)
+      if [ ! -e /opt/kdump-analyzer/bin/analyze-kdump ] && [ -x /opt/kdump-tools/bin/analyze-kdump ]; then
+        echo "/opt/kdump-tools/${1#/opt/kdump-analyzer/}"
+        return
+      fi
+      ;;
+  esac
+  echo "$1"
+}
+"""
+
+
+def with_install_fallback(script, arg):
+    """script의 arg번째 인자(1 또는 2, 원격 도구 경로나 vmlinux 디렉터리)를 legacy_path로 보정합니다."""
+    fix = {1: '_p=$(legacy_path "$1"); shift; set -- "$_p" "$@"\n',
+           2: '_a=$1; _p=$(legacy_path "$2"); shift 2; set -- "$_a" "$_p" "$@"\n'}[arg]
+    return INSTALL_FALLBACK_SH + fix + script
+
+
 def with_remote_timeout(argv, seconds):
     return ["sh", "-c", REMOTE_TIMEOUT, "sh", str(int(seconds)), str(KILL_GRACE)] + list(argv)
 
@@ -469,22 +496,22 @@ def ssh_text(server, argv, timeout=60):
 
 
 def probe_method(server):
-    code, out = ssh_text(server, ["sh", "-c",
+    code, out = ssh_text(server, ["sh", "-c", with_install_fallback(
                                   'if [ -x "$1" ]; then echo installed; '
                                   'elif command -v crash >/dev/null 2>&1; then echo upload; '
-                                  'else echo none; fi', "sh", server["tool"]], timeout=30)
+                                  'else echo none; fi', 1), "sh", server["tool"]], timeout=30)
     out = out.strip().splitlines()[-1:] or [""]
     return out[0] if code == 0 else ""
 
 
 def test_server(server):
-    code, out = ssh_text(server, ["sh", "-c", """
+    code, out = ssh_text(server, ["sh", "-c", with_install_fallback("""
 echo "host=$(hostname)"; echo "user=$(id -un)"
 if [ -x "$1" ]; then echo "tool=$("$1" --version 2>/dev/null | grep '^analyze-kdump ' | head -n 1)"; [ -n "$("$1" --version 2>/dev/null | grep '^analyze-kdump ')" ] || echo "tool=installed (version unknown)"; else echo "tool="; fi
 # crash --version은 실행 중 /dev/mem을 열어 보다 Secure Boot lockdown 경고를 커널 로그에 남기므로 패키지 정보로 버전을 읽습니다.
 if command -v crash >/dev/null 2>&1; then v=$(rpm -q --qf '%{VERSION}-%{RELEASE}' crash 2>/dev/null) || v=$(dpkg-query -W -f='${Version}' crash 2>/dev/null) || v=; echo "crash=crash ${v:-installed}"; else echo "crash="; fi
 echo "vmcores=$(for f in "$2"/*/vmcore "$2"/*/vmcore.flat "$2"/*/dump.[0-9]*; do [ -f "$f" ] || continue; case "$f" in */vmcore) ;; *) [ -f "${f%/*}/vmcore" ] && continue ;; esac; echo "$f"; done | wc -l)"
-""", "sh", server["tool"], server["crash_dir"]], timeout=40)
+""", 1), "sh", server["tool"], server["crash_dir"]], timeout=40)
     info = {"ok": code == 0, "raw": out.strip()[-600:]}
     for line in out.splitlines():
         if "=" in line:
@@ -645,7 +672,7 @@ def self_update(settings):
 
 def server_version(server):
     """원격 서버에 설치된 analyze-kdump의 버전과 설치 정보."""
-    code, out = ssh_text(server, ["sh", "-c", """
+    code, out = ssh_text(server, ["sh", "-c", with_install_fallback("""
 t=$(command -v "$1" 2>/dev/null || true)
 if [ -n "$t" ] && [ -x "$t" ]; then
   "$t" --version 2>/dev/null | grep -m 1 '^analyze-kdump ' | sed 's/^/version=/'
@@ -655,7 +682,7 @@ if [ -n "$t" ] && [ -x "$t" ]; then
 else
   echo "version="
 fi
-""", "sh", server["tool"]], timeout=40)
+""", 1), "sh", server["tool"]], timeout=40)
     info = {"ok": code == 0, "server": server["name"]}
     if code != 0:
         info["error"] = (out.strip().splitlines() or ["SSH 접속 실패"])[-1][-300:]
@@ -676,7 +703,7 @@ fi
 # ---------------------------------------------------------------- 서버 준비 (kdump 환경 점검·설치)
 
 # 점검만 합니다(바꾸는 것 없음). $1 crash 디렉터리, $2 vmlinux 보관 디렉터리
-REMOTE_CHECK = r"""
+REMOTE_CHECK = with_install_fallback(r"""
 . /etc/os-release 2>/dev/null
 echo "os_id=${ID:-}"; echo "os_like=${ID_LIKE:-}"; echo "os_name=${PRETTY_NAME:-}"; echo "codename=${VERSION_CODENAME:-}"
 k=$(uname -r); echo "kernel=$k"; echo "uid=$(id -u)"
@@ -711,10 +738,10 @@ echo "mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
 echo "swap_kb=$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo)"
 d="$1"; while [ -n "$d" ] && [ ! -d "$d" ]; do d=$(dirname "$d"); done
 echo "disk_kb=$(df -Pk "${d:-/}" 2>/dev/null | awk 'NR == 2 {print $4}')"
-"""
+""", 2)
 
 # 설치 동작 하나를 실행합니다. $1 동작, $2 vmlinux 보관 디렉터리
-REMOTE_PREPARE = r"""
+REMOTE_PREPARE = with_install_fallback(r"""
 action="$1"
 . /etc/os-release 2>/dev/null
 k=$(uname -r)
@@ -827,7 +854,7 @@ swap)
   ;;
 *) echo "알 수 없는 동작: $action"; exit 2 ;;
 esac
-"""
+""", 2)
 
 PREPARE_ACTIONS = ("kdump", "crashkernel", "crash", "debuginfo", "swap", "tool")
 PREPARE_LABELS = {"kdump": "kdump 서비스 설치·활성화", "crashkernel": "crashkernel 메모리 예약 설정",
@@ -839,7 +866,7 @@ def vmlinux_base(server):
     tool = server.get("tool") or ""
     if tool.endswith("/bin/analyze-kdump"):
         return tool[:-len("/bin/analyze-kdump")] + "/vmlinux"
-    return "/opt/kdump-tools/vmlinux"
+    return "/opt/kdump-analyzer/vmlinux"
 
 
 def _kv(out):
@@ -968,13 +995,13 @@ def build_bundle():
 
 # 원격에서 설치 위치를 찾고 install.sh를 실행합니다.
 # $1 도구 경로, $2 local|github, $3 저장소, $4 브랜치나 태그, $5 커밋, $6 원본 설명, $7 heads|tags
-REMOTE_INSTALL = r"""
+REMOTE_INSTALL = with_install_fallback(r"""
 tool="$1"; mode="$2"; repo="$3"; branch="$4"; commit="$5"; label="$6"; kind="${7:-heads}"
 t=$(command -v "$tool" 2>/dev/null || true)
 if [ -n "$t" ]; then t=$(readlink -f "$t"); else t="$tool"; fi
 case "$t" in
   /*/bin/analyze-kdump) prefix=${t%/bin/analyze-kdump} ;;
-  *) echo "설치 위치를 알 수 없습니다: $tool (서버 설정의 원격 analyze-kdump 경로를 /opt/kdump-tools/bin/analyze-kdump 형태로 지정해 주세요)"; exit 3 ;;
+  *) echo "설치 위치를 알 수 없습니다: $tool (서버 설정의 원격 analyze-kdump 경로를 /opt/kdump-analyzer/bin/analyze-kdump 형태로 지정해 주세요)"; exit 3 ;;
 esac
 [ "$(id -u)" -eq 0 ] || { echo "root 권한이 필요합니다. 서버 설정에서 sudo를 켜 주세요(비밀번호 없는 sudo 필요)."; exit 4; }
 tmp=$(mktemp -d /tmp/kdump-tools-update.XXXXXX) || exit 5
@@ -1009,7 +1036,7 @@ status=$?
 # install.sh는 일부 명령 등록을 건너뛰면 2를 반환하지만 설치는 끝난 상태입니다.
 [ "$status" -eq 2 ] && status=0
 exit $status
-"""
+""", 1)
 
 
 # ---------------------------------------------------------------- 분석 작업
@@ -1248,7 +1275,8 @@ class Jobs:
 
         tmpdir = None
         if method == "installed":
-            argv = ["env", "ANALYZE_KDUMP_PROGRESS=1", server["tool"], "-r", job.vmcore]
+            argv = ["env", "ANALYZE_KDUMP_PROGRESS=1", "sh", "-c", with_install_fallback('exec "$1" -r "$2"', 1),
+                    "sh", server["tool"], job.vmcore]
             stdin = None
         else:
             code, out = ssh_text(server, ["mktemp", "-d", "/tmp/kdump-tools.XXXXXX"])

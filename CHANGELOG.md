@@ -4,6 +4,16 @@
 GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리스)으로 받을 수 있습니다.
 1.18.3까지는 프로젝트 이름이 `kdump-tools`였습니다. 아래 기록의 링크는 GitHub이 새 주소로 연결합니다.
 
+## [1.20.0] - 2026-11-06
+
+### 변경
+- 새로 설치하는 서버의 기본 설치 위치가 저장소 이름을 따라 `/opt/kdump-analyzer`가 됩니다.
+  - `install.sh`: `--prefix`가 없으면 이미 설치된 곳을 우선합니다. 예전 기본 위치 `/opt/kdump-tools`에만 설치돼 있으면 그 자리를 업데이트하고(설치가 둘로 갈라지지 않게), 어디에도 없으면 `/opt/kdump-analyzer`에 설치합니다.
+  - 웹 UI·메뉴: 서버를 추가할 때 원격 경로 기본값이 `/opt/kdump-analyzer/bin/analyze-kdump`입니다. 그 서버에 새 경로 설치가 없고 예전 위치에만 있으면 연결 테스트, 버전 확인, 서버 준비, 분석, 업그레이드가 예전 위치의 설치본을 씁니다. 직접 지정한 경로(기존 서버의 `/opt/kdump-tools/...` 포함)는 그대로 씁니다.
+  - 설치 정보가 없는 곳에서 실행(무설치 실행 등)할 때도 `/opt/kdump-analyzer` 설치를 먼저, 없으면 예전 위치를 씁니다.
+- 설정 샘플(`analyze-kdump.conf.sample`)의 `VMLINUX_BASE`, `REPORT_DIR`를 주석으로 바꿨습니다. 기본값이 설치 위치를 따라가므로 지정하지 않는 것이 맞습니다.
+- 이미 `/opt/kdump-tools`에 설치된 서버는 아무것도 바뀌지 않습니다. 옮기려면 새 위치에 설치하고 설정·vmlinux·로그를 직접 옮겨야 합니다.
+
 ## [1.19.0] - 2026-11-06
 
 ### 변경
@@ -165,7 +175,8 @@ GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리�
 - 설치 스크립트(명령 등록)와 상황별 원격 분석 방식 (#3)
 - 분석 진행 표시와 메뉴의 이전 화면 이동 (#4)
 
-[1.19.0]: https://github.com/621dev/kdump-analyzer/compare/v1.18.3...main
+[1.20.0]: https://github.com/621dev/kdump-analyzer/compare/v1.19.0...main
+[1.19.0]: https://github.com/621dev/kdump-analyzer/compare/v1.18.3...v1.19.0
 [1.18.3]: https://github.com/621dev/kdump-tools/compare/v1.18.2...v1.18.3
 [1.18.2]: https://github.com/621dev/kdump-tools/compare/v1.18.0...v1.18.2
 [1.18.1]: https://github.com/621dev/kdump-tools/pull/27

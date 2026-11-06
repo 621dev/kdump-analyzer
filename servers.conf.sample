@@ -1,6 +1,6 @@
 # analyze-kdump-ui 접속 서버 목록 샘플
 #
-# 실제 목록은 /opt/kdump-tools/servers.conf에 저장됩니다(ANALYZE_KDUMP_SERVERS로 변경 가능).
+# 실제 목록은 /opt/kdump-analyzer/servers.conf에 저장됩니다(ANALYZE_KDUMP_SERVERS로 변경 가능).
 # 보통은 analyze-kdump-ui의 "접속 서버 관리" 메뉴에서 추가·수정합니다.
 #
 # 한 줄에 서버 하나:
@@ -15,5 +15,5 @@
 #     upload     스크립트를 원격 임시 디렉터리로 보내 실행 (원격에 crash, vmlinux 필요)
 #     fetch      vmcore를 이 서버로 가져와 분석 (원격에는 SSH만 필요)
 #
-# db01|ops@10.0.0.11|22|yes|/opt/kdump-tools/bin/analyze-kdump|/var/crash|auto
-# web01|root@web01.example.com|2222|no|/opt/kdump-tools/bin/analyze-kdump|/var/crash|fetch
+# db01|ops@10.0.0.11|22|yes|/opt/kdump-analyzer/bin/analyze-kdump|/var/crash|auto
+# web01|root@web01.example.com|2222|no|/opt/kdump-analyzer/bin/analyze-kdump|/var/crash|fetch

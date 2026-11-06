@@ -11,12 +11,12 @@
 #      LLM_PROVIDER=claude-code ./kdump-vm-test.sh verify --llm   # 구독 CLI (root로 로그인 필요)
 #
 # 환경변수:
-#   TOOL_DIR    analyze-kdump 저장소 위치 (기본 /opt/kdump-tools-test, 없으면 clone)
+#   TOOL_DIR    analyze-kdump 저장소 위치 (기본 /opt/kdump-analyzer-test, 없으면 clone)
 #   TOOL_REPO   clone할 저장소 (기본 https://github.com/621dev/kdump-analyzer.git)
 #   TOOL_BRANCH clone할 브랜치 (기본 fix/robustness-and-llm)
 set -e
 
-TOOL_DIR="${TOOL_DIR:-/opt/kdump-tools-test}"
+TOOL_DIR="${TOOL_DIR:-/opt/kdump-analyzer-test}"
 TOOL_REPO="${TOOL_REPO:-https://github.com/621dev/kdump-analyzer.git}"
 TOOL_BRANCH="${TOOL_BRANCH:-fix/robustness-and-llm}"
 

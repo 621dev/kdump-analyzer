@@ -1165,7 +1165,7 @@ function openServerDialog(server) {
   form.reset();
   $("#server-error").textContent = "";
   $("#server-dialog-title").textContent = server ? "서버 수정" : "서버 추가";
-  const values = server || { port: 22, tool: "/opt/kdump-tools/bin/analyze-kdump", crash_dir: "/var/crash", method: "auto", sudo: true };
+  const values = server || { port: 22, tool: "/opt/kdump-analyzer/bin/analyze-kdump", crash_dir: "/var/crash", method: "auto", sudo: true };
   for (const el of form.elements) {
     if (!el.name) continue;
     if (el.name === "original") el.value = server ? server.name : "";
