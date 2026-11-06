@@ -1,5 +1,5 @@
 #!/bin/bash
-# kdump-tools 자동 테스트 (실제 vmcore·crash 없이 실행)
+# kdump-analyzer 자동 테스트 (실제 vmcore·crash 없이 실행)
 #
 #   ./tests/run-tests.sh
 #
@@ -297,6 +297,21 @@ make_flat "$T/flat3/vmcore.flat" "$T/inner"
 run_ak flat3 FAKE_CRASH_NO_FLAT=1 FLAT_CONVERT=0 -- -r "$T/flat3"
 check "변환 끔: 종료 코드 1" [ "$(rc_of flat3)" = 1 ]
 check "변환 끔: 변환 명령 안내" has "$T/flat3.out" "makedumpfile -R $T/flat3/vmcore < $T/flat3/vmcore.flat"
+
+# 기본 경로는 install.sh로 설치한 위치(.install-info)를 따라감
+INST="$T/inst/kdump-analyzer"
+mkdir -p "$INST/bin" "$INST/vmlinux/$KVER"
+cp "$AK" "$INST/bin/analyze-kdump"
+echo "VERSION=test" > "$INST/.install-info"
+make_elf "$INST/vmlinux/$KVER/vmlinux" "$X86"
+env -i PATH="$T/fakebin:/usr/bin:/bin" HOME="$T" TMPDIR="$T" LANG=C.UTF-8 FAKE_KVER="$KVER" \
+    bash "$INST/bin/analyze-kdump" -r "$D" > "$T/inst.out" 2>&1
+check "설치 위치 기준: vmlinux를 설치 위치에서 찾음" has "$T/inst.out" "vmlinux: $INST/vmlinux/$KVER/vmlinux"
+check "설치 위치 기준: 리포트를 설치 위치 logs에 저장" has "$T/inst.out" "report:  $INST/logs/kdump-report-"
+rm -f "$INST/.install-info"
+env -i PATH="$T/fakebin:/usr/bin:/bin" HOME="$T" TMPDIR="$T" LANG=C.UTF-8 FAKE_KVER="$KVER" \
+    bash "$INST/bin/analyze-kdump" -r "$D" > "$T/inst2.out" 2>&1
+check "설치 정보 없으면 /opt/kdump-tools 기준" has "$T/inst2.out" "/opt/kdump-tools/vmlinux/$KVER/vmlinux"
 
 # 작업이 끝나면 임시 디렉터리를 남기지 않음
 check "임시 작업 디렉터리 정리" bash -c "! ls -d '$T'/analyze-kdump.* >/dev/null 2>&1"

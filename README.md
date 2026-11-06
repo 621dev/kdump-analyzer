@@ -1,4 +1,4 @@
-# kdump-tools
+# kdump-analyzer
 
 Linux 커널 패닉 덤프(`vmcore`)를 빠르게 분석하기 위한 도구 모음입니다. 덤프의 커널 버전에 맞는 `vmlinux`를 찾아 `crash`를 실행하고, 장애 분석에 필요한 정보를 리포트 한 장으로 모은 뒤, 원하면 LLM으로 원인과 조치까지 정리합니다.
 
@@ -6,11 +6,11 @@ Linux 커널 패닉 덤프(`vmcore`)를 빠르게 분석하기 위한 도구 모
 - **`analyze-kdump-ui`**: 서버 터미널에서 쓰는 메뉴 화면. 장애 현장에서 SSH로 접속해 씁니다.
 - **웹 UI** (`webui/kdump-webui.py`): 노트북 브라우저에서 여러 서버를 SSH로 관리하고 분석합니다.
 
-RHEL·Rocky·Alma 계열과 Ubuntu·Debian을 지원합니다. Debian·Ubuntu의 `kdump-tools` 패키지(덤프를 만드는 쪽)와는 별개의 프로젝트이고, 그 패키지가 만든 덤프도 분석합니다.
+RHEL·Rocky·Alma 계열과 Ubuntu·Debian을 지원합니다. 예전 이름은 `kdump-tools`였는데, Debian·Ubuntu의 `kdump-tools` 패키지(덤프를 만드는 쪽)와 헷갈리지 않도록 v1.19.0에서 `kdump-analyzer`로 바꿨습니다. 그 패키지가 만든 덤프도 분석합니다.
 
-[![CI](https://github.com/621dev/kdump-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/621dev/kdump-tools/actions/workflows/ci.yml)
+[![CI](https://github.com/621dev/kdump-analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/621dev/kdump-analyzer/actions/workflows/ci.yml)
 
-[변경 기록](CHANGELOG.md) · [릴리스](https://github.com/621dev/kdump-tools/releases) · [라이선스 (MIT)](LICENSE)
+[변경 기록](CHANGELOG.md) · [릴리스](https://github.com/621dev/kdump-analyzer/releases) · [라이선스 (MIT)](LICENSE)
 
 ## 5분 시작 가이드
 
@@ -22,8 +22,8 @@ RHEL·Rocky·Alma 계열과 Ubuntu·Debian을 지원합니다. Debian·Ubuntu의
 
 ```bash
 # 1. 설치 (/opt/kdump-tools에 복사하고 명령을 /usr/sbin에 등록)
-git clone https://github.com/621dev/kdump-tools.git
-sudo ./kdump-tools/install.sh
+git clone https://github.com/621dev/kdump-analyzer.git
+sudo ./kdump-analyzer/install.sh
 
 # 2. 가장 최근 덤프로 리포트 만들기
 sudo analyze-kdump -r /var/crash
@@ -36,15 +36,15 @@ sudo analyze-kdump -r /var/crash
 
 ### B. 노트북에서 웹 UI로 분석하기
 
-여러 서버를 노트북 한 곳에서 관리할 때 씁니다. 서버에 kdump-tools를 설치하지 않아도 노트북에서 스크립트를 보내 분석합니다(무설치 실행). 서버에는 crash와 디버그 커널만 있으면 되고, 이것도 웹 UI가 설치해 줍니다.
+여러 서버를 노트북 한 곳에서 관리할 때 씁니다. 서버에 kdump-analyzer를 설치하지 않아도 노트북에서 스크립트를 보내 분석합니다(무설치 실행). 서버에는 crash와 디버그 커널만 있으면 되고, 이것도 웹 UI가 설치해 줍니다.
 
 1. 준비: 노트북에 Python 3.8 이상과 `ssh`, 서버에는 SSH 키로 접속하는 계정과 비밀번호 없는 sudo가 필요합니다.
 2. 실행:
    ```bash
-   git clone https://github.com/621dev/kdump-tools.git
-   python kdump-tools/webui/kdump-webui.py
+   git clone https://github.com/621dev/kdump-analyzer.git
+   python kdump-analyzer/webui/kdump-webui.py
    ```
-   브라우저가 열립니다. Windows에서는 `kdump-tools\windows\install-shortcut.cmd`를 한 번 실행하면 바탕화면 아이콘으로 띄울 수 있습니다.
+   브라우저가 열립니다. Windows에서는 `kdump-analyzer\windows\install-shortcut.cmd`를 한 번 실행하면 바탕화면 아이콘으로 띄울 수 있습니다.
 3. 왼쪽 서버 목록의 **+ 추가**에 이름, `user@host`, SSH 키 파일을 넣고 저장한 뒤 **연결 테스트**를 누릅니다.
 4. 서버 화면의 **서버 준비** 탭에서 빠진 항목(crash, 디버그 커널, kdump 설정 등)을 확인하고 설치합니다.
 5. vmcore 목록에서 **리포트** 또는 **리포트 + LLM 분석**을 누릅니다. 진행 바가 끝나면 결과가 열립니다. LLM은 **설정**에서 API 키나 Claude Code·Codex 구독을 연결합니다.
@@ -145,8 +145,8 @@ Ubuntu가 `/var/crash`에 함께 저장하는 사용자 프로그램 크래시 �
 저장소를 받은 뒤 `install.sh`를 root로 실행합니다. 파일을 `/opt/kdump-tools`에 복사하고 모든 명령(`analyze-kdump`, `analyze-kdump-ui`)을 `/usr/sbin`에 등록하므로, 이후에는 어디서나 명령 이름만으로 실행할 수 있습니다.
 
 ```bash
-git clone https://github.com/621dev/kdump-tools.git
-sudo ./kdump-tools/install.sh
+git clone https://github.com/621dev/kdump-analyzer.git
+sudo ./kdump-analyzer/install.sh
 ```
 
 ```bash
@@ -158,7 +158,8 @@ sudo analyze-kdump -r /var/crash
 - **등록 위치:** `/usr/sbin`에 심볼릭 링크로 등록합니다. RHEL 계열은 sudo의 `secure_path`에 `/usr/local/*`가 없어서, `/usr/local/bin`에 두면 `sudo analyze-kdump-ui`가 명령을 찾지 못합니다. 같은 이름의 일반 파일이 이미 있으면 덮어쓰지 않고 건너뜁니다.
 - **자동완성:** `/etc/bash_completion.d`가 있으면 `analyze-kdump` 옵션과 경로의 Tab 자동완성도 등록합니다. 새 셸부터 적용됩니다.
 - **도구 점검:** 설치가 끝나면 crash, whiptail, python3, curl, ssh가 있는지 보여줍니다.
-- **설치 옵션:** 설치 위치와 등록 위치는 `--prefix`, `--bin-dir`로 바꿀 수 있습니다.
+- **설치 옵션:** 설치 위치와 등록 위치는 `--prefix`, `--bin-dir`로 바꿀 수 있습니다. 다른 위치에 설치하면 설정 파일(`analyze-kdump.conf`), 서버 목록(`servers.conf`), vmlinux, 로그의 기본 위치도 그 아래로 따라갑니다.
+- **설치 위치 이름:** 프로젝트 이름은 `kdump-analyzer`로 바뀌었지만, 기본 설치 위치(`/opt/kdump-tools`), 웹 UI 데이터 폴더(`~/.kdump-tools-web`), 설정 이름(`KDUMP_TOOLS_*`)은 이미 설치된 서버가 그대로 업데이트되도록 예전 이름을 유지합니다.
 - **설치 정보:** 설치한 버전, 커밋, 시각, 원본, 등록 위치를 `/opt/kdump-tools/.install-info`에 기록하고, `install.sh` 자신도 `/opt/kdump-tools`에 복사합니다. 저장소 폴더를 지워도 업데이트와 해제를 할 수 있습니다.
 
 등록을 해제하려면 다음을 실행합니다. 등록한 명령과 자동완성만 지우고, `/opt/kdump-tools`(설정, 서버 목록, 로그, vmlinux)는 남깁니다.
@@ -190,15 +191,15 @@ analyze-kdump --version
 - **GitHub에서 업데이트:** 최신 릴리스(또는 브랜치) 코드를 받아(`git`, 없으면 `curl`+`tar`) 같은 위치에 다시 설치합니다. 이미 최신이거나 더 새 버전이면 **GitHub에서 다시 설치**로 표시되고, 이전 버전으로 돌아가게 되면 확인 창에서 알려 줍니다. 끝나면 새 버전으로 메뉴를 다시 시작할 수 있습니다.
 - **서버의 디렉터리에서 업데이트 (폐쇄망):** 인터넷이 막힌 서버라면 다른 곳에서 받은 저장소를 서버에 복사한 뒤 그 경로를 지정합니다.
 - **유지되는 것:** 설정, 접속 서버 목록, 로그, vmlinux는 그대로 유지됩니다. 업데이트는 root로 실행해야 하고, `install.sh`로 설치한 경우에만 메뉴에서 할 수 있습니다.
-- **저장소 변경:** 업데이트할 저장소와 브랜치는 설정 메뉴의 `KDUMP_TOOLS_REPO`(기본 `621dev/kdump-tools`)와 `KDUMP_TOOLS_BRANCH`(기본 `main`)로 바꿀 수 있습니다.
+- **저장소 변경:** 업데이트할 저장소와 브랜치는 설정 메뉴의 `KDUMP_TOOLS_REPO`(기본 `621dev/kdump-analyzer`)와 `KDUMP_TOOLS_BRANCH`(기본 `main`)로 바꿀 수 있습니다.
 
 명령으로 업데이트하려면 저장소에서 원하는 버전을 받은 뒤 `install.sh`를 다시 실행합니다.
 
 ```bash
 # 최신 릴리스 (태그 이름은 GitHub Releases에서 확인)
-cd kdump-tools && git fetch --tags && git checkout v1.17.0 && sudo ./install.sh
+cd kdump-analyzer && git fetch --tags && git checkout v1.17.0 && sudo ./install.sh
 # main 최신 커밋
-cd kdump-tools && git checkout main && git pull && sudo ./install.sh
+cd kdump-analyzer && git checkout main && git pull && sudo ./install.sh
 ```
 
 원격 서버는 분석 방식에 따라 다릅니다. **원격 설치본 실행** 방식으로 쓰는 서버는 그 서버에서도 업데이트해야 합니다. 연결 테스트 화면에서 원격 서버의 버전을 확인할 수 있습니다. **무설치 실행**은 매번 메뉴를 실행한 서버의 최신 버전을 보내서 쓰고, **vmcore 가져오기**는 원격에 설치할 것이 없습니다.
@@ -566,7 +567,7 @@ python webui/kdump-webui.py
   - 다른 Host 이름이나 다른 사이트에서 온 요청은 거부합니다(DNS 리바인딩, CSRF 방지).
 - **옵션:** `--port`(기본 8730), `--data-dir`(기본 `~/.kdump-tools-web`), `--no-browser`, `--no-supervisor`
 - **Windows에서 아이콘으로 실행:** 콘솔을 열지 않고 바탕화면 아이콘을 더블클릭해서 쓸 수 있습니다.
-  - 한 번만 `windows\install-shortcut.cmd`를 더블클릭하거나 `python webui\kdump-webui.py --install-shortcut`을 실행하면 바탕화면과 시작 메뉴에 **kdump-tools 웹 UI** 아이콘이 생깁니다(`--shortcut-dir <폴더>`로 위치 지정, `--remove-shortcut`으로 삭제).
+  - 한 번만 `windows\install-shortcut.cmd`를 더블클릭하거나 `python webui\kdump-webui.py --install-shortcut`을 실행하면 바탕화면과 시작 메뉴에 **kdump-analyzer 웹 UI** 아이콘이 생깁니다(`--shortcut-dir <폴더>`로 위치 지정, `--remove-shortcut`으로 삭제).
   - 아이콘은 `pythonw.exe`로 서버를 콘솔 창 없이 띄우고 브라우저를 엽니다. 이미 실행 중이면 새로 띄우지 않고 그 서버의 화면을 엽니다.
   - 종료는 **버전·업데이트** 화면의 **웹 UI 종료** 버튼으로 합니다. 진행 중이거나 대기 중인 작업이 있으면 종료하지 않습니다.
   - 출력은 데이터 폴더의 `webui.log`에 남고(1MB가 넘으면 `webui.log.old`로 넘김), 시작에 실패하면 대화 상자로 알립니다. 실행 중인 서버의 주소와 토큰은 `run.json`에 있습니다.
@@ -588,7 +589,7 @@ python webui/kdump-webui.py
 | 작업 대기열 | 같은 서버의 crash 작업(리포트 생성, 설치)은 한 번에 하나씩, LLM 분석은 전체에서 한 번에 하나씩 요청한 순서대로 실행합니다. 앞 작업이 LLM 단계로 넘어가면 다음 작업의 리포트 생성이 바로 시작됩니다. 메모리가 작은 서버에서 crash 여러 개가 동시에 돌다 OOM으로 죽는 것을 막기 위한 것입니다. 대기 중인 작업은 카드에서 취소할 수 있습니다. crash 리포트 생성은 설정의 제한 시간(기본 30분)을 넘기면 원격의 crash까지 끝내고 실패로 처리해, 멈춘 crash 하나가 그 서버의 대기열을 막지 않게 합니다. 서버 준비·설치는 2시간으로 제한합니다 |
 | 작업 카드 (오른쪽 아래) | crash 리포트 생성 진행 바(`3/12 bt -a`), vmlinux 읽는 중 표시, LLM 분석 단계, 경과 시간, 로그. 성공한 카드는 8초 뒤 자동으로 닫힘(마우스를 올려 두거나 로그를 펼치면 유지). 실패한 카드는 직접 닫을 때까지 남음 |
 | 분석 기록 (왼쪽 위) | 모든 서버의 기록을 리포트 단위로 묶어 최신 순으로 표시: 판정 요약, panic 문자열, vmcore, 커널, LLM provider·모델. 서버·종류(LLM 분석 있음/리포트만) 필터와 검색, 이전 분석 열기, 다시 분석. 삭제한 서버의 기록도 볼 수 있음. 서버 화면의 "분석 결과" 탭은 같은 목록을 해당 서버만 보여줌 |
-| 버전·업데이트 (왼쪽 위, 상단 버전 배지) | 노트북 kdump-tools의 현재 버전·커밋과 GitHub 최신 릴리스(또는 브랜치) 비교, 새 커밋 목록, **업데이트**. 서버마다 설치된 analyze-kdump 버전·설치 위치·설치 원본을 확인하고 **노트북 버전 설치/업그레이드** 또는 **GitHub 최신 설치/업그레이드** 실행 |
+| 버전·업데이트 (왼쪽 위, 상단 버전 배지) | 노트북 kdump-analyzer의 현재 버전·커밋과 GitHub 최신 릴리스(또는 브랜치) 비교, 새 커밋 목록, **업데이트**. 서버마다 설치된 analyze-kdump 버전·설치 위치·설치 원본을 확인하고 **노트북 버전 설치/업그레이드** 또는 **GitHub 최신 설치/업그레이드** 실행 |
 | 분석 결과 | LLM 분석을 제목·표·코드가 갖춰진 보고서로 표시, 원본 리포트로 이동 |
 | 리포트 보기 | 섹션별 접기·펼치기, 검색(해당 섹션만 남기고 강조), 리포트를 LLM으로 (다시) 분석 |
 | 설정 | provider·모델(API 모델 목록 불러오기), API 키 저장, 사내 호환 서버 주소, 구독 CLI 경로·장기 토큰, CLI 상태 확인, 연결 테스트, 마스킹·입력 크기·출력 토큰·제한 시간, crash 리포트 제한 시간(분) |
@@ -612,7 +613,7 @@ LLM 분석은 `webui/kdump_llm.py`에서 합니다. analyze-kdump와 같은 방�
   - **노트북 버전:** 노트북에 있는 파일을 SSH로 보냅니다. 서버에 인터넷이 없어도 되고, 서버에 `tar`가 없어도 됩니다(`base64`만 사용).
   - **GitHub 릴리스(또는 최신):** 서버가 GitHub에서 업데이트 기준에 맞는 태그나 브랜치를 직접 받습니다. 서버에 인터넷과 `git`(또는 `curl`과 `tar`)이 필요합니다.
   - 두 방식 모두 root 권한이 필요하므로, 서버 설정에서 sudo를 켜야 합니다(비밀번호 없는 sudo).
-- 업데이트 기준, 저장소, 브랜치(기본 최신 릴리스, `621dev/kdump-tools`, `main`)는 같은 화면의 "업데이트 설정"에서 바꿀 수 있습니다.
+- 업데이트 기준, 저장소, 브랜치(기본 최신 릴리스, `621dev/kdump-analyzer`, `main`)는 같은 화면의 "업데이트 설정"에서 바꿀 수 있습니다.
 
 웹 UI에 없는 기능: crash 셸 직접 입력, vmcore를 가져와 로컬에서 crash로 분석하는 기능(Windows에서는 crash가 동작하지 않음), 구독 CLI 설치와 로그인(노트북에서 `claude auth login`이나 `codex login`으로 직접 로그인하거나, 설정에서 장기 토큰을 붙여넣음).
 

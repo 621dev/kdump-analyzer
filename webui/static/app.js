@@ -282,7 +282,7 @@ function renderMain() {
   }
   if (!state.servers.length) {
     main.append(h(`<div class="card empty">
-      <h2>kdump-tools 웹 UI</h2>
+      <h2>kdump-analyzer 웹 UI</h2>
       <p>분석할 서버를 등록하면 vmcore 목록을 보고, 리포트 생성과 LLM 원인 분석을 브라우저에서 진행할 수 있습니다.</p>
       <ol class="steps">
         <li>왼쪽의 <b>+ 추가</b>로 서버를 등록합니다 (SSH 키로 비밀번호 없이 접속).</li>
@@ -805,7 +805,7 @@ function renderVersions(main) {
   const latest = v && v.latest;
   const st = localStatus();
   const checked = latest && latest.checked ? fmtTime(latest.checked) : "";
-  const repo = state.settings.update_repo || "621dev/kdump-tools";
+  const repo = state.settings.update_repo || "621dev/kdump-analyzer";
   const branch = state.settings.update_branch || "main";
   const channel = state.settings.update_channel || "release";
   const target = latestTarget(latest);
@@ -813,7 +813,7 @@ function renderVersions(main) {
   const card = h(`<div class="card">
     <div class="card-head">
       <div>
-        <h2>이 노트북의 kdump-tools</h2>
+        <h2>이 노트북의 kdump-analyzer</h2>
         <div class="meta">웹 UI와, 서버에 '무설치 실행'·'노트북 버전 설치'로 보내는 스크립트의 버전입니다.</div>
       </div>
       <div class="actions" id="ver-actions"><button class="btn small" id="ver-check">최신 버전 확인</button></div>

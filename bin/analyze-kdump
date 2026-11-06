@@ -7,7 +7,20 @@ set -e
 #   2: crash 리포트 생성 실패
 #   3: 리포트는 생성했지만 LLM 분석 실패
 
-CONFIG_FILE="${ANALYZE_KDUMP_CONF:-/opt/kdump-tools/analyze-kdump.conf}"
+# 기본 경로의 기준: install.sh로 설치한 위치(bin/의 상위에 .install-info가 있음)면 그 위치,
+# 아니면 /opt/kdump-tools입니다. 무설치 실행(/tmp로 보낸 스크립트)이나 저장소에서 바로 실행할 때도
+# 이 서버에 설치해 둔 설정·vmlinux를 쓰도록 /opt/kdump-tools로 둡니다.
+tool_base() {
+    local base
+    base=$(cd "$(dirname "$(readlink -f "$0")")/.." 2>/dev/null && pwd) || base=""
+    if [ -n "$base" ] && [ -f "$base/.install-info" ]; then
+        printf '%s' "$base"
+    else
+        printf '%s' /opt/kdump-tools
+    fi
+}
+TOOL_BASE=$(tool_base)
+CONFIG_FILE="${ANALYZE_KDUMP_CONF:-$TOOL_BASE/analyze-kdump.conf}"
 CONFIG_FILE_SET=0
 ENV_VMLINUX_BASE="${VMLINUX_BASE:-}"
 ENV_REPORT_DIR="${REPORT_DIR:-}"
@@ -34,8 +47,8 @@ ENV_LLM_CLI_PATH="${LLM_CLI_PATH:-}"
 ENV_LLM_CLI_ARGS="${LLM_CLI_ARGS:-}"
 ENV_LLM_CLI_TOKEN_FILE="${LLM_CLI_TOKEN_FILE:-}"
 ENV_LLM_ANTHROPIC_VERSION="${LLM_ANTHROPIC_VERSION:-}"
-VMLINUX_BASE="${VMLINUX_BASE:-/opt/kdump-tools/vmlinux}"
-REPORT_DIR="${REPORT_DIR:-/opt/kdump-tools/logs}"
+VMLINUX_BASE="${VMLINUX_BASE:-$TOOL_BASE/vmlinux}"
+REPORT_DIR="${REPORT_DIR:-$TOOL_BASE/logs}"
 REPORT_PREFIX="${REPORT_PREFIX:-kdump-report}"
 ANALYSIS_PREFIX="${ANALYSIS_PREFIX:-kdump-analysis}"
 LLM_ENABLED="${LLM_ENABLED:-0}"
