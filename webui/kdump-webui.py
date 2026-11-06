@@ -928,7 +928,8 @@ def prepare_check(server):
 
 
 # 서버에 보낼 설치 묶음. install.sh가 복사하는 파일만 담습니다.
-BUNDLE_FILES = ("install.sh", "VERSION", "README.md", "analyze-kdump.conf.sample", "servers.conf.sample")
+BUNDLE_FILES = ("install.sh", "VERSION", "README.md", "CHANGELOG.md", "LICENSE",
+                "analyze-kdump.conf.sample", "servers.conf.sample")
 BUNDLE_DIRS = ("bin", "completion")
 
 
