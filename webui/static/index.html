@@ -129,6 +129,12 @@
         <label>제한 시간(초)<input name="timeout" type="number" min="10"></label>
       </div>
     </section>
+    <section class="settings-section">
+      <h3>crash 리포트</h3>
+      <div class="grid three">
+        <label>crash 제한 시간(분) <span class="hint">(넘기면 중단, 1~1440)</span><input name="crash_timeout" type="number" min="1" max="1440"></label>
+      </div>
+    </section>
     <p class="form-error" id="settings-error"></p>
     <div class="modal-actions">
       <button class="btn ghost" value="cancel" formnovalidate>닫기</button>
