@@ -232,9 +232,32 @@ analysis: /opt/kdump-tools/logs/kdump-analysis-20260701-100000-12345.txt
 | `mod -t` | taint된 모듈(외부, 서명 없음, 강제 로드 등). 서드파티 드라이버가 원인인지 |
 | `runq` | CPU별 실행 대기열. soft lockup, 스케줄링 기아 |
 | `dev -d` | 디스크별 진행 중인 I/O. 스토리지 hang |
-| taint 모듈 관련 태스크 | `foreach bt` 결과 중 taint 모듈의 함수가 콜스택에 있는 태스크만 골라 붙인 섹션. 잠금을 쥐고 잠든 태스크처럼 실행 중도 D 상태도 아닌 원인을 찾는 데 씁니다(`REPORT_TAINTED_TASKS=0`으로 끔) | 마지막 `===== crash 실행 로그 =====` 섹션에는 crash 시작 메시지, 경고, 명령 오류가 남습니다.
+| taint 모듈 관련 태스크 | `foreach bt` 결과 중 taint 모듈의 함수가 콜스택에 있는 태스크만 골라 붙인 섹션. 잠금을 쥐고 잠든 태스크처럼 실행 중도 D 상태도 아닌 원인을 찾는 데 씁니다(`REPORT_TAINTED_TASKS=0`으로 끔) |
+
+마지막 `===== crash 실행 로그 =====` 섹션에는 crash 시작 메시지, 경고, 명령 오류가 남습니다.
 
 각 명령의 출력은 crash의 `명령 > 파일` 리다이렉션으로 따로 받습니다. 따라서 `REPORT_COMMANDS`에 직접 `>` 리다이렉션을 쓴 명령은 리포트 섹션이 비어 있게 됩니다. `set scroll off`처럼 `set`으로 시작하는 명령은 섹션을 만들지 않습니다.
+
+#### 장애 유형 판정과 추가 명령
+
+리포트를 만들기 전에 덤프와 함께 저장된 커널 로그(`vmcore-dmesg.txt` 또는 Ubuntu의 `dmesg.<시각>`, 없으면 `makedumpfile --dump-dmesg`로 꺼냄)를 읽어 장애 유형을 고르고, 리포트 머리글의 `type:`·`evidence:` 줄에 남깁니다. 유형에 맞는 crash 명령을 기본 명령 뒤에 덧붙입니다(`REPORT_TYPE_COMMANDS=0`으로 끔).
+
+| 유형 | 판단 근거 | 덧붙이는 명령 |
+|---|---|---|
+| hung task | `hung_task: blocked tasks` 패닉, `blocked for more than` | `ps -m \| grep UN` |
+| soft/hard lockup, RCU stall | `soft lockup`, `hard LOCKUP`, `detected stall` | `runq -t`, `irq -s`, `ps -m \| grep RU` |
+| OOM | `Out of memory` 패닉(panic_on_oom) | `kmem -V`, `kmem -z`, RSS 상위 태스크(`ps -G`) |
+| oops | `Fatal exception`과 `kernel BUG at`, NULL 역참조, GPF 등 | `bt -l`(소스 줄), 문제 지점 디스어셈블(`dis -rl <RIP>`) |
+| 수동 덤프 | `sysrq: Trigger a crash` | (없음) |
+| MCE, NMI | `Machine check`, `NMI` | `mach` |
+
+로그에 hung task나 lockup 경고가 함께 있으면 주 유형과 상관없이 해당 명령도 넣습니다. 이미 명령 목록에 있는 명령은 다시 넣지 않습니다.
+
+#### 모듈 심볼, 아키텍처 확인, JSON 요약
+
+- **모듈 심볼**(`REPORT_MODULE_SYMBOLS`): 기본값 `auto`는 커널 로그 콜스택에 나온 모듈만 디버그 심볼을 불러옵니다(`mod -s`). 모듈 안의 함수·소스 줄이 보이고, 전체를 불러오는 `all`(`mod -S`)보다 훨씬 빠릅니다. 불러온 모듈은 리포트 끝 `모듈 심볼` 섹션에 남습니다. 외부 모듈처럼 디버그 정보가 없는 모듈은 건너뜁니다.
+- **아키텍처 확인**(`REPORT_ARCH_CHECK`): vmcore, vmlinux, 이 서버의 아키텍처를 먼저 비교해, 어긋나면 crash를 실행하지 않고 이유를 알려 줍니다.
+- **JSON 요약**(`REPORT_JSON`): 리포트와 같은 이름의 `.json` 파일에 장애 유형과 근거, 패닉 메시지, `sys` 값, D 상태 태스크 수, taint 모듈, 섹션 목록을 남깁니다. python3가 필요합니다. 웹 UI는 아직 이 파일을 가져오지 않습니다.
 
 LLM 분석이 활성화된 경우 원본 crash 리포트와 별도로 `kdump-analysis-<timestamp>-<pid>.txt` 파일이 생성됩니다. API 호출이나 응답 파싱에 실패해도 원본 crash 리포트는 유지되며, 실패 이유는 분석 파일에 기록되고 종료 코드 `3`을 반환합니다. LLM 출력이 토큰 한도에서 잘린 경우 분석 파일 끝에 경고가 붙습니다.
 
