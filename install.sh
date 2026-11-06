@@ -1,12 +1,12 @@
 #!/bin/bash
 # kdump-analyzer 설치 스크립트
 #
-# 파일을 설치 디렉터리(기본 /opt/kdump-tools)에 복사하고, bin/의 명령을 PATH에 등록합니다.
+# 파일을 설치 디렉터리(기본 /opt/kdump-analyzer)에 복사하고, bin/의 명령을 PATH에 등록합니다.
 #   sudo ./install.sh                # 설치 또는 업데이트
 #   sudo ./install.sh --uninstall    # 등록한 명령 해제 (설치 디렉터리의 설정·로그·vmlinux는 남김)
 #
 # 옵션:
-#   --prefix DIR    설치 디렉터리 (기본 /opt/kdump-tools)
+#   --prefix DIR    설치 디렉터리 (기본 /opt/kdump-analyzer, 예전 위치 /opt/kdump-tools에 설치돼 있으면 그곳)
 #   --bin-dir DIR   명령을 등록할 디렉터리 (기본 /usr/sbin)
 #                   RHEL 계열 sudo의 secure_path에는 /usr/local/* 가 없어서 기본값을 /usr/sbin으로 둡니다.
 #   --commit SHA    설치 정보에 기록할 커밋 (git 저장소가 아닌 원본에서 설치할 때, 메뉴 업데이트가 사용)
@@ -14,7 +14,10 @@
 set -e
 
 SRC_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
-PREFIX="/opt/kdump-tools"
+DEFAULT_PREFIX="/opt/kdump-analyzer"
+# 1.19.0까지의 기본 설치 위치. 이미 여기 설치된 서버는 옵션 없이 다시 실행해도 이 자리를 업데이트합니다.
+LEGACY_PREFIX="/opt/kdump-tools"
+PREFIX=""
 BIN_DIR="/usr/sbin"
 COMPLETION_DIR="/etc/bash_completion.d"
 COMPLETION_NAME="kdump-tools"
@@ -70,6 +73,26 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ "$(id -u)" -eq 0 ] || die "root로 실행해 주세요. (sudo $0)"
+
+installed_at() {
+    [ -f "$1/.install-info" ] || [ -x "$1/bin/analyze-kdump" ]
+}
+
+# --prefix가 없으면 설치 위치를 고릅니다. 설치가 둘로 갈라지지 않도록 이미 설치된 곳을 우선합니다.
+#   1. 설치 디렉터리 안의 install.sh로 실행했으면 그 디렉터리
+#   2. 새 기본 위치(/opt/kdump-analyzer)에 설치돼 있으면 그곳
+#   3. 예전 기본 위치(/opt/kdump-tools)에만 설치돼 있으면 그곳
+#   4. 어디에도 없으면 새 기본 위치
+if [ -z "$PREFIX" ]; then
+    if [ -f "$SRC_DIR/.install-info" ]; then
+        PREFIX="$SRC_DIR"
+    elif installed_at "$DEFAULT_PREFIX" || ! installed_at "$LEGACY_PREFIX"; then
+        PREFIX="$DEFAULT_PREFIX"
+    else
+        PREFIX="$LEGACY_PREFIX"
+        echo "예전 기본 위치에 설치된 것을 그대로 업데이트합니다: $PREFIX (다른 위치로 옮기려면 --prefix)"
+    fi
+fi
 
 install_files() {
     local f

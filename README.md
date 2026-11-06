@@ -21,7 +21,7 @@ RHEL·Rocky·Alma 계열과 Ubuntu·Debian을 지원합니다. 예전 이름은 
 장애 서버나 분석 서버에 SSH로 접속해서 실행합니다.
 
 ```bash
-# 1. 설치 (/opt/kdump-tools에 복사하고 명령을 /usr/sbin에 등록)
+# 1. 설치 (/opt/kdump-analyzer에 복사하고 명령을 /usr/sbin에 등록)
 git clone https://github.com/621dev/kdump-analyzer.git
 sudo ./kdump-analyzer/install.sh
 
@@ -30,7 +30,7 @@ sudo analyze-kdump -r /var/crash
 ```
 
 - 덤프 커널의 `vmlinux`(디버그 커널)가 없으면 설치 명령을 알려 주고 멈춥니다. 안내대로 설치(RHEL 계열 `dnf debuginfo-install -y kernel-<커널 버전>`, Ubuntu `apt-get install -y linux-image-<커널 버전>-dbgsym`)한 뒤 다시 실행합니다.
-- 끝나면 `report:` 줄에 리포트 경로(`/opt/kdump-tools/logs/kdump-report-*.txt`)가 나옵니다. 리포트 맨 위의 `type:`·`evidence:` 줄에서 장애 유형과 근거를 먼저 봅니다.
+- 끝나면 `report:` 줄에 리포트 경로(`/opt/kdump-analyzer/logs/kdump-report-*.txt`)가 나옵니다. 리포트 맨 위의 `type:`·`evidence:` 줄에서 장애 유형과 근거를 먼저 봅니다.
 - 메뉴로 하려면 `sudo analyze-kdump-ui`를 실행해 **vmcore 분석**을 고릅니다.
 - LLM 분석까지 하려면 [LLM 분석](#설정-파일) 설정 뒤 `-llm`을 붙입니다.
 
@@ -78,10 +78,10 @@ sudo analyze-kdump -r /var/crash
 
 ## 디렉터리 구조
 
-권장 설치 위치는 `/opt/kdump-tools`입니다.
+권장 설치 위치는 `/opt/kdump-analyzer`입니다.
 
 ```text
-/opt/kdump-tools/
+/opt/kdump-analyzer/
 ├── README.md
 ├── CHANGELOG.md               # 버전별 변경 기록
 ├── LICENSE                    # MIT 라이선스
@@ -142,7 +142,7 @@ Ubuntu가 `/var/crash`에 함께 저장하는 사용자 프로그램 크래시 �
 
 ## 설치
 
-저장소를 받은 뒤 `install.sh`를 root로 실행합니다. 파일을 `/opt/kdump-tools`에 복사하고 모든 명령(`analyze-kdump`, `analyze-kdump-ui`)을 `/usr/sbin`에 등록하므로, 이후에는 어디서나 명령 이름만으로 실행할 수 있습니다.
+저장소를 받은 뒤 `install.sh`를 root로 실행합니다. 파일을 `/opt/kdump-analyzer`에 복사하고 모든 명령(`analyze-kdump`, `analyze-kdump-ui`)을 `/usr/sbin`에 등록하므로, 이후에는 어디서나 명령 이름만으로 실행할 수 있습니다.
 
 ```bash
 git clone https://github.com/621dev/kdump-analyzer.git
@@ -159,13 +159,13 @@ sudo analyze-kdump -r /var/crash
 - **자동완성:** `/etc/bash_completion.d`가 있으면 `analyze-kdump` 옵션과 경로의 Tab 자동완성도 등록합니다. 새 셸부터 적용됩니다.
 - **도구 점검:** 설치가 끝나면 crash, whiptail, python3, curl, ssh가 있는지 보여줍니다.
 - **설치 옵션:** 설치 위치와 등록 위치는 `--prefix`, `--bin-dir`로 바꿀 수 있습니다. 다른 위치에 설치하면 설정 파일(`analyze-kdump.conf`), 서버 목록(`servers.conf`), vmlinux, 로그의 기본 위치도 그 아래로 따라갑니다.
-- **설치 위치 이름:** 프로젝트 이름은 `kdump-analyzer`로 바뀌었지만, 기본 설치 위치(`/opt/kdump-tools`), 웹 UI 데이터 폴더(`~/.kdump-tools-web`), 설정 이름(`KDUMP_TOOLS_*`)은 이미 설치된 서버가 그대로 업데이트되도록 예전 이름을 유지합니다.
-- **설치 정보:** 설치한 버전, 커밋, 시각, 원본, 등록 위치를 `/opt/kdump-tools/.install-info`에 기록하고, `install.sh` 자신도 `/opt/kdump-tools`에 복사합니다. 저장소 폴더를 지워도 업데이트와 해제를 할 수 있습니다.
+- **예전 설치 위치:** 1.19.0까지의 기본 설치 위치는 `/opt/kdump-tools`였습니다. 이미 그곳에 설치된 서버는 `--prefix` 없이 다시 실행해도 그 자리를 업데이트하고(설치가 둘로 갈라지지 않게), 웹 UI·메뉴도 새 기본 경로에 설치가 없으면 예전 위치의 설치본을 씁니다. 새로 설치하는 서버만 `/opt/kdump-analyzer`에 설치됩니다. 웹 UI 데이터 폴더(`~/.kdump-tools-web`)와 설정 이름(`KDUMP_TOOLS_*`)은 예전 이름 그대로입니다.
+- **설치 정보:** 설치한 버전, 커밋, 시각, 원본, 등록 위치를 `/opt/kdump-analyzer/.install-info`에 기록하고, `install.sh` 자신도 `/opt/kdump-analyzer`에 복사합니다. 저장소 폴더를 지워도 업데이트와 해제를 할 수 있습니다.
 
-등록을 해제하려면 다음을 실행합니다. 등록한 명령과 자동완성만 지우고, `/opt/kdump-tools`(설정, 서버 목록, 로그, vmlinux)는 남깁니다.
+등록을 해제하려면 다음을 실행합니다. 등록한 명령과 자동완성만 지우고, `/opt/kdump-analyzer`(설정, 서버 목록, 로그, vmlinux)는 남깁니다.
 
 ```bash
-sudo /opt/kdump-tools/install.sh --uninstall
+sudo /opt/kdump-analyzer/install.sh --uninstall
 ```
 
 ## 버전 확인과 업데이트
@@ -210,43 +210,43 @@ cd kdump-analyzer && git checkout main && git pull && sudo ./install.sh
 analyze-kdump /path/to/vmcore
 ```
 
-`install.sh`를 쓰지 않았다면 `/opt/kdump-tools/bin/analyze-kdump`처럼 전체 경로로 실행합니다.
+`install.sh`를 쓰지 않았다면 `/opt/kdump-analyzer/bin/analyze-kdump`처럼 전체 경로로 실행합니다.
 
 요약 리포트만 생성하려면 `-report` 또는 `-r` 옵션을 사용합니다.
 
 ```bash
-/opt/kdump-tools/bin/analyze-kdump -report /path/to/vmcore
-/opt/kdump-tools/bin/analyze-kdump -r /path/to/vmcore
+/opt/kdump-analyzer/bin/analyze-kdump -report /path/to/vmcore
+/opt/kdump-analyzer/bin/analyze-kdump -r /path/to/vmcore
 ```
 
 생성된 리포트를 LLM으로 분석해 원인분석 섹션까지 추가하려면 `-llm` 옵션을 함께 사용합니다. `-llm`은 자동으로 리포트 모드를 켭니다.
 
 ```bash
-LLM_API_KEY="<api-key>" /opt/kdump-tools/bin/analyze-kdump -llm /path/to/vmcore
+LLM_API_KEY="<api-key>" /opt/kdump-analyzer/bin/analyze-kdump -llm /path/to/vmcore
 ```
 
 이미 만든 리포트를 LLM으로만 분석하려면 `--llm-report`를 사용합니다. crash와 vmcore가 필요 없으므로, 다른 서버에서 가져온 리포트를 분석하거나 같은 리포트를 다른 모델로 다시 분석할 때 씁니다. 분석 파일은 리포트와 같은 디렉터리에 저장되고, 이미 분석 파일이 있으면 `-2`, `-3`처럼 번호를 붙여 덮어쓰지 않습니다.
 
 ```bash
-/opt/kdump-tools/bin/analyze-kdump --llm-report /opt/kdump-tools/logs/kdump-report-20260701-100000-12345.txt
+/opt/kdump-analyzer/bin/analyze-kdump --llm-report /opt/kdump-analyzer/logs/kdump-report-20260701-100000-12345.txt
 ```
 
-기본 설정 파일은 `/opt/kdump-tools/analyze-kdump.conf`입니다. 저장소에는 샘플 파일인 `analyze-kdump.conf.sample`만 포함하고, 실제 설정 파일인 `analyze-kdump.conf`는 Git에 올리지 않습니다. 다른 설정 파일을 사용하려면 `-config` 옵션으로 지정합니다.
+기본 설정 파일은 `/opt/kdump-analyzer/analyze-kdump.conf`입니다. 저장소에는 샘플 파일인 `analyze-kdump.conf.sample`만 포함하고, 실제 설정 파일인 `analyze-kdump.conf`는 Git에 올리지 않습니다. 다른 설정 파일을 사용하려면 `-config` 옵션으로 지정합니다.
 
 ```bash
-/opt/kdump-tools/bin/analyze-kdump -config /path/to/analyze-kdump.conf -report /path/to/vmcore
+/opt/kdump-analyzer/bin/analyze-kdump -config /path/to/analyze-kdump.conf -report /path/to/vmcore
 ```
 
 vmcore 파일 대신 디렉터리를 지정할 수도 있습니다. 디렉터리 안에 덤프(`vmcore`, `vmcore.flat`, `dump.<시각>` 순)가 있으면 그 파일을, 없으면 하위 디렉터리 중 가장 최근 덤프를 사용합니다. `vmcore.flat`처럼 makedumpfile flattened 형식인 덤프를 crash가 읽지 못하면 자동으로 변환합니다([중앙 분석 서버 구성](#중앙-분석-서버-구성-kdump-원격-전송)).
 
 ```bash
-/opt/kdump-tools/bin/analyze-kdump -report /var/crash
+/opt/kdump-analyzer/bin/analyze-kdump -report /var/crash
 ```
 
 conf 파일에서 `DEFAULT_VMCORE`를 지정하면 명령줄에서 vmcore 경로를 생략할 수 있습니다. `DEFAULT_VMCORE="/var/crash"`처럼 디렉터리로 지정하면 항상 최근 덤프를 분석합니다.
 
 ```bash
-/opt/kdump-tools/bin/analyze-kdump -report
+/opt/kdump-analyzer/bin/analyze-kdump -report
 ```
 
 스크립트는 다음 순서로 동작합니다.
@@ -257,7 +257,7 @@ conf 파일에서 `DEFAULT_VMCORE`를 지정하면 명령줄에서 vmcore 경로
    - `/usr/lib/debug/lib/modules/<kernel-version>/vmlinux` (RHEL 계열 debuginfo 설치 경로)
    - `/usr/lib/debug/boot/vmlinux-<kernel-version>` (Debian/Ubuntu dbgsym 설치 경로)
 3. 파일이 있으면 기본 모드에서는 `crash <vmlinux> <vmcore>`를 실행합니다.
-4. `-report` 모드에서는 `crash` 셸에 진입하지 않고 `/opt/kdump-tools/logs/kdump-report-<timestamp>-<pid>.txt` 파일을 생성합니다.
+4. `-report` 모드에서는 `crash` 셸에 진입하지 않고 `/opt/kdump-analyzer/logs/kdump-report-<timestamp>-<pid>.txt` 파일을 생성합니다.
 5. LLM 분석이 활성화되어 있으면 생성된 리포트 내용을 API로 보내 원인분석, 근거, 영향 범위, 권고 조치를 별도 분석 파일로 저장합니다.
 6. 파일이 없으면 필요한 `vmlinux` 준비 명령을 안내하고 종료합니다.
 
@@ -279,14 +279,14 @@ conf 파일에서 `DEFAULT_VMCORE`를 지정하면 명령줄에서 vmcore 경로
 ```text
 vmcore:  /var/crash/127.0.0.1-2026-07-01-10:00:00/vmcore
 kernel:  4.18.0-553.el8_10.x86_64
-vmlinux: /opt/kdump-tools/vmlinux/4.18.0-553.el8_10.x86_64/vmlinux
+vmlinux: /opt/kdump-analyzer/vmlinux/4.18.0-553.el8_10.x86_64/vmlinux
 ```
 
 리포트 모드에서는 다음과 같이 생성된 파일 경로를 출력합니다.
 
 ```text
-report:  /opt/kdump-tools/logs/kdump-report-20260701-100000-12345.txt
-analysis: /opt/kdump-tools/logs/kdump-analysis-20260701-100000-12345.txt
+report:  /opt/kdump-analyzer/logs/kdump-report-20260701-100000-12345.txt
+analysis: /opt/kdump-analyzer/logs/kdump-analysis-20260701-100000-12345.txt
 ```
 
 리포트와 분석 파일은 같은 실행 ID(`<timestamp>-<pid>`)를 쓰므로 짝을 쉽게 찾을 수 있고, 같은 초에 여러 번 실행해도 덮어쓰지 않습니다.
@@ -342,18 +342,18 @@ LLM_MODEL="<served-model-name>"
 
 ## 설정 파일
 
-`analyze-kdump.conf.sample`은 bash 변수 형식으로 작성된 샘플입니다. 실제 운영 설정은 `/opt/kdump-tools/analyze-kdump.conf` 또는 `-config`로 지정한 파일에 작성합니다.
+`analyze-kdump.conf.sample`은 bash 변수 형식으로 작성된 샘플입니다. 실제 운영 설정은 `/opt/kdump-analyzer/analyze-kdump.conf` 또는 `-config`로 지정한 파일에 작성합니다.
 
 conf 파일은 셸 스크립트로 읽혀 실행되므로, 소유자가 root 또는 실행 사용자이고 group/other 쓰기 권한이 없어야 합니다. 조건을 만족하지 않으면 스크립트가 실행을 거부합니다.
 
 ```bash
-chown root:root /opt/kdump-tools/analyze-kdump.conf
-chmod 644 /opt/kdump-tools/analyze-kdump.conf
+chown root:root /opt/kdump-analyzer/analyze-kdump.conf
+chmod 644 /opt/kdump-analyzer/analyze-kdump.conf
 ```
 
 ```bash
-VMLINUX_BASE="/opt/kdump-tools/vmlinux"
-REPORT_DIR="/opt/kdump-tools/logs"
+VMLINUX_BASE="/opt/kdump-analyzer/vmlinux"
+REPORT_DIR="/opt/kdump-analyzer/logs"
 REPORT_PREFIX="kdump-report"
 ANALYSIS_PREFIX="kdump-analysis"
 
@@ -409,9 +409,9 @@ analyze-kdump -report -llm /path/to/vmcore
 API 키를 파일로 저장해야 한다면 `secrets/` 디렉터리에 두고 권한을 제한합니다. 저장소 루트의 `secrets/`는 Git에 올라가지 않도록 `.gitignore`에 포함되어 있습니다.
 
 ```bash
-mkdir -p /opt/kdump-tools/secrets
-printf '%s\n' '<gemini-api-key>' > /opt/kdump-tools/secrets/gemini-api-key
-chmod 600 /opt/kdump-tools/secrets/gemini-api-key
+mkdir -p /opt/kdump-analyzer/secrets
+printf '%s\n' '<gemini-api-key>' > /opt/kdump-analyzer/secrets/gemini-api-key
+chmod 600 /opt/kdump-analyzer/secrets/gemini-api-key
 ```
 
 이 경우 실제 `analyze-kdump.conf`에는 다음처럼 지정합니다.
@@ -419,7 +419,7 @@ chmod 600 /opt/kdump-tools/secrets/gemini-api-key
 ```bash
 LLM_PROVIDER="gemini"
 LLM_MODEL="gemini-3.5-flash"
-LLM_API_KEY_FILE="/opt/kdump-tools/secrets/gemini-api-key"
+LLM_API_KEY_FILE="/opt/kdump-analyzer/secrets/gemini-api-key"
 ```
 
 Provider별 최소 설정 예시는 다음과 같습니다.
@@ -470,7 +470,7 @@ LLM_MODEL=""            # 비우면 Codex 설정(~/.codex/config.toml)의 기본
   - Claude Code: 장기 토큰 발급(`claude setup-token`, 화면 없는 서버 권장), 다른 PC에서 발급한 토큰 붙여넣기, 브라우저 로그인(`claude auth login`), 저장된 토큰 사용 중지
   - Codex: 기기 코드 로그인(`codex login --device-auth`), 브라우저 로그인
   - 공통: 연결 테스트(짧은 요청 1회)
-- **토큰 저장:** 장기 토큰은 `/opt/kdump-tools/secrets/claude-oauth-token`(폴더 700, 파일 600)에 저장하고, 설정에는 경로만 `LLM_CLI_TOKEN_FILE`로 남깁니다. 분석할 때는 이 토큰을 `CLAUDE_CODE_OAUTH_TOKEN` 환경변수로만 넘기므로 `ps` 같은 명령줄 목록에 보이지 않습니다.
+- **토큰 저장:** 장기 토큰은 `/opt/kdump-analyzer/secrets/claude-oauth-token`(폴더 700, 파일 600)에 저장하고, 설정에는 경로만 `LLM_CLI_TOKEN_FILE`로 남깁니다. 분석할 때는 이 토큰을 `CLAUDE_CODE_OAUTH_TOKEN` 환경변수로만 넘기므로 `ps` 같은 명령줄 목록에 보이지 않습니다.
 - **CLI 경로 자동 탐색 (`LLM_CLI_PATH`):** PATH, `/usr/local/bin`, `/usr/bin`, `~/.local/bin`, `~/.npm-global/bin`, nvm 경로(`~/.nvm/versions/node/*/bin`)에서 CLI를 찾아 버전과 함께 보여줍니다.
   - RHEL 계열은 sudo 실행 경로에 `/usr/local/bin`이 없어서, `npm install -g`로 설치한 `claude`를 이름만으로는 못 찾습니다. 이때 전체 경로를 고르면 됩니다.
   - nvm으로 설치한 CLI는 같은 폴더의 `node`가 필요하므로, 실행할 때 CLI가 있는 폴더를 PATH 앞에 붙입니다.
@@ -483,7 +483,7 @@ LLM_MODEL=""            # 비우면 Codex 설정(~/.codex/config.toml)의 기본
 ```bash
 LLM_PROVIDER="claude-code"
 LLM_CLI_PATH="/usr/local/bin/claude"
-LLM_CLI_TOKEN_FILE="/opt/kdump-tools/secrets/claude-oauth-token"   # root만 읽을 수 있게 600
+LLM_CLI_TOKEN_FILE="/opt/kdump-analyzer/secrets/claude-oauth-token"   # root만 읽을 수 있게 600
 ```
 
 실행 방식:
@@ -518,17 +518,17 @@ KVER="<kernel-version>"
 apt-get install -y "linux-image-$KVER-dbgsym"
 ```
 
-여러 커널 버전의 `vmlinux`를 한 곳에 보관하려면 `/opt/kdump-tools/vmlinux` 아래에 복사합니다.
+여러 커널 버전의 `vmlinux`를 한 곳에 보관하려면 `/opt/kdump-analyzer/vmlinux` 아래에 복사합니다.
 
 ```bash
-mkdir -p "/opt/kdump-tools/vmlinux/$KVER"
-cp "/usr/lib/debug/lib/modules/$KVER/vmlinux" "/opt/kdump-tools/vmlinux/$KVER/"
+mkdir -p "/opt/kdump-analyzer/vmlinux/$KVER"
+cp "/usr/lib/debug/lib/modules/$KVER/vmlinux" "/opt/kdump-analyzer/vmlinux/$KVER/"
 ```
 
 예를 들어 커널 버전이 `4.18.0-553.el8_10.x86_64`라면 최종 파일 경로는 다음과 같아야 합니다.
 
 ```text
-/opt/kdump-tools/vmlinux/4.18.0-553.el8_10.x86_64/vmlinux
+/opt/kdump-analyzer/vmlinux/4.18.0-553.el8_10.x86_64/vmlinux
 ```
 
 ### 커널 모듈 심볼
@@ -609,7 +609,7 @@ LLM 분석은 `webui/kdump_llm.py`에서 합니다. analyze-kdump와 같은 방�
 - **노트북 업데이트:** 릴리스 기준이면 최신 릴리스 태그를 받아 현재 브랜치를 그 태그까지 fast-forward(`git merge --ff-only`)하고, 브랜치 기준이면 `git pull --ff-only`를 실행합니다.
   - git으로 받은 저장소여야 하고, 커밋하지 않은 변경이 없고, 현재 브랜치가 업데이트 브랜치와 같아야 합니다. 조건이 맞지 않으면 업데이트하지 않고 이유를 보여줍니다.
   - 화면 파일만 바뀌었으면 새로고침하면 적용됩니다. 웹 UI의 Python 코드가 바뀌었으면 웹 UI를 다시 실행하라고 안내합니다.
-- **서버 설치·업그레이드:** 서버 설정의 원격 analyze-kdump 경로(기본 `/opt/kdump-tools/bin/analyze-kdump`)에서 설치 위치를 정하고, 서버에서 `install.sh`를 실행합니다. 설정, 접속 서버 목록, 로그, vmlinux는 install.sh가 유지합니다.
+- **서버 설치·업그레이드:** 서버 설정의 원격 analyze-kdump 경로(기본 `/opt/kdump-analyzer/bin/analyze-kdump`)에서 설치 위치를 정하고, 서버에서 `install.sh`를 실행합니다. 설정, 접속 서버 목록, 로그, vmlinux는 install.sh가 유지합니다.
   - **노트북 버전:** 노트북에 있는 파일을 SSH로 보냅니다. 서버에 인터넷이 없어도 되고, 서버에 `tar`가 없어도 됩니다(`base64`만 사용).
   - **GitHub 릴리스(또는 최신):** 서버가 GitHub에서 업데이트 기준에 맞는 태그나 브랜치를 직접 받습니다. 서버에 인터넷과 `git`(또는 `curl`과 `tar`)이 필요합니다.
   - 두 방식 모두 root 권한이 필요하므로, 서버 설정에서 sudo를 켜야 합니다(비밀번호 없는 sudo).
@@ -671,11 +671,11 @@ sudo analyze-kdump-ui
 - SSH는 키 인증으로 비밀번호 없이 접속할 수 있어야 합니다(`BatchMode`로 접속).
 - root가 아닌 계정으로 접속하면 서버 설정에서 sudo를 켜고, 원격 서버에 비밀번호 없는 sudo(NOPASSWD)를 허용합니다. crash 셸 진입은 터미널을 연결하므로 sudo 비밀번호를 입력할 수 있습니다.
 
-접속 서버 목록은 `/opt/kdump-tools/servers.conf`에 저장됩니다(`ANALYZE_KDUMP_SERVERS`로 변경 가능). 메뉴에서 관리하면 되고, 직접 편집할 때는 `servers.conf.sample` 형식을 따릅니다. 7번째 칸(분석 방식)을 생략하면 `auto`로 동작합니다.
+접속 서버 목록은 `/opt/kdump-analyzer/servers.conf`에 저장됩니다(`ANALYZE_KDUMP_SERVERS`로 변경 가능). 메뉴에서 관리하면 되고, 직접 편집할 때는 `servers.conf.sample` 형식을 따릅니다. 7번째 칸(분석 방식)을 생략하면 `auto`로 동작합니다.
 
 ```text
 # 이름|접속대상(user@host)|포트|sudo 사용(yes/no)|원격 analyze-kdump 경로|crash 디렉터리|분석 방식
-db01|ops@10.0.0.11|22|yes|/opt/kdump-tools/bin/analyze-kdump|/var/crash|auto
+db01|ops@10.0.0.11|22|yes|/opt/kdump-analyzer/bin/analyze-kdump|/var/crash|auto
 ```
 
 ### 중앙 분석 서버 구성 (kdump 원격 전송)
@@ -711,7 +711,7 @@ kdumpctl status
   - `FLAT_CONVERT=0`이면 변환하지 않고 변환 명령을 안내한 뒤 멈춥니다.
   - 1.18.0보다 오래된 버전은 덤프 목록에 `vmcore.flat`을 보여 주지 않습니다. 분석 서버의 설치본을 업그레이드하세요.
 - NFS로 보내려면 `nfs <NFS 서버>:/export/crash`와 `path /`를 쓰고, 공유를 분석 서버의 `/var/crash`에 마운트합니다.
-- 분석 서버의 `VMLINUX_BASE`(`/opt/kdump-tools/vmlinux/<커널 버전>/vmlinux`)에 운영 서버 커널 버전별 vmlinux를 모아 둡니다.
+- 분석 서버의 `VMLINUX_BASE`(`/opt/kdump-analyzer/vmlinux/<커널 버전>/vmlinux`)에 운영 서버 커널 버전별 vmlinux를 모아 둡니다.
 
 ## 자동 테스트와 CI
 

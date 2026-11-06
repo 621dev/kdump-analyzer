@@ -13,14 +13,17 @@
 #   ANALYZE_KDUMP_CONF     설정 파일 (기본 <설치 위치>/analyze-kdump.conf)
 #   ANALYZE_KDUMP_SERVERS  접속 서버 목록 파일 (기본 <설치 위치>/servers.conf)
 #   ANALYZE_KDUMP_BIN      analyze-kdump 경로 (기본: 이 스크립트와 같은 디렉터리)
-# 설치 위치는 install.sh로 설치한 위치(.install-info가 있는 곳)이고, 아니면 /opt/kdump-tools입니다.
+# 설치 위치는 install.sh로 설치한 위치(.install-info가 있는 곳)이고, 아니면 기본 설치 위치
+# /opt/kdump-analyzer입니다(거기 설치가 없고 예전 위치 /opt/kdump-tools에 있으면 그곳).
 
 SCRIPT_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 TOOL="${ANALYZE_KDUMP_BIN:-$SCRIPT_DIR/analyze-kdump}"
 if [ -f "$SCRIPT_DIR/../.install-info" ]; then
     TOOL_BASE=$(cd "$SCRIPT_DIR/.." && pwd)
-else
+elif [ ! -f /opt/kdump-analyzer/.install-info ] && [ -f /opt/kdump-tools/.install-info ]; then
     TOOL_BASE=/opt/kdump-tools
+else
+    TOOL_BASE=/opt/kdump-analyzer
 fi
 CONFIG_FILE="${ANALYZE_KDUMP_CONF:-$TOOL_BASE/analyze-kdump.conf}"
 SERVERS_FILE="${ANALYZE_KDUMP_SERVERS:-$TOOL_BASE/servers.conf}"
@@ -29,7 +32,9 @@ PAGER_CMD="${PAGER_CMD:-less}"
 TITLE="analyze-kdump"
 CURRENT_SERVER="local"
 
-DEFAULT_REMOTE_TOOL="/opt/kdump-tools/bin/analyze-kdump"
+DEFAULT_REMOTE_TOOL="/opt/kdump-analyzer/bin/analyze-kdump"
+# 1.19.0까지의 기본 원격 경로. 원격 경로가 새 기본값인데 그 서버에는 예전 위치에만 설치돼 있으면 이 경로를 씁니다.
+LEGACY_REMOTE_TOOL="/opt/kdump-tools/bin/analyze-kdump"
 DEFAULT_CRASH_DIR="/var/crash"
 # install.sh로 설치했다면 bin/의 상위 디렉터리에 설치 정보(.install-info)가 있습니다.
 INSTALL_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
@@ -354,9 +359,18 @@ cleanup_upload() {
 }
 
 remote_tool() {
-    local tool
+    local tool found
     tool=$(server_field "$1" 5)
-    printf '%s' "${tool:-$DEFAULT_REMOTE_TOOL}"
+    tool="${tool:-$DEFAULT_REMOTE_TOOL}"
+    # 새 기본 경로로 등록했지만 그 서버에는 예전 기본 위치에만 설치돼 있으면 예전 경로를 씁니다.
+    if [ "$tool" = "$DEFAULT_REMOTE_TOOL" ]; then
+        found=$(remote_run "$1" sh -c 'if [ ! -x "$1" ] && [ -x "$2" ]; then echo "$2"; else echo "$1"; fi' \
+            sh "$DEFAULT_REMOTE_TOOL" "$LEGACY_REMOTE_TOOL" 2>/dev/null | tail -n 1)
+        case "$found" in
+            "$DEFAULT_REMOTE_TOOL"|"$LEGACY_REMOTE_TOOL") tool="$found" ;;
+        esac
+    fi
+    printf '%s' "$tool"
 }
 
 server_crash_dir() {

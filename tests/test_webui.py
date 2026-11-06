@@ -110,6 +110,22 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(args[-1], "tester@host")
         self.assertIn("2222", args)
 
+    def test_default_install_path_follows_repo_name(self):
+        self.assertEqual(webui.DEFAULT_SERVER["tool"], "/opt/kdump-analyzer/bin/analyze-kdump")
+        self.assertEqual(webui.vmlinux_base({"tool": ""}), "/opt/kdump-analyzer/vmlinux")
+        self.assertEqual(webui.vmlinux_base({"tool": "/srv/x/bin/analyze-kdump"}), "/srv/x/vmlinux")
+        # 원격 스크립트에는 예전 설치 위치 보정이 앞에 붙습니다.
+        for name in ("REMOTE_CHECK", "REMOTE_PREPARE", "REMOTE_INSTALL"):
+            self.assertTrue(getattr(webui, name).startswith(webui.INSTALL_FALLBACK_SH), name)
+
+    @unittest.skipUnless(HAS_SH, "sh가 필요합니다")
+    def test_install_fallback_keeps_other_paths(self):
+        # 새 기본 위치가 아닌 경로나 다른 인자는 그대로 넘깁니다(이 테스트 환경에는 /opt 설치가 없다고 가정하지 않음).
+        script = webui.with_install_fallback('printf "%s|" "$@"', 2)
+        out = subprocess.run(["sh", "-c", script, "sh", "a b", "/srv/x/vmlinux", "c"],
+                             capture_output=True, text=True, check=True).stdout
+        self.assertEqual(out, "a b|/srv/x/vmlinux|c|")
+
     def test_tool_version_line(self):
         m = webui.TOOL_VERSION_RE.match("analyze-kdump 1.18.2 (commit abc1234), 설치 2026-11-06 04:43")
         self.assertEqual(m.groups(), ("1.18.2", "abc1234", "2026-11-06 04:43"))
