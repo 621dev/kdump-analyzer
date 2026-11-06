@@ -346,9 +346,31 @@ class ApiError(Exception):
 
 # ---------------------------------------------------------------- SSH
 
+_SSH_EXTRA = None
+
+
+def ssh_extra_options():
+    """로컬 ssh가 지원하는 경우에만 붙이는 옵션입니다.
+
+    OpenSSH 10.1부터는 post-quantum 키 교환을 못 하는 서버(RHEL 9 계열 등)에 접속할 때마다 경고 3줄을
+    출력합니다. 출력에 섞이면 가져온 리포트 맨 앞에 붙으므로 WarnWeakCrypto=no로 끕니다.
+    옛 ssh는 모르는 옵션이면 접속 자체를 거부하므로 먼저 확인합니다.
+    """
+    global _SSH_EXTRA
+    if _SSH_EXTRA is None:
+        try:
+            ok = subprocess.run(["ssh", "-G", "-o", "WarnWeakCrypto=no", "kdump-tools-probe"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=10).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+        _SSH_EXTRA = ["-o", "WarnWeakCrypto=no"] if ok else []
+    return _SSH_EXTRA
+
+
 def ssh_args(server):
     args = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-            "-o", "StrictHostKeyChecking=accept-new", "-p", str(server.get("port") or 22)]
+            "-o", "StrictHostKeyChecking=accept-new"] + ssh_extra_options() + ["-p", str(server.get("port") or 22)]
     if server.get("key_file"):
         args += ["-i", server["key_file"]]
     return args + [server["target"]]
@@ -407,14 +429,21 @@ def remote_command(server, argv):
     return ("sudo -n " + command) if server.get("sudo") else command
 
 
-def ssh_run(server, argv, stdin=None, timeout=60):
-    """원격 명령을 실행하고 (종료 코드, 출력)을 돌려줍니다."""
+def ssh_run(server, argv, stdin=None, timeout=60, data=False):
+    """원격 명령을 실행하고 (종료 코드, 출력)을 돌려줍니다.
+
+    data=True면 파일 내용처럼 표준 출력만 돌려줍니다. ssh 자체의 경고·오류(표준 오류)가 내용에 섞이지 않게
+    하려는 것이고, 실패했을 때만 표준 오류를 덧붙입니다.
+    """
     # 보낼 입력이 없으면 표준 입력을 반드시 막습니다. 물려받은 입력이 열려 있으면
     # Windows의 ssh는 입력이 끝나기를 기다리며 원격 명령이 끝난 뒤에도 종료하지 않습니다.
     stdin_args = {"input": stdin} if stdin is not None else {"stdin": subprocess.DEVNULL}
     try:
         result = subprocess.run(ssh_args(server) + [remote_command(server, argv)], **stdin_args,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE if data else subprocess.STDOUT, timeout=timeout)
+        if data and result.returncode != 0:
+            return result.returncode, result.stdout + result.stderr
         return result.returncode, result.stdout
     except subprocess.TimeoutExpired:
         return 124, b"SSH timeout"
@@ -1186,7 +1215,7 @@ class Jobs:
                 raise ApiError(502, "리포트를 만들지 못했습니다 (종료 코드 %d). 로그를 확인해 주세요." % code)
 
             job.phase = "리포트 가져오는 중"
-            fetch_code, data = ssh_run(server, ["cat", remote_report], timeout=120)
+            fetch_code, data = ssh_run(server, ["cat", remote_report], timeout=120, data=True)
             if fetch_code != 0:
                 raise ApiError(502, "리포트를 가져오지 못했습니다.")
             name = os.path.basename(remote_report)
