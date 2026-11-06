@@ -1,7 +1,7 @@
 "use strict";
 
 // 서버(kdump-webui.py)의 API_LEVEL과 같아야 합니다. 다르면 업데이트 뒤 서버를 다시 시작하지 않은 것입니다.
-const API_LEVEL = 5;
+const API_LEVEL = 6;
 
 // ---------------------------------------------------------------- 상태와 공통
 
@@ -740,6 +740,17 @@ function localStatus() {
     ? { cls: "up", text: "업데이트 가능" } : { cls: "ok", text: "최신 버전과 같은 번호" };
 }
 
+// "릴리스 v1.16.0" 또는 "main 브랜치"
+function latestTarget(latest) {
+  if (!latest || !latest.ok) return "";
+  return latest.channel === "release" ? `릴리스 ${latest.tag || ""}` : `${latest.branch || latest.ref || ""} 브랜치`;
+}
+
+function selfUpdateLabel() {
+  const latest = state.versions && state.versions.latest;
+  return latest && latest.ok && latest.channel === "release" ? `업데이트 (${latest.tag})` : "업데이트 (git pull)";
+}
+
 function updateAvailable() {
   return localStatus().cls === "up";
 }
@@ -796,6 +807,8 @@ function renderVersions(main) {
   const checked = latest && latest.checked ? fmtTime(latest.checked) : "";
   const repo = state.settings.update_repo || "621dev/kdump-tools";
   const branch = state.settings.update_branch || "main";
+  const channel = state.settings.update_channel || "release";
+  const target = latestTarget(latest);
 
   const card = h(`<div class="card">
     <div class="card-head">
@@ -812,9 +825,9 @@ function renderVersions(main) {
         <div class="sub">${local.git ? `${esc(short(local.commit))} · 브랜치 ${esc(local.branch)}${local.dirty ? ' · <span class="warn-text">커밋하지 않은 변경 있음</span>' : ""}` : "git 저장소가 아님 (커밋 정보 없음)"}</div>
       </div>
       <div class="version-box">
-        <div class="label">최신 (GitHub)</div>
+        <div class="label">최신 (GitHub ${channel === "release" ? "릴리스" : "브랜치"})</div>
         <div class="value">${latest && latest.ok ? "v" + esc(latest.version) : "—"}</div>
-        <div class="sub">${latest && latest.ok ? `${esc(short(latest.commit))} · ${esc(repo)} ${esc(branch)}${checked ? " · " + checked + " 확인" : ""}` : esc((latest && latest.error) || "확인 중")}</div>
+        <div class="sub">${latest && latest.ok ? `${latest.release_url ? `<a href="${esc(latest.release_url)}" target="_blank" rel="noopener noreferrer">${esc(target)}</a>` : esc(target)} · ${esc(short(latest.commit))} · ${esc(repo)}${checked ? " · " + checked + " 확인" : ""}` : esc((latest && latest.error) || "확인 중")}</div>
       </div>
       <div class="version-box">
         <div class="label">상태</div>
@@ -824,12 +837,18 @@ function renderVersions(main) {
     </div>
     <div id="ver-changes"></div>
     <div id="ver-result"></div>
-    <details class="ver-source"><summary>업데이트 저장소 설정</summary>
+    <details class="ver-source"><summary>업데이트 설정 (${channel === "release" ? "최신 릴리스" : esc(branch) + " 브랜치 최신 커밋"})</summary>
       <div class="inline-actions" style="margin-top:8px">
+        <label style="width:220px">업데이트 기준<select id="ver-channel">
+          <option value="release"${channel === "release" ? " selected" : ""}>최신 릴리스 (권장)</option>
+          <option value="branch"${channel === "branch" ? " selected" : ""}>브랜치 최신 커밋</option>
+        </select></label>
         <label style="flex:1">저장소 (owner/repo)<input id="ver-repo" value="${esc(repo)}"></label>
         <label style="width:180px">브랜치<input id="ver-branch" value="${esc(branch)}"></label>
         <button class="btn small" id="ver-save" style="align-self:flex-end">저장</button>
       </div>
+      <p class="muted" style="margin:6px 0 0">최신 릴리스는 검증을 마친 버전만 받습니다. 브랜치 최신 커밋은 릴리스 전 변경까지 바로 받습니다.
+        노트북 저장소는 어느 쪽이든 브랜치(${esc(branch)})에서 fast-forward로만 갱신합니다.</p>
     </details>
   </div>`);
   main.append(card);
@@ -845,7 +864,7 @@ function renderVersions(main) {
   $("#ver-actions").append(stop);
   const action = $("#ver-action");
   if (st.cls === "up" && local.git) {
-    const btn = h('<button class="btn small primary">업데이트 (git pull)</button>');
+    const btn = h(`<button class="btn small primary">${esc(selfUpdateLabel())}</button>`);
     btn.addEventListener("click", () => selfUpdate(btn));
     action.append(btn);
   } else if (st.cls === "up") {
@@ -863,8 +882,10 @@ function renderVersions(main) {
   });
   $("#ver-save").addEventListener("click", async () => {
     try {
-      state.settings = await api("POST", "/api/settings", { update_repo: $("#ver-repo").value.trim(), update_branch: $("#ver-branch").value.trim() });
-      toast("업데이트 저장소를 저장했습니다.");
+      state.settings = await api("POST", "/api/settings", {
+        update_channel: $("#ver-channel").value,
+        update_repo: $("#ver-repo").value.trim(), update_branch: $("#ver-branch").value.trim() });
+      toast("업데이트 설정을 저장했습니다.");
       await loadVersions(true);
       renderMain();
     } catch (e) { toast(e.message); }
@@ -914,14 +935,14 @@ function drawServerVersions() {
         <button class="btn small ${st.cls === "up" ? "primary" : ""}" data-act="local" ${running || !(info && info.ok) ? "disabled" : ""}
           title="노트북의 v${esc(local.version)}를 SSH로 보내 설치합니다. 서버에 인터넷이 없어도 됩니다.">노트북 버전 ${verb}</button>
         <button class="btn small" data-act="github" ${running || !(info && info.ok) ? "disabled" : ""}
-          title="서버가 GitHub에서 직접 받아 설치합니다. 서버에 인터넷이 필요합니다.">GitHub 최신 ${verb}</button>
+          title="서버가 GitHub에서 직접 받아 설치합니다(${esc(latestTarget(latest) || "최신")}). 서버에 인터넷이 필요합니다.">GitHub ${latest && latest.ok && latest.channel === "release" ? esc(latest.tag) : "최신"} ${verb}</button>
       </div></td></tr>`);
     row.querySelector('[data-act="check"]').addEventListener("click", () => loadServerVersion(s.name));
     row.querySelectorAll('[data-act="local"],[data-act="github"]').forEach(b => b.addEventListener("click", () => {
       const source = b.dataset.act;
       const what = source === "local"
         ? `노트북의 v${local.version}${local.commit ? " (" + short(local.commit) + ")" : ""}`
-        : `GitHub 최신${latest && latest.ok ? " v" + latest.version + " (" + short(latest.commit) + ")" : ""}`;
+        : `GitHub ${latest && latest.ok ? latestTarget(latest) + " v" + latest.version + " (" + short(latest.commit) + ")" : "최신"}`;
       const now = installed ? `현재 v${info.version}${info.commit ? " (" + info.commit + ")" : ""}` : "현재 미설치";
       if (!confirm(`${s.name}에 ${what}을(를) ${verb}할까요?\n\n${now}\n설치 위치: ${(info && info.prefix) || s.tool}\n\n설정·서버 목록·로그·vmlinux는 유지됩니다.`)) return;
       startJob({ kind: "upgrade", server: s.name, source }).then(() => drawServerVersions());
@@ -955,7 +976,7 @@ async function selfUpdate(btn) {
     $("#ver-result").append(notice);
   } catch (e) {
     btn.disabled = false;
-    btn.textContent = "업데이트 (git pull)";
+    btn.textContent = selfUpdateLabel();
     $("#ver-result").innerHTML = "";
     $("#ver-result").append(h(`<div class="notice err"><b>업데이트하지 못했습니다</b><pre>${esc(e.message)}</pre></div>`));
   }

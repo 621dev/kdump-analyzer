@@ -25,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -56,7 +57,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(APP_DIR)
 # 화면(app.js)과 서버가 주고받는 API의 판. API를 바꿀 때 app.js의 API_LEVEL과 함께 올립니다.
 # 업데이트 뒤 서버를 다시 시작하지 않으면 화면이 이 값의 차이로 알아채고 안내합니다.
-API_LEVEL = 5
+API_LEVEL = 6
 
 # 화면의 "다시 시작"은 감시 프로세스가 서버를 새 코드로 다시 띄우는 방식입니다.
 RESTART_EXIT = 75                     # 서버가 이 코드로 끝나면 감시 프로세스가 다시 띄웁니다
@@ -77,7 +78,10 @@ DEFAULT_SETTINGS = {
     "mask": True, "max_report_chars": 60000, "max_tokens": 8192, "timeout": 300,
     "crash_timeout": 30,
     "update_repo": "621dev/kdump-tools", "update_branch": "main",
+    # release: GitHub의 최신 릴리스(태그)로 업데이트, branch: update_branch의 최신 커밋으로 업데이트
+    "update_channel": "release",
 }
+UPDATE_CHANNELS = ("release", "branch")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
 TOOL_VERSION_RE = re.compile(r"analyze-kdump (\S+?)(?: \(commit ([0-9a-f]+)\))?(?:, 설치 (.+))?$")
@@ -531,13 +535,44 @@ def _http_get(url, accept=None, timeout=8):
         return res.read()
 
 
-def fetch_latest(repo, branch, base=""):
-    """GitHub에서 브랜치의 최신 커밋과 VERSION을 읽습니다. base가 있으면 그 뒤의 커밋 제목도 가져옵니다."""
+def update_source(settings):
+    """설정에서 업데이트 저장소, 채널(release|branch), 브랜치를 읽습니다."""
+    repo = settings.get("update_repo") or DEFAULT_SETTINGS["update_repo"]
+    branch = settings.get("update_branch") or DEFAULT_SETTINGS["update_branch"]
+    channel = settings.get("update_channel") or DEFAULT_SETTINGS["update_channel"]
+    if channel not in UPDATE_CHANNELS:
+        channel = DEFAULT_SETTINGS["update_channel"]
+    return repo, channel, branch
+
+
+def latest_release_tag(repo):
+    """GitHub의 최신 릴리스(초안·프리릴리스 제외) 태그와 정보를 읽습니다."""
+    try:
+        data = json.loads(_http_get("https://api.github.com/repos/%s/releases/latest" % repo,
+                                    "application/vnd.github+json"))
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            raise ValueError("이 저장소에는 아직 릴리스가 없습니다. 업데이트 채널을 '브랜치'로 바꿔 주세요.")
+        raise
+    tag = data.get("tag_name") or ""
+    if not BRANCH_RE.match(tag):
+        raise ValueError("릴리스 태그를 읽지 못했습니다.")
+    return tag, data.get("name") or tag, data.get("html_url") or ""
+
+
+def fetch_latest(repo, channel, branch, base=""):
+    """GitHub에서 최신 릴리스 태그(또는 브랜치)의 커밋과 VERSION을 읽습니다.
+    base가 있으면 그 뒤의 커밋 제목도 가져옵니다."""
     if not REPO_RE.match(repo or "") or not BRANCH_RE.match(branch or ""):
         return {"ok": False, "error": "업데이트 저장소나 브랜치 형식이 올바르지 않습니다."}
-    result = {"ok": False, "repo": repo, "branch": branch, "checked": time.time()}
+    result = {"ok": False, "repo": repo, "channel": channel, "branch": branch, "checked": time.time()}
     try:
-        sha = _http_get("https://api.github.com/repos/%s/commits/%s" % (repo, urllib.parse.quote(branch, safe="")),
+        if channel == "release":
+            tag, name, url = latest_release_tag(repo)
+            result.update(ref=tag, ref_kind="tags", tag=tag, release_name=name, release_url=url)
+        else:
+            result.update(ref=branch, ref_kind="heads")
+        sha = _http_get("https://api.github.com/repos/%s/commits/%s" % (repo, urllib.parse.quote(result["ref"], safe="")),
                         "application/vnd.github.sha").decode().strip()
         if not re.fullmatch(r"[0-9a-f]{40}", sha):
             raise ValueError("커밋 값을 읽지 못했습니다.")
@@ -558,8 +593,9 @@ def fetch_latest(repo, branch, base=""):
     return result
 
 
-def self_update(branch):
-    """노트북의 저장소를 git pull --ff-only로 갱신합니다."""
+def self_update(settings):
+    """노트북의 저장소를 갱신합니다. 릴리스 채널은 최신 릴리스 태그로, 브랜치 채널은 git pull로 fast-forward합니다."""
+    repo, channel, branch = update_source(settings)
     info = local_info()
     if not info["git"]:
         raise ApiError(400, "웹 UI가 git 저장소에서 실행되고 있지 않아 자동으로 업데이트할 수 없습니다. "
@@ -570,10 +606,25 @@ def self_update(branch):
     if info["branch"] != branch:
         raise ApiError(409, "현재 브랜치(%s)가 업데이트 브랜치(%s)와 달라 업데이트하지 않았습니다." % (info["branch"], branch))
     before = info["commit"]
-    code, out = git("pull", "--ff-only", timeout=180)
+    if channel == "release":
+        try:
+            tag = latest_release_tag(repo)[0]
+        except Exception as error:  # noqa: BLE001
+            raise ApiError(502, "최신 릴리스를 확인하지 못했습니다: %s" % error)
+        code, out = git("fetch", "--quiet", "https://github.com/%s.git" % repo,
+                        "+refs/tags/%s:refs/tags/%s" % (tag, tag), timeout=180)
+        if code != 0:
+            raise ApiError(502, "릴리스 태그 %s를 받지 못했습니다:\n%s" % (tag, out[-800:]))
+        if git("merge-base", "--is-ancestor", "refs/tags/%s" % tag, "HEAD")[0] == 0:
+            raise ApiError(409, "이미 릴리스 %s와 같거나 더 새로운 버전입니다." % tag)
+        code, out = git("merge", "--ff-only", "refs/tags/%s" % tag, timeout=180)
+        what = "릴리스 %s로 fast-forward" % tag
+    else:
+        code, out = git("pull", "--ff-only", timeout=180)
+        what = "git pull"
     after = local_info()
     if code != 0:
-        raise ApiError(502, "git pull이 실패했습니다:\n%s" % out[-800:])
+        raise ApiError(502, "%s이(가) 실패했습니다:\n%s" % (what, out[-800:]))
     changed = git("diff", "--name-only", before, after["commit"])[1].splitlines() if after["commit"] != before else []
     return {"ok": True, "output": out[-2000:], "before": before, "local": after, "changed": changed,
             "restart": any(f.startswith("webui/") and f.endswith(".py") for f in changed)}
@@ -901,9 +952,9 @@ def build_bundle():
 
 
 # 원격에서 설치 위치를 찾고 install.sh를 실행합니다.
-# $1 도구 경로, $2 local|github, $3 저장소, $4 브랜치, $5 커밋, $6 원본 설명
+# $1 도구 경로, $2 local|github, $3 저장소, $4 브랜치나 태그, $5 커밋, $6 원본 설명, $7 heads|tags
 REMOTE_INSTALL = r"""
-tool="$1"; mode="$2"; repo="$3"; branch="$4"; commit="$5"; label="$6"
+tool="$1"; mode="$2"; repo="$3"; branch="$4"; commit="$5"; label="$6"; kind="${7:-heads}"
 t=$(command -v "$tool" 2>/dev/null || true)
 if [ -n "$t" ]; then t=$(readlink -f "$t"); else t="$tool"; fi
 case "$t" in
@@ -921,10 +972,10 @@ if [ "$mode" = local ]; then
 else
   echo "[1/2] GitHub에서 받는 중: $repo ($branch)"
   if command -v git >/dev/null 2>&1; then
-    git clone -q --depth 1 --branch "$branch" "https://github.com/$repo.git" "$tmp/src" || exit 7
+    git -c advice.detachedHead=false clone -q --depth 1 --branch "$branch" "https://github.com/$repo.git" "$tmp/src" || exit 7
     commit=$(git -c safe.directory="$tmp/src" -C "$tmp/src" rev-parse HEAD 2>/dev/null || echo "$commit")
   elif command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
-    curl -fsSL "https://codeload.github.com/$repo/tar.gz/refs/heads/$branch" | tar xz -C "$tmp/src" --strip-components=1 || exit 7
+    curl -fsSL "https://codeload.github.com/$repo/tar.gz/refs/$kind/$branch" | tar xz -C "$tmp/src" --strip-components=1 || exit 7
   else
     echo "서버에 git이 없고 curl·tar도 없어 GitHub에서 받을 수 없습니다. '노트북 버전 설치'를 사용해 주세요."; exit 7
   fi
@@ -1267,10 +1318,10 @@ class Jobs:
 
     def _run_upgrade(self, job, server):
         settings = self.store.settings()
-        repo = settings.get("update_repo") or DEFAULT_SETTINGS["update_repo"]
-        branch = settings.get("update_branch") or DEFAULT_SETTINGS["update_branch"]
+        repo, channel, branch = update_source(settings)
         if not REPO_RE.match(repo) or not BRANCH_RE.match(branch):
             raise ApiError(400, "업데이트 저장소나 브랜치 형식이 올바르지 않습니다.")
+        ref, ref_kind = branch, "heads"
         if job.source == "local":
             local = local_info()
             commit = local["commit"]
@@ -1280,10 +1331,17 @@ class Jobs:
             job.log("노트북 버전 v%s%s 를 보냅니다 (%d KB)" % (
                 local["version"], " (%s)" % commit[:7] if commit else "", max(1, len(stdin) // 1024)))
         else:
-            commit, label, stdin = "", "github:%s@%s" % (repo, branch), None
+            if channel == "release":
+                job.phase = "최신 릴리스 확인 중"
+                try:
+                    ref, ref_kind = latest_release_tag(repo)[0], "tags"
+                except Exception as error:  # noqa: BLE001
+                    raise ApiError(502, "최신 릴리스를 확인하지 못했습니다: %s" % error)
+                job.log("GitHub 최신 릴리스 %s를 설치합니다" % ref)
+            commit, label, stdin = "", "github:%s@%s" % (repo, ref), None
         job.phase = "설치 중"
         code, _ = self._stream(job, server, ["sh", "-c", REMOTE_INSTALL, "sh", server["tool"], job.source,
-                                             repo, branch, commit, label], stdin, timeout=PREPARE_TIMEOUT)
+                                             repo, ref, commit, label, ref_kind], stdin, timeout=PREPARE_TIMEOUT)
         if code != 0:
             raise ApiError(502, "설치에 실패했습니다 (종료 코드 %d). 로그를 확인해 주세요. 기존 설치는 그대로입니다." % code)
         job.phase = "설치 확인 중"
@@ -1339,9 +1397,7 @@ class App:
 
     def check_latest(self):
         settings = self.store.settings()
-        self.latest = fetch_latest(settings.get("update_repo") or DEFAULT_SETTINGS["update_repo"],
-                                   settings.get("update_branch") or DEFAULT_SETTINGS["update_branch"],
-                                   local_info()["commit"])
+        self.latest = fetch_latest(*update_source(settings), base=local_info()["commit"])
         return self.latest
 
     def public_settings(self):
@@ -1503,8 +1559,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 app.check_latest()
             return self._json(200, {"local": local_info(), "latest": app.latest})
         if parts == ["self-update"] and method == "POST":
-            settings = store.settings()
-            result = self_update(settings.get("update_branch") or DEFAULT_SETTINGS["update_branch"])
+            result = self_update(store.settings())
             app.check_latest()
             result["latest"] = app.latest
             return self._json(200, result)
@@ -1610,6 +1665,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 raise ApiError(400, "업데이트 저장소는 owner/repo 형식이어야 합니다.")
             if "update_branch" in body and not BRANCH_RE.match(str(body["update_branch"])):
                 raise ApiError(400, "업데이트 브랜치 이름이 올바르지 않습니다.")
+            if "update_channel" in body and body["update_channel"] not in UPDATE_CHANNELS:
+                raise ApiError(400, "업데이트 채널은 release 또는 branch여야 합니다.")
             store.save_settings(body)
             return self._json(200, app.public_settings())
         if parts == ["secrets", "api-key"] and method == "POST":
