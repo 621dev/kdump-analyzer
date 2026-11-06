@@ -8,6 +8,8 @@ Linux 커널 패닉 덤프(`vmcore`)를 빠르게 분석하기 위한 도구 모
 
 RHEL·Rocky·Alma 계열과 Ubuntu·Debian을 지원합니다. Debian·Ubuntu의 `kdump-tools` 패키지(덤프를 만드는 쪽)와는 별개의 프로젝트이고, 그 패키지가 만든 덤프도 분석합니다.
 
+[![CI](https://github.com/621dev/kdump-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/621dev/kdump-tools/actions/workflows/ci.yml)
+
 [변경 기록](CHANGELOG.md) · [릴리스](https://github.com/621dev/kdump-tools/releases) · [라이선스 (MIT)](LICENSE)
 
 ## 5분 시작 가이드
@@ -57,7 +59,7 @@ sudo analyze-kdump -r /var/crash
 - [설정 파일](#설정-파일) (LLM provider, 구독 계정 사용)
 - [vmlinux 추가 방법](#vmlinux-추가-방법)
 - [웹 UI](#웹-ui) · [터미널 메뉴 UI](#터미널-메뉴-ui) (상황별 사용 방식, 중앙 분석 서버 구성)
-- [테스트 VM에서 검증하기](#테스트-vm에서-검증하기) · [로그 디렉터리](#로그-디렉터리) · [라이선스](#라이선스)
+- [자동 테스트와 CI](#자동-테스트와-ci) · [테스트 VM에서 검증하기](#테스트-vm에서-검증하기) · [로그 디렉터리](#로그-디렉터리) · [라이선스](#라이선스)
 
 ## 주요 기능
 
@@ -709,6 +711,28 @@ kdumpctl status
   - 1.18.0보다 오래된 버전은 덤프 목록에 `vmcore.flat`을 보여 주지 않습니다. 분석 서버의 설치본을 업그레이드하세요.
 - NFS로 보내려면 `nfs <NFS 서버>:/export/crash`와 `path /`를 쓰고, 공유를 분석 서버의 `/var/crash`에 마운트합니다.
 - 분석 서버의 `VMLINUX_BASE`(`/opt/kdump-tools/vmlinux/<커널 버전>/vmlinux`)에 운영 서버 커널 버전별 vmlinux를 모아 둡니다.
+
+## 자동 테스트와 CI
+
+실제 vmcore나 crash 없이 돌아가는 테스트입니다. GitHub에 push하거나 PR을 열면 GitHub Actions(`.github/workflows/ci.yml`)가 자동으로 실행합니다.
+
+```bash
+bash tests/run-tests.sh                      # analyze-kdump·메뉴 (Linux, bash)
+python3 -m unittest discover -s tests -v     # 웹 UI·LLM 모듈 (Linux·Windows)
+python3 tests/shellcheck-embedded.py         # 웹 UI 안의 원격 셸 스크립트 shellcheck
+shellcheck bin/* install.sh tests/*.sh       # 셸 스크립트 정적 검사 (.shellcheckrc 적용)
+```
+
+- **`tests/run-tests.sh`**: 가짜 `crash`·`makedumpfile`과 ELF 머리만 있는 가짜 덤프를 임시 디렉터리에 만들고, 실제 `analyze-kdump`로 다음을 확인합니다.
+  - 덤프 찾기(RHEL·Ubuntu 형식, 상위 디렉터리)
+  - 장애 유형 판정과 근거 줄, 유형별 명령, taint 모듈 태스크 추리기, JSON 요약
+  - flattened 덤프(그대로 읽기, 오래된 crash에서 변환, 변환 끔)
+  - 아키텍처 불일치, vmlinux 없음 같은 오류 경로
+  - 메뉴의 덤프 목록, 버전 비교, 접속 대상 검사
+- **`tests/test_webui.py`**: 민감정보 마스킹, 리포트 축소, 업데이트 설정과 최신 버전 확인(네트워크는 흉내), 원격 시간 제한 래퍼, 서버 설치 묶음, 접속 대상 검사. `sh`·`setsid`가 없는 Windows에서는 해당 테스트를 건너뜁니다.
+- **CI 구성**: shellcheck와 pyflakes, Linux(Python 3.8·3.13)에서 두 테스트, Windows에서 웹 UI 테스트를 돌립니다.
+
+실제 crash로 하는 검증은 아래 테스트 VM 절차를 씁니다.
 
 ## 테스트 VM에서 검증하기
 
