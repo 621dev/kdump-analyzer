@@ -361,7 +361,9 @@ server_result_dir() {
 
 # 출력: "<mtime> <size> <경로>" (최근 순)
 # 덤프 파일 이름: RHEL·SUSE는 <디렉터리>/vmcore, Ubuntu·Debian(kdump-tools)은 <YYYYMMDDHHMM>/dump.<YYYYMMDDHHMM>
-DUMP_LIST_SH='for f in "$1"/*/vmcore "$1"/*/dump.[0-9]*; do [ -f "$f" ] && stat -c "%Y %s %n" "$f"; done | sort -rn'
+# SSH로 받은 RHEL 덤프는 <디렉터리>/vmcore.flat입니다. 분석할 때 같은 디렉터리의 vmcore로 변환하므로
+# vmcore가 있는 디렉터리의 vmcore.flat·dump.*는 목록에서 뺍니다.
+DUMP_LIST_SH='for f in "$1"/*/vmcore "$1"/*/vmcore.flat "$1"/*/dump.[0-9]*; do [ -f "$f" ] || continue; case "$f" in */vmcore) ;; *) [ -f "${f%/*}/vmcore" ] && continue ;; esac; stat -c "%Y %s %n" "$f"; done | sort -rn'
 list_vmcores() {
     local dir
     dir=$(server_crash_dir "$1")
@@ -843,7 +845,7 @@ test_server() {
         fi
         # crash --version은 /dev/mem을 열어 보다 lockdown 경고를 커널 로그에 남기므로 패키지 정보로 버전을 읽습니다.
         if command -v crash >/dev/null 2>&1; then v=$(rpm -q --qf "%{VERSION}-%{RELEASE}" crash 2>/dev/null) || v=$(dpkg-query -W -f="\${Version}" crash 2>/dev/null) || v=; echo "crash: OK (crash ${v:-설치됨})"; else echo "crash: 없음"; fi
-        n=$(ls -1 "$2"/*/vmcore "$2"/*/dump.[0-9]* 2>/dev/null | wc -l); echo "vmcore: ${n}개 ($2)"
+        n=$(for f in "$2"/*/vmcore "$2"/*/vmcore.flat "$2"/*/dump.[0-9]*; do [ -f "$f" ] || continue; case "$f" in */vmcore) ;; *) [ -f "${f%/*}/vmcore" ] && continue ;; esac; echo "$f"; done | wc -l); echo "vmcore: ${n}개 ($2)"
     ' sh "$tool" "$(server_crash_dir "$name")" 2>&1)
     status=$?
     if [ "$status" -ne 0 ] && [ -z "$out" ]; then
@@ -2049,9 +2051,8 @@ menu_kdump_guide() {
 저장 위치
   $crash_dir/<운영 서버 IP>-<시각>/vmcore             (RHEL 계열)
   $crash_dir/<YYYYMMDDHHMM>/dump.<YYYYMMDDHHMM>      (Ubuntu·Debian, 로컬 저장 시)
-  SSH 전송은 makedumpfile의 flattened 형식(vmcore.flat)으로 저장될 수 있습니다.
-  이 경우 다음처럼 변환한 뒤 분석합니다.
-    makedumpfile -R $crash_dir/<디렉터리>/vmcore < $crash_dir/<디렉터리>/vmcore.flat
+  SSH 전송은 makedumpfile의 flattened 형식(vmcore.flat)으로 저장됩니다.
+  분석할 때 같은 디렉터리의 vmcore로 자동 변환합니다(설정 FLAT_CONVERT, 덤프 크기만큼 공간 필요).
 
 분석
   메뉴의 '접속 서버 선택'에서 '이 서버'를 고르고 'vmcore 분석'을 실행합니다.

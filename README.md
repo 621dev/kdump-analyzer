@@ -642,7 +642,11 @@ kdumpctl status
 ```
 
 - vmcore는 분석 서버의 `/var/crash/<운영 서버 IP>-<시각>/`에 저장되고, 분석 서버에서 "이 서버"로 분석합니다.
-- SSH 전송은 makedumpfile의 flattened 형식(`vmcore.flat`)으로 저장될 수 있습니다. 이 경우 `makedumpfile -R <디렉터리>/vmcore < <디렉터리>/vmcore.flat`로 변환한 뒤 분석합니다.
+- **flattened 형식 자동 변환:** SSH 전송은 makedumpfile의 flattened 형식으로 저장됩니다(RHEL 계열은 `vmcore.flat`, Ubuntu·Debian은 이름은 `dump.<시각>`이지만 내용이 flattened). crash는 이 형식을 바로 열지 못하므로 `analyze-kdump`가 파일 앞부분의 서명으로 알아보고 `makedumpfile -R`로 변환한 뒤 분석합니다.
+  - 변환본은 같은 디렉터리의 `vmcore`로 남겨 다음 분석부터는 바로 씁니다. 덤프 목록(메뉴, 웹 UI)에도 변환본만 보입니다. 원본은 지우지 않으므로 공간이 덤프 크기만큼 더 필요합니다.
+  - 덤프 디렉터리에 쓸 수 없거나 공간이 모자라면 임시 디렉터리(`TMPDIR`, 기본 `/tmp`)에 변환하고 분석이 끝나면 지웁니다. 이때 리포트의 `vmcore:` 줄에는 원본 경로가 남습니다.
+  - 변환하는 만큼 분석 시간이 더 걸립니다. `FLAT_CONVERT=0`이면 변환하지 않고 변환 명령을 안내한 뒤 멈춥니다.
+  - 분석 서버에 설치한 kdump-tools가 1.18.0보다 오래되었으면 웹 UI의 '원격 설치본 실행'이 flattened 덤프를 열지 못하니 먼저 업그레이드합니다.
 - NFS로 보내려면 `nfs <NFS 서버>:/export/crash`와 `path /`를 쓰고, 공유를 분석 서버의 `/var/crash`에 마운트합니다.
 - 분석 서버의 `VMLINUX_BASE`(`/opt/kdump-tools/vmlinux/<커널 버전>/vmlinux`)에 운영 서버 커널 버전별 vmlinux를 모아 둡니다.
 

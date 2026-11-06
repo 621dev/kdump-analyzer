@@ -475,7 +475,7 @@ echo "host=$(hostname)"; echo "user=$(id -un)"
 if [ -x "$1" ]; then echo "tool=$("$1" --version 2>/dev/null | grep '^analyze-kdump ' | head -n 1)"; [ -n "$("$1" --version 2>/dev/null | grep '^analyze-kdump ')" ] || echo "tool=installed (version unknown)"; else echo "tool="; fi
 # crash --version은 실행 중 /dev/mem을 열어 보다 Secure Boot lockdown 경고를 커널 로그에 남기므로 패키지 정보로 버전을 읽습니다.
 if command -v crash >/dev/null 2>&1; then v=$(rpm -q --qf '%{VERSION}-%{RELEASE}' crash 2>/dev/null) || v=$(dpkg-query -W -f='${Version}' crash 2>/dev/null) || v=; echo "crash=crash ${v:-installed}"; else echo "crash="; fi
-echo "vmcores=$(ls -1 "$2"/*/vmcore "$2"/*/dump.[0-9]* 2>/dev/null | wc -l)"
+echo "vmcores=$(for f in "$2"/*/vmcore "$2"/*/vmcore.flat "$2"/*/dump.[0-9]*; do [ -f "$f" ] || continue; case "$f" in */vmcore) ;; *) [ -f "${f%/*}/vmcore" ] && continue ;; esac; echo "$f"; done | wc -l)"
 """, "sh", server["tool"], server["crash_dir"]], timeout=40)
     info = {"ok": code == 0, "raw": out.strip()[-600:]}
     for line in out.splitlines():
@@ -487,10 +487,15 @@ echo "vmcores=$(ls -1 "$2"/*/vmcore "$2"/*/dump.[0-9]* 2>/dev/null | wc -l)"
     return info
 
 
+# SSH로 받은 RHEL 덤프는 <디렉터리>/vmcore.flat입니다. 분석할 때 같은 디렉터리의 vmcore로 변환하므로
+# vmcore가 있는 디렉터리의 vmcore.flat·dump.*는 목록에서 뺍니다.
+DUMP_LIST_SH = ('for f in "$1"/*/vmcore "$1"/*/vmcore.flat "$1"/*/dump.[0-9]*; do [ -f "$f" ] || continue; case "$f" in */vmcore) ;; *) [ -f "${f%/*}/vmcore" ] && continue ;; esac; '
+                'stat -c "%Y %s %n" "$f"; done | sort -rn')
+
+
 def list_vmcores(server):
     # 덤프 파일 이름: RHEL·SUSE는 <디렉터리>/vmcore, Ubuntu·Debian(kdump-tools)은 <YYYYMMDDHHMM>/dump.<YYYYMMDDHHMM>
-    code, out = ssh_text(server, ["sh", "-c", 'for f in "$1"/*/vmcore "$1"/*/dump.[0-9]*; do '
-                                  '[ -f "$f" ] && stat -c "%Y %s %n" "$f"; done | sort -rn',
+    code, out = ssh_text(server, ["sh", "-c", DUMP_LIST_SH,
                                   "sh", server["crash_dir"]], timeout=40)
     if code != 0:
         raise ApiError(502, "vmcore 목록을 읽지 못했습니다: %s" % out.strip()[-300:])
