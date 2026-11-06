@@ -241,7 +241,9 @@ convert_flat_dump() {
             continue
         fi
         out="$dir/vmcore"
-        [ -d "$dir" ] && [ -w "$dir" ] || continue
+        if [ ! -d "$dir" ] || [ ! -w "$dir" ]; then
+            continue
+        fi
         free=$(free_bytes "$dir")
         if [ -z "$free" ] || [ "$free" -le $((size + 67108864)) ]; then
             echo "공간이 모자라 여기에는 변환하지 않습니다: $dir (남은 공간 $((${free:-0} / 1048576))MB)" >&2
