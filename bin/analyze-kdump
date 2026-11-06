@@ -272,6 +272,361 @@ print_tainted_tasks() {
     ' "$all"
 }
 
+# ---- 아키텍처 확인
+
+normalize_arch() {
+    case "$1" in
+        x86_64|amd64) echo x86_64 ;;
+        aarch64|arm64) echo aarch64 ;;
+        i?86) echo i386 ;;
+        ppc64|ppc64le) echo ppc64 ;;
+        s390x|riscv64) echo "$1" ;;
+        *) echo "" ;;
+    esac
+}
+
+# ELF(vmlinux, ELF 형식 vmcore)는 e_machine으로, kdump 압축 형식(makedumpfile)은 헤더의 utsname.machine으로 판단합니다.
+file_arch() {
+    local file="$1" magic machine
+
+    magic=$(dd if="$file" bs=8 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n') || true
+    case "$magic" in
+        7f454c46*)
+            case "$(od -An -tu2 -j18 -N2 "$file" 2>/dev/null | tr -d ' ')" in
+                62) echo x86_64 ;;
+                183) echo aarch64 ;;
+                3) echo i386 ;;
+                21) echo ppc64 ;;
+                22) echo s390x ;;
+                243) echo riscv64 ;;
+            esac
+            ;;
+        4b44554d50202020)
+            # struct disk_dump_header: signature[8], header_version(int), new_utsname(65바이트 x 6, machine은 5번째)
+            machine=$(dd if="$file" bs=1 skip=272 count=65 2>/dev/null | tr -d '\0') || true
+            normalize_arch "$machine"
+            ;;
+    esac
+}
+
+# crash는 자기와 같은 아키텍처의 덤프만 읽고, vmlinux도 덤프와 같은 아키텍처여야 합니다.
+# 어긋나면 crash가 알아보기 어려운 오류로 끝나므로 미리 확인해 원인을 알려 줍니다.
+check_arch() {
+    VMCORE_ARCH=$(file_arch "$VMCORE")
+    VMLINUX_ARCH=$(file_arch "$VMLINUX")
+    HOST_ARCH=$(normalize_arch "$(uname -m)")
+    is_enabled "${REPORT_ARCH_CHECK:-1}" || return 0
+    if [ -n "$VMCORE_ARCH" ] && [ -n "$VMLINUX_ARCH" ] && [ "$VMCORE_ARCH" != "$VMLINUX_ARCH" ]; then
+        echo "vmcore와 vmlinux의 아키텍처가 다릅니다: vmcore $VMCORE_ARCH, vmlinux $VMLINUX_ARCH" >&2
+        echo "덤프를 만든 커널과 같은 아키텍처의 디버그 커널(vmlinux)이 필요합니다." >&2
+        exit 1
+    fi
+    if [ -n "$VMCORE_ARCH" ] && [ -n "$HOST_ARCH" ] && [ "$VMCORE_ARCH" != "$HOST_ARCH" ]; then
+        echo "이 서버($HOST_ARCH)와 덤프($VMCORE_ARCH)의 아키텍처가 다릅니다." >&2
+        echo "crash는 보통 자기와 같은 아키텍처의 덤프만 읽습니다. $VMCORE_ARCH 서버에서 분석해 주세요." >&2
+        echo "(확인을 건너뛰려면 REPORT_ARCH_CHECK=0)" >&2
+        exit 1
+    fi
+}
+
+arch_summary() {
+    printf '%s (vmcore %s, vmlinux %s, 이 서버 %s)' "${VMCORE_ARCH:-${HOST_ARCH:-unknown}}" \
+        "${VMCORE_ARCH:-확인 불가}" "${VMLINUX_ARCH:-확인 불가}" "${HOST_ARCH:-확인 불가}"
+}
+
+# ---- 장애 유형 판정
+
+# 덤프와 함께 저장된 커널 로그를 찾습니다. 없으면 makedumpfile로 vmcore에서 꺼냅니다(vmlinux 불필요, 빠름).
+find_dmesg_file() {
+    local dir base
+
+    dir=$(dirname "$VMCORE")
+    base=$(basename "$VMCORE")
+    if [ -s "$dir/vmcore-dmesg.txt" ]; then
+        printf '%s' "$dir/vmcore-dmesg.txt"
+        return 0
+    fi
+    case "$base" in
+        dump.*)
+            if [ -s "$dir/dmesg.${base#dump.}" ]; then
+                printf '%s' "$dir/dmesg.${base#dump.}"
+                return 0
+            fi
+            ;;
+    esac
+    if command -v makedumpfile >/dev/null 2>&1 \
+        && makedumpfile --dump-dmesg "$VMCORE" "$WORK_DIR/dmesg.txt" >/dev/null 2>&1 \
+        && [ -s "$WORK_DIR/dmesg.txt" ]; then
+        printf '%s' "$WORK_DIR/dmesg.txt"
+        return 0
+    fi
+    return 1
+}
+
+# 리포트·JSON에 남길 커널 로그 경로. makedumpfile로 꺼낸 임시 파일은 곧 지워지므로 남기지 않습니다.
+dmesg_source_path() {
+    case "$DMESG_FILE" in
+        ""|"$WORK_DIR"/*) ;;
+        *) printf '%s' "$DMESG_FILE" ;;
+    esac
+}
+
+# 로그 한 줄을 근거로 남길 때 타임스탬프를 떼고 길이를 줄입니다.
+# oops는 첫 번째([#1])가 원인이므로 처음 줄을, 나머지(hung task, lockup, OOM)는 패닉 직전의 마지막 줄을 씁니다.
+evidence_line() {
+    local pick="${2:-first}"
+    grep -E "$1" "$DMESG_FILE" 2>/dev/null \
+        | { if [ "$pick" = last ]; then tail -n 1; else head -n 1; fi; } \
+        | sed -E -e 's/^\[ *[0-9.]+\] //' -e 's/^\[ *[CT][0-9]+\] //' -e 's/[[:space:]]*$//' | cut -c1-200 || true
+}
+
+OOPS_RE='kernel BUG at|NULL pointer dereference|unable to handle|general protection fault|stack-protector|Oops:'
+
+set_crash_type() {
+    CRASH_TYPE="$1"
+    CRASH_TYPE_LABEL="$2"
+    CRASH_EVIDENCE=$(evidence_line "$3" "${4:-last}")
+    [ -n "$CRASH_EVIDENCE" ] || CRASH_EVIDENCE=$(evidence_line 'Kernel panic - not syncing')
+}
+
+# 커널 로그로 장애 유형을 고릅니다. 패닉 메시지를 먼저 보고, 없으면 대표 경고 문구로 판단합니다.
+# 결과: CRASH_TYPE(키), CRASH_TYPE_LABEL, CRASH_EVIDENCE, CRASH_RIP(oops일 때 문제 명령 위치), *_SEEN(함께 보이는 증상)
+classify_crash() {
+    local panic
+
+    CRASH_TYPE=unknown
+    CRASH_TYPE_LABEL="판단 불가"
+    CRASH_EVIDENCE=""
+    CRASH_RIP=""
+    HUNG_SEEN=0
+    LOCKUP_SEEN=0
+    if [ -z "$DMESG_FILE" ]; then
+        CRASH_TYPE_LABEL="판단 불가 (커널 로그를 찾지 못함)"
+        return 0
+    fi
+    grep -q 'blocked for more than' "$DMESG_FILE" && HUNG_SEEN=1
+    grep -qE 'soft lockup|hard LOCKUP|rcu.*detected stall|self-detected stall' "$DMESG_FILE" && LOCKUP_SEEN=1
+
+    panic=$(grep -m1 'Kernel panic - not syncing' "$DMESG_FILE" || true)
+    case "$panic" in
+        *hung_task*)
+            set_crash_type hung_task "hung task (D 상태로 오래 멈춘 태스크)" 'blocked for more than' ;;
+        *softlockup*|*"soft lockup"*)
+            set_crash_type soft_lockup "soft lockup (CPU가 커널 안에서 오래 멈춤)" 'soft lockup' ;;
+        *"hard LOCKUP"*|*"Hard LOCKUP"*)
+            set_crash_type hard_lockup "hard lockup (인터럽트까지 멈춤)" 'hard LOCKUP' ;;
+        *"RCU Stall"*|*"rcu"*"stall"*)
+            set_crash_type rcu_stall "RCU stall" 'detected stall' ;;
+        *"Out of memory"*|*"out of memory"*|*"deadlocked on memory"*)
+            set_crash_type oom "메모리 부족 (OOM, panic_on_oom)" 'invoked oom-killer|Out of memory: Kill' ;;
+        *sysrq*)
+            set_crash_type sysrq "수동 덤프 (sysrq-trigger)" 'sysrq: Trigger a crash|SysRq : Trigger a crash' ;;
+        *"Machine check"*)
+            set_crash_type mce "하드웨어 오류 (Machine Check)" 'Machine check|Hardware Error' ;;
+        *NMI*)
+            set_crash_type nmi "NMI" 'NMI' ;;
+        *"Fatal exception"*)
+            set_crash_type oops "커널 oops (BUG/잘못된 메모리 접근)" "$OOPS_RE" first ;;
+        "")
+            # 패닉 메시지가 없는 로그(잘린 로그 등)는 대표 문구로 판단합니다.
+            if grep -qE 'sysrq: Trigger a crash|SysRq : Trigger a crash' "$DMESG_FILE"; then
+                set_crash_type sysrq "수동 덤프 (sysrq-trigger)" 'Trigger a crash'
+            elif grep -qE "$OOPS_RE" "$DMESG_FILE"; then
+                set_crash_type oops "커널 oops (BUG/잘못된 메모리 접근)" "$OOPS_RE" first
+            elif grep -q 'soft lockup' "$DMESG_FILE"; then
+                set_crash_type soft_lockup "soft lockup (CPU가 커널 안에서 오래 멈춤)" 'soft lockup'
+            elif grep -q 'hard LOCKUP' "$DMESG_FILE"; then
+                set_crash_type hard_lockup "hard lockup (인터럽트까지 멈춤)" 'hard LOCKUP'
+            elif [ "$HUNG_SEEN" -eq 1 ]; then
+                set_crash_type hung_task "hung task (D 상태로 오래 멈춘 태스크)" 'blocked for more than'
+            elif grep -q 'Out of memory' "$DMESG_FILE"; then
+                set_crash_type oom "메모리 부족 (OOM)" 'Out of memory'
+            fi
+            ;;
+        *)
+            set_crash_type other "기타 패닉" 'Kernel panic - not syncing' ;;
+    esac
+
+    if [ "$CRASH_TYPE" = oops ]; then
+        CRASH_RIP=$(grep -m1 -oE 'RIP: [0-9a-f]{4}:[A-Za-z_][A-Za-z0-9_.]*\+0x[0-9a-f]+' "$DMESG_FILE" \
+            | sed 's/^RIP: [0-9a-f]*://' || true)
+        case "$CRASH_RIP" in
+            *[!A-Za-z0-9_.+x]*) CRASH_RIP="" ;;
+        esac
+    fi
+}
+
+# 장애 유형에 맞춰 기본 명령 뒤에 덧붙이는 crash 명령입니다.
+print_type_commands() {
+    case "$CRASH_TYPE" in
+        hung_task) HUNG_SEEN=1 ;;
+        soft_lockup|hard_lockup|rcu_stall) LOCKUP_SEEN=1 ;;
+    esac
+    if [ "$HUNG_SEEN" -eq 1 ]; then
+        echo "ps -m | grep UN"
+    fi
+    if [ "$LOCKUP_SEEN" -eq 1 ]; then
+        echo "runq -t"
+        echo "irq -s"
+        echo "ps -m | grep RU"
+    fi
+    case "$CRASH_TYPE" in
+        oom)
+            echo "kmem -V"
+            echo "kmem -z"
+            echo "ps -G | sort -n -k8 | tail -30"
+            ;;
+        oops)
+            echo "bt -l"
+            if [ -n "$CRASH_RIP" ]; then
+                echo "dis -rl $CRASH_RIP"
+            fi
+            ;;
+        mce|nmi)
+            echo "mach"
+            ;;
+    esac
+}
+
+# 이미 기본·사용자 명령에 있는 명령은 다시 넣지 않습니다.
+print_type_commands_unique() {
+    local existing cmd
+    existing=$(read_report_commands | sed -e 's/\r$//' -e 's/^[[:space:]]*//')
+    print_type_commands | while IFS= read -r cmd; do
+        printf '%s\n' "$existing" | grep -qxF -- "$cmd" || printf '%s\n' "$cmd"
+    done
+}
+
+# ---- 모듈 심볼
+
+# 커널 로그의 콜스택에 나온 모듈("func+0x1/0x2 [module]")입니다. 이 모듈들만 심볼을 불러오면
+# 전체(mod -S)보다 훨씬 빠르면서 문제 지점의 함수·소스 줄을 볼 수 있습니다.
+trace_modules() {
+    [ -n "$DMESG_FILE" ] || return 0
+    grep -oE '\+0x[0-9a-f]+/0x[0-9a-f]+ \[[A-Za-z0-9_]+\]' "$DMESG_FILE" 2>/dev/null \
+        | sed -e 's/.*\[//' -e 's/\]$//' | sort -u | head -n 20 || true
+}
+
+module_debug_dir() {
+    local dir
+    for dir in "/usr/lib/debug/lib/modules/$KVER" "/usr/lib/debug/modules/$KVER"; do
+        if [ -d "$dir" ]; then
+            printf '%s' "$dir"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# crash 입력 맨 앞에 넣을 모듈 심볼 명령을 만듭니다. REPORT_MODULE_SYMBOLS: auto(기본) | all | off
+print_module_symbol_commands() {
+    local mode="${REPORT_MODULE_SYMBOLS:-auto}" dir name file out="$WORK_DIR/mod-symbols.out"
+
+    MODULE_SYMBOLS_NOTE=""
+    MODULE_SYMBOLS_SKIPPED=""
+    dir=$(module_debug_dir || true)
+    case "$mode" in
+        0|off|no|false)
+            MODULE_SYMBOLS_NOTE="끔 (REPORT_MODULE_SYMBOLS=off)"
+            return 0
+            ;;
+        all)
+            echo "mod -S${dir:+ $dir} > $out"
+            MODULE_SYMBOLS_NOTE="전체 모듈 (mod -S)"
+            return 0
+            ;;
+    esac
+    for name in $(trace_modules); do
+        file=""
+        if [ -n "$dir" ]; then
+            file=$(find "$dir" \( -name "$name.ko*" -o -name "${name//_/-}.ko*" \) -print -quit 2>/dev/null || true)
+        fi
+        if [ -n "$dir" ] && [ -z "$file" ]; then
+            # 외부 모듈처럼 디버그 정보가 없는 모듈은 건너뜁니다.
+            MODULE_SYMBOLS_SKIPPED="${MODULE_SYMBOLS_SKIPPED:+$MODULE_SYMBOLS_SKIPPED, }$name"
+            continue
+        fi
+        echo "mod -s $name${file:+ $file} >> $out"
+    done
+    MODULE_SYMBOLS_NOTE="콜스택에 나온 모듈만"
+}
+
+# 불러온 모듈 이름 목록(mod -s/-S 결과 표에서 오브젝트 파일이 있는 줄)
+loaded_module_names() {
+    [ -s "$WORK_DIR/mod-symbols.out" ] || return 0
+    awk '$NF ~ /\.ko/ && $1 ~ /^[0-9a-f]+$/ { print $2 }' "$WORK_DIR/mod-symbols.out" | sort -u | paste -sd, - || true
+}
+
+# ---- JSON 요약
+
+# 리포트에서 핵심 값만 뽑아 같은 이름의 .json 파일로 남깁니다. 다른 도구가 읽기 위한 것입니다.
+write_report_json() {
+    local json="${REPORT_FILE%.txt}.json"
+
+    is_enabled "${REPORT_JSON:-1}" || return 0
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "python3가 없어 JSON 요약은 만들지 않았습니다." >&2
+        return 0
+    fi
+    REPORT_FILE="$REPORT_FILE" JSON_FILE="$json" CRASH_STATUS="$CRASH_STATUS" \
+    J_VMCORE="$VMCORE" J_KERNEL="$KVER" J_VMLINUX="$VMLINUX" \
+    J_ARCH_VMCORE="${VMCORE_ARCH:-}" J_ARCH_VMLINUX="${VMLINUX_ARCH:-}" J_ARCH_HOST="${HOST_ARCH:-}" \
+    J_TYPE="${CRASH_TYPE:-unknown}" J_TYPE_LABEL="${CRASH_TYPE_LABEL:-}" J_EVIDENCE="${CRASH_EVIDENCE:-}" \
+    J_DMESG="$(dmesg_source_path)" J_MODULES="$(loaded_module_names)" \
+    python3 - <<'PY' || echo "JSON 요약을 만들지 못했습니다." >&2
+import json
+import os
+import re
+
+env = os.environ
+with open(env["REPORT_FILE"], encoding="utf-8", errors="replace") as f:
+    text = f.read()
+
+sections = []
+for match in re.finditer(r"^===== (.+?) =====$", text, re.M):
+    sections.append([match.group(1), match.end()])
+bodies = {}
+for i, (title, start) in enumerate(sections):
+    end = text.rfind("\n=====", 0, sections[i + 1][1]) if i + 1 < len(sections) else len(text)
+    bodies.setdefault(title, text[start:end].strip("\n"))
+
+sys_info = {}
+for line in bodies.get("crash> sys", "").splitlines():
+    key, sep, value = line.partition(":")
+    if sep and key.strip().isupper():
+        sys_info[key.strip()] = value.strip().strip('"')
+
+tainted = []
+for line in bodies.get("taint 모듈 관련 태스크 (foreach bt에서 추림)", "").splitlines():
+    if line.startswith("# taint 모듈:"):
+        tainted = [name.strip() for name in line.split(":", 1)[1].split(",") if name.strip()]
+
+summary = {
+    "report": env["REPORT_FILE"],
+    "vmcore": env["J_VMCORE"],
+    "kernel": env["J_KERNEL"],
+    "vmlinux": env["J_VMLINUX"],
+    "arch": {"vmcore": env["J_ARCH_VMCORE"] or None, "vmlinux": env["J_ARCH_VMLINUX"] or None,
+             "host": env["J_ARCH_HOST"] or None},
+    "crash_type": {"type": env["J_TYPE"], "label": env["J_TYPE_LABEL"], "evidence": env["J_EVIDENCE"] or None},
+    "dmesg_file": env["J_DMESG"] or None,
+    "panic": sys_info.get("PANIC"),
+    "sys": sys_info,
+    "uninterruptible_tasks": bodies.get("crash> foreach UN bt", "").count("PID:"),
+    "tainted_modules": tainted,
+    "module_symbols": [m for m in env["J_MODULES"].split(",") if m],
+    "crash_exit": int(env["CRASH_STATUS"] or 0),
+    "sections": [{"title": t, "lines": len(b.splitlines())} for t, b in bodies.items()],
+}
+with open(env["JSON_FILE"], "w", encoding="utf-8") as f:
+    json.dump(summary, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+PY
+    if [ -s "$json" ]; then
+        echo "json:    $json"
+    fi
+}
+
 read_report_commands() {
     if [ -n "${REPORT_COMMAND_FILE:-}" ]; then
         cat "$REPORT_COMMAND_FILE"
@@ -292,6 +647,8 @@ run_crash_report() {
 
     mkdir -p "$section_dir"
     : > "$input_file"
+    # 모듈 심볼은 다른 명령보다 먼저 불러와야 bt 등에 반영됩니다.
+    print_module_symbol_commands >> "$input_file"
 
     while IFS= read -r cmd || [ -n "$cmd" ]; do
         cmd="${cmd%$'\r'}"
@@ -318,7 +675,7 @@ run_crash_report() {
                 printf '%s > %s\n' "$cmd" "$section_dir/$count.out" >> "$input_file"
                 ;;
         esac
-    done < <(read_report_commands)
+    done < <(read_report_commands; is_enabled "${REPORT_TYPE_COMMANDS:-1}" && print_type_commands_unique)
     if is_enabled "${REPORT_TAINTED_TASKS:-1}"; then
         # 섹션 목록에는 없는 내부 명령입니다. 결과는 아래에서 걸러 한 섹션으로 붙입니다.
         printf 'mod -t > %s\nforeach bt > %s\n' "$WORK_DIR/mod-taint.out" "$WORK_DIR/foreach-bt.out" >> "$input_file"
@@ -694,12 +1051,16 @@ SECTION_POLICY = {
     "taint 모듈 관련 태스크 (foreach bt에서 추림)": (2, "head"),
     "crash> log": (3, "tail"),
     "crash> ps": (1, "head"),
+    "crash> bt -l": (2, "head"),
+    "crash> ps -m | grep UN": (1, "head"),
 }
 
 
 def policy(title):
     if title.startswith("crash 실행 로그"):
         return 1, "tail"
+    if title.startswith("crash> dis -rl"):
+        return 1, "tail"   # 문제 명령은 함수 시작부터 RIP까지 디스어셈블한 끝부분에 있습니다.
     return SECTION_POLICY.get(title, (1, "both"))
 
 
@@ -1267,9 +1628,12 @@ if ! VMLINUX=$(find_vmlinux); then
     exit 1
 fi
 
+check_arch
+
 echo "vmcore:  $VMCORE"
 echo "kernel:  $KVER"
 echo "vmlinux: $VMLINUX"
+echo "arch:    $(arch_summary)"
 echo
 
 if [ "$REPORT_MODE" -eq 1 ]; then
@@ -1284,18 +1648,47 @@ if [ "$REPORT_MODE" -eq 1 ]; then
     RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
     REPORT_FILE="$REPORT_DIR/${REPORT_PREFIX}-${RUN_ID}.txt"
 
+    DMESG_FILE=$(find_dmesg_file || true)
+    classify_crash
+    # 모듈 심볼 안내(MODULE_SYMBOLS_NOTE)를 헤더에 쓰려고 미리 한 번 계산합니다.
+    print_module_symbol_commands > /dev/null
+
     {
         echo "kdump summary report"
         echo "generated: $(date -Is)"
         echo "vmcore:    $VMCORE"
         echo "kernel:    $KVER"
         echo "vmlinux:   $VMLINUX"
+        echo "arch:      $(arch_summary)"
+        echo "type:      $CRASH_TYPE_LABEL [$CRASH_TYPE]"
+        if [ -n "$CRASH_EVIDENCE" ]; then
+            echo "evidence:  $CRASH_EVIDENCE"
+        fi
+        case "$DMESG_FILE" in
+            "") echo "dmesg:     (없음)" ;;
+            "$WORK_DIR"/*) echo "dmesg:     (vmcore에서 makedumpfile로 추출)" ;;
+            *) echo "dmesg:     $DMESG_FILE" ;;
+        esac
     } > "$REPORT_FILE"
+    echo "type:    $CRASH_TYPE_LABEL"
 
     CRASH_STATUS=0
     run_crash_report || CRASH_STATUS=$?
 
+    # 불러온 모듈 심볼은 crash를 실행한 뒤에야 알 수 있어 헤더 대신 리포트 끝에 덧붙입니다.
+    {
+        echo
+        echo "===== 모듈 심볼 ====="
+        echo "방식: $MODULE_SYMBOLS_NOTE"
+        loaded=$(loaded_module_names | sed 's/,/, /g')
+        echo "불러온 모듈: ${loaded:-(없음)}"
+        if [ -n "$MODULE_SYMBOLS_SKIPPED" ]; then
+            echo "디버그 정보가 없어 건너뜀: $MODULE_SYMBOLS_SKIPPED"
+        fi
+    } >> "$REPORT_FILE"
+
     echo "report:  $REPORT_FILE"
+    write_report_json
     if [ "$CRASH_STATUS" -ne 0 ]; then
         echo "crash 실행이 실패했습니다(exit $CRASH_STATUS). 리포트 끝의 'crash 실행 로그'를 확인해 주세요." >&2
         if [ "$CRASH_STATUS" -eq 137 ]; then

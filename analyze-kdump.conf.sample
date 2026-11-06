@@ -58,6 +58,23 @@ ANALYSIS_PREFIX="kdump-analysis"
 # foreach bt 결과에서 골라 "taint 모듈 관련 태스크" 섹션으로 붙입니다. 끄려면 0.
 # REPORT_TAINTED_TASKS=1
 
+# 선택 사항: 커널 로그로 장애 유형(hung task, soft lockup, OOM, oops 등)을 판정해
+# 유형에 맞는 crash 명령(예: OOM이면 kmem -V, oops면 bt -l과 문제 지점 디스어셈블)을 덧붙입니다. 끄려면 0.
+# REPORT_TYPE_COMMANDS=1
+
+# 선택 사항: 모듈 심볼을 불러와 모듈 안의 함수·소스 줄을 보이게 합니다.
+#   auto: 커널 로그 콜스택에 나온 모듈만 (기본, 빠름)
+#   all:  모든 모듈 (mod -S, 덤프에 따라 1~2분 더 걸림)
+#   off:  불러오지 않음
+# REPORT_MODULE_SYMBOLS=auto
+
+# 선택 사항: vmcore, vmlinux, 이 서버의 아키텍처가 맞는지 먼저 확인합니다. 끄려면 0.
+# REPORT_ARCH_CHECK=1
+
+# 선택 사항: 리포트와 같은 이름의 .json 요약(장애 유형, 패닉 메시지, sys 값, 섹션 목록 등)을 남깁니다.
+# python3가 필요합니다. 끄려면 0.
+# REPORT_JSON=1
+
 # 선택 사항: 별도 파일로 관리하는 crash 명령 목록.
 # 설정하면 REPORT_COMMANDS보다 우선합니다.
 # REPORT_COMMAND_FILE="/opt/kdump-tools/report-commands.txt"
