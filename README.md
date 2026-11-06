@@ -1,21 +1,78 @@
 # kdump-tools
 
-`kdump-tools`는 Linux `vmcore` 분석을 조금 더 빠르게 시작하기 위한 보조 도구 모음입니다.
+Linux 커널 패닉 덤프(`vmcore`)를 빠르게 분석하기 위한 도구 모음입니다. 덤프의 커널 버전에 맞는 `vmlinux`를 찾아 `crash`를 실행하고, 장애 분석에 필요한 정보를 리포트 한 장으로 모은 뒤, 원하면 LLM으로 원인과 조치까지 정리합니다.
 
-현재는 `vmcore`에서 커널 버전을 확인한 뒤, 해당 버전에 맞는 `vmlinux` 디버그 심볼을 찾아 `crash`를 실행하는 `analyze-kdump` 스크립트를 제공합니다.
+- **`analyze-kdump`**: 서버에서 실행하는 분석 명령. 리포트 생성과 LLM 분석을 합니다.
+- **`analyze-kdump-ui`**: 서버 터미널에서 쓰는 메뉴 화면. 장애 현장에서 SSH로 접속해 씁니다.
+- **웹 UI** (`webui/kdump-webui.py`): 노트북 브라우저에서 여러 서버를 SSH로 관리하고 분석합니다.
+
+RHEL·Rocky·Alma 계열과 Ubuntu·Debian을 지원합니다. Debian·Ubuntu의 `kdump-tools` 패키지(덤프를 만드는 쪽)와는 별개의 프로젝트이고, 그 패키지가 만든 덤프도 분석합니다.
+
+[변경 기록](CHANGELOG.md) · [릴리스](https://github.com/621dev/kdump-tools/releases) · [라이선스 (MIT)](LICENSE)
+
+## 5분 시작 가이드
+
+덤프가 이미 `/var/crash`에 있다고 가정합니다. kdump가 아직 설정되지 않았다면 웹 UI의 **서버 준비**로 점검·설치하거나 [요구 사항](#요구-사항)을 먼저 봅니다.
+
+### A. 서버에서 바로 분석하기
+
+장애 서버나 분석 서버에 SSH로 접속해서 실행합니다.
+
+```bash
+# 1. 설치 (/opt/kdump-tools에 복사하고 명령을 /usr/sbin에 등록)
+git clone https://github.com/621dev/kdump-tools.git
+sudo ./kdump-tools/install.sh
+
+# 2. 가장 최근 덤프로 리포트 만들기
+sudo analyze-kdump -r /var/crash
+```
+
+- 덤프 커널의 `vmlinux`(디버그 커널)가 없으면 설치 명령을 알려 주고 멈춥니다. 안내대로 설치(RHEL 계열 `dnf debuginfo-install -y kernel-<커널 버전>`, Ubuntu `apt-get install -y linux-image-<커널 버전>-dbgsym`)한 뒤 다시 실행합니다.
+- 끝나면 `report:` 줄에 리포트 경로(`/opt/kdump-tools/logs/kdump-report-*.txt`)가 나옵니다. 리포트 맨 위의 `type:`·`evidence:` 줄에서 장애 유형과 근거를 먼저 봅니다.
+- 메뉴로 하려면 `sudo analyze-kdump-ui`를 실행해 **vmcore 분석**을 고릅니다.
+- LLM 분석까지 하려면 [LLM 분석](#설정-파일) 설정 뒤 `-llm`을 붙입니다.
+
+### B. 노트북에서 웹 UI로 분석하기
+
+여러 서버를 노트북 한 곳에서 관리할 때 씁니다. 서버에 kdump-tools를 설치하지 않아도 노트북에서 스크립트를 보내 분석합니다(무설치 실행). 서버에는 crash와 디버그 커널만 있으면 되고, 이것도 웹 UI가 설치해 줍니다.
+
+1. 준비: 노트북에 Python 3.8 이상과 `ssh`, 서버에는 SSH 키로 접속하는 계정과 비밀번호 없는 sudo가 필요합니다.
+2. 실행:
+   ```bash
+   git clone https://github.com/621dev/kdump-tools.git
+   python kdump-tools/webui/kdump-webui.py
+   ```
+   브라우저가 열립니다. Windows에서는 `kdump-tools\windows\install-shortcut.cmd`를 한 번 실행하면 바탕화면 아이콘으로 띄울 수 있습니다.
+3. 왼쪽 서버 목록의 **+ 추가**에 이름, `user@host`, SSH 키 파일을 넣고 저장한 뒤 **연결 테스트**를 누릅니다.
+4. 서버 화면의 **서버 준비** 탭에서 빠진 항목(crash, 디버그 커널, kdump 설정 등)을 확인하고 설치합니다.
+5. vmcore 목록에서 **리포트** 또는 **리포트 + LLM 분석**을 누릅니다. 진행 바가 끝나면 결과가 열립니다. LLM은 **설정**에서 API 키나 Claude Code·Codex 구독을 연결합니다.
+
+여러 운영 서버의 덤프를 한 곳에 모으려면 [중앙 분석 서버 구성](#중앙-분석-서버-구성-kdump-원격-전송)을 봅니다.
+
+## 목차
+
+- [주요 기능](#주요-기능)
+- [디렉터리 구조](#디렉터리-구조) · [요구 사항](#요구-사항) · [설치](#설치) · [버전 확인과 업데이트](#버전-확인과-업데이트)
+- [사용법](#사용법) (리포트, 종료 코드, 장애 유형 판정, LLM 입력 축소와 마스킹)
+- [설정 파일](#설정-파일) (LLM provider, 구독 계정 사용)
+- [vmlinux 추가 방법](#vmlinux-추가-방법)
+- [웹 UI](#웹-ui) · [터미널 메뉴 UI](#터미널-메뉴-ui) (상황별 사용 방식, 중앙 분석 서버 구성)
+- [테스트 VM에서 검증하기](#테스트-vm에서-검증하기) · [로그 디렉터리](#로그-디렉터리) · [라이선스](#라이선스)
 
 ## 주요 기능
 
-- `vmcore` 파일의 커널 버전 자동 확인
-- 커널 버전에 맞는 `vmlinux` 경로 자동 매칭 (`VMLINUX_BASE`, 설치된 debuginfo 경로 순으로 탐색)
-- 매칭되는 `vmlinux`가 없을 때 필요한 설치 명령 안내 (RHEL 계열, Debian/Ubuntu)
-- `crash <vmlinux> <vmcore>` 실행 자동화
-- `/var/crash` 같은 덤프 디렉터리를 지정하면 가장 최근 `vmcore` 자동 선택 (RHEL·SUSE의 `<디렉터리>/vmcore`, Ubuntu·Debian `kdump-tools`의 `<YYYYMMDDHHMM>/dump.<YYYYMMDDHHMM>` 모두 인식)
-- `-report` 옵션으로 셸 진입 없이 명령별 섹션으로 구분된 요약 리포트 파일 생성
-- 선택적으로 LLM을 연동해 원인분석과 조치 권고 추가 (민감정보 마스킹, 섹션 단위 입력 축소)
-- 자동화에서 결과를 판별할 수 있는 종료 코드
-- 터미널 메뉴 UI(`analyze-kdump-ui`): vmcore 선택, 분석, 결과 보기, 접속 서버 관리, 설정을 메뉴로 처리하고 원격 서버도 SSH로 분석
-- 웹 UI(`webui/kdump-webui.py`): 노트북(Windows·macOS·Linux)의 브라우저에서 서버 관리, 분석 실행(진행 바), LLM 분석 결과(표·제목 포함) 보기, 리포트 검색
+**리포트 (`analyze-kdump`)**
+- 덤프의 커널 버전을 읽어 맞는 `vmlinux`를 찾고(`VMLINUX_BASE`, debuginfo·dbgsym 경로 순), 없으면 설치 명령을 안내합니다.
+- `/var/crash` 같은 디렉터리를 주면 가장 최근 덤프를 고릅니다. RHEL 계열 `<디렉터리>/vmcore`, Ubuntu·Debian `<YYYYMMDDHHMM>/dump.<시각>`, SSH로 받은 `vmcore.flat`(자동 변환)을 모두 인식합니다.
+- `-report`는 crash 셸에 들어가지 않고 명령별 섹션으로 나눈 리포트를 만듭니다: sys, bt, `bt -a`, D 상태 태스크, ps, 커널 로그, 메모리, 모듈, runq, 디스크, 마운트, 열린 파일, taint 모듈 관련 태스크.
+- 커널 로그로 장애 유형(hung task, lockup, OOM, oops 등)을 판정하고 유형에 맞는 crash 명령을 덧붙입니다. 콜스택에 나온 모듈의 심볼을 불러오고, 아키텍처를 확인하고, JSON 요약도 남깁니다.
+- LLM(OpenAI 호환 API, Gemini, Claude, Claude Code·Codex 구독)으로 원인, 근거, 영향, 조치를 정리합니다. 보내기 전에 민감정보를 마스킹하고 섹션 단위로 줄입니다.
+- 자동화에서 결과를 판별할 수 있는 종료 코드를 돌려줍니다.
+
+**화면**
+- 터미널 메뉴(`analyze-kdump-ui`): vmcore 선택, 분석, 결과 보기, 원격 서버 관리, 설정, 업데이트를 메뉴로 합니다.
+- 웹 UI: 노트북(Windows·macOS·Linux) 브라우저에서 서버 관리, 서버 준비(kdump 환경 점검·설치), 여러 덤프 일괄 분석과 작업 대기열, 진행 바, 분석 기록과 판정 요약, 리포트 검색, 서버별 설치·업그레이드를 합니다.
+- 업데이트는 기본으로 GitHub 최신 릴리스를 받습니다(브랜치 최신 커밋 선택 가능).
 
 ## 디렉터리 구조
 
@@ -24,6 +81,8 @@
 ```text
 /opt/kdump-tools/
 ├── README.md
+├── CHANGELOG.md               # 버전별 변경 기록
+├── LICENSE                    # MIT 라이선스
 ├── VERSION                    # 버전 번호
 ├── .install-info              # 설치한 버전·커밋·시각 (install.sh가 기록)
 ├── install.sh                 # 설치·업데이트·명령 등록 (/usr/sbin)
@@ -175,7 +234,7 @@ LLM_API_KEY="<api-key>" /opt/kdump-tools/bin/analyze-kdump -llm /path/to/vmcore
 /opt/kdump-tools/bin/analyze-kdump -config /path/to/analyze-kdump.conf -report /path/to/vmcore
 ```
 
-vmcore 파일 대신 디렉터리를 지정할 수도 있습니다. 디렉터리 안에 `vmcore`가 있으면 그 파일을, 없으면 하위 디렉터리의 `*/vmcore` 중 가장 최근 파일을 사용합니다.
+vmcore 파일 대신 디렉터리를 지정할 수도 있습니다. 디렉터리 안에 덤프(`vmcore`, `vmcore.flat`, `dump.<시각>` 순)가 있으면 그 파일을, 없으면 하위 디렉터리 중 가장 최근 덤프를 사용합니다. `vmcore.flat`처럼 SSH로 받은 flattened 형식은 자동으로 변환합니다([중앙 분석 서버 구성](#중앙-분석-서버-구성-kdump-원격-전송)).
 
 ```bash
 /opt/kdump-tools/bin/analyze-kdump -report /var/crash
@@ -697,3 +756,7 @@ sync; sudo insmod kdump_fault.ko type=hungtask quiet=1
 ## 로그 디렉터리
 
 `logs/`는 분석 결과나 작업 기록을 남기기 위한 디렉터리입니다. `-report` 옵션으로 생성되는 요약 리포트가 이 디렉터리에 저장됩니다.
+
+## 라이선스
+
+[MIT 라이선스](LICENSE)로 배포합니다. 버전별 변경 내용은 [CHANGELOG.md](CHANGELOG.md)에 있습니다.

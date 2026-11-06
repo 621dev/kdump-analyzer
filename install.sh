@@ -80,7 +80,7 @@ install_files() {
         echo "파일 복사: $SRC_DIR -> $PREFIX"
         mkdir -p "$PREFIX/bin"
         install -m 755 "$SRC_DIR"/bin/* "$PREFIX/bin/"
-        for f in README.md VERSION analyze-kdump.conf.sample servers.conf.sample; do
+        for f in README.md CHANGELOG.md LICENSE VERSION analyze-kdump.conf.sample servers.conf.sample; do
             if [ -f "$SRC_DIR/$f" ]; then
                 install -m 644 "$SRC_DIR/$f" "$PREFIX/$f"
             fi
