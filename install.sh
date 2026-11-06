@@ -1,5 +1,5 @@
 #!/bin/bash
-# kdump-tools 설치 스크립트
+# kdump-analyzer 설치 스크립트
 #
 # 파일을 설치 디렉터리(기본 /opt/kdump-tools)에 복사하고, bin/의 명령을 PATH에 등록합니다.
 #   sudo ./install.sh                # 설치 또는 업데이트

@@ -75,7 +75,7 @@ class FitTest(unittest.TestCase):
 
 class SettingsTest(unittest.TestCase):
     def test_update_source_defaults(self):
-        self.assertEqual(webui.update_source({}), ("621dev/kdump-tools", "release", "main"))
+        self.assertEqual(webui.update_source({}), ("621dev/kdump-analyzer", "release", "main"))
 
     def test_update_source_invalid_channel_falls_back(self):
         repo, channel, branch = webui.update_source({"update_channel": "nightly", "update_branch": "dev"})
@@ -93,7 +93,7 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(webui.human_duration(90), "90초")
 
     def test_repo_and_branch_patterns(self):
-        self.assertTrue(webui.REPO_RE.match("621dev/kdump-tools"))
+        self.assertTrue(webui.REPO_RE.match("621dev/kdump-analyzer"))
         self.assertFalse(webui.REPO_RE.match("../etc/passwd"))
         self.assertFalse(webui.REPO_RE.match("a/b; rm -rf /"))
         self.assertTrue(webui.BRANCH_RE.match("v1.18.2"))
@@ -144,20 +144,20 @@ class FetchLatestTest(unittest.TestCase):
             "/commits/v1.18.2": self.SHA.encode(),
             "/VERSION": b"1.18.2\n",
         })
-        r = webui.fetch_latest("621dev/kdump-tools", "release", "main")
+        r = webui.fetch_latest("621dev/kdump-analyzer", "release", "main")
         self.assertTrue(r["ok"], r)
         self.assertEqual((r["tag"], r["ref_kind"], r["version"], r["commit"]), ("v1.18.2", "tags", "1.18.2", self.SHA))
 
     def test_branch_channel(self):
         self.fake({"/commits/main": self.SHA.encode(), "/VERSION": b"1.19.0\n"})
-        r = webui.fetch_latest("621dev/kdump-tools", "branch", "main")
+        r = webui.fetch_latest("621dev/kdump-analyzer", "branch", "main")
         self.assertTrue(r["ok"], r)
         self.assertEqual((r["ref"], r["ref_kind"], r["version"]), ("main", "heads", "1.19.0"))
         self.assertFalse(any("releases" in u for u in self.calls))
 
     def test_no_release_message(self):
         self.fake({"/releases/latest": urllib.error.HTTPError("u", 404, "Not Found", {}, None)})
-        r = webui.fetch_latest("621dev/kdump-tools", "release", "main")
+        r = webui.fetch_latest("621dev/kdump-analyzer", "release", "main")
         self.assertFalse(r["ok"])
         self.assertIn("릴리스가 없습니다", r["error"])
 

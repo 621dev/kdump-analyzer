@@ -1,4 +1,4 @@
-# kdump-tools bash 자동완성 (install.sh가 /etc/bash_completion.d/kdump-tools로 설치)
+# kdump-analyzer bash 자동완성 (install.sh가 /etc/bash_completion.d/kdump-tools로 설치)
 
 _analyze_kdump() {
     local cur prev

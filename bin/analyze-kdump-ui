@@ -10,14 +10,20 @@
 #     어느 방식이든 LLM 분석은 이 서버의 설정으로 실행합니다(API 키/구독 로그인을 원격에 둘 필요 없음).
 #
 # 환경변수:
-#   ANALYZE_KDUMP_CONF     설정 파일 (기본 /opt/kdump-tools/analyze-kdump.conf)
-#   ANALYZE_KDUMP_SERVERS  접속 서버 목록 파일 (기본 /opt/kdump-tools/servers.conf)
+#   ANALYZE_KDUMP_CONF     설정 파일 (기본 <설치 위치>/analyze-kdump.conf)
+#   ANALYZE_KDUMP_SERVERS  접속 서버 목록 파일 (기본 <설치 위치>/servers.conf)
 #   ANALYZE_KDUMP_BIN      analyze-kdump 경로 (기본: 이 스크립트와 같은 디렉터리)
+# 설치 위치는 install.sh로 설치한 위치(.install-info가 있는 곳)이고, 아니면 /opt/kdump-tools입니다.
 
 SCRIPT_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 TOOL="${ANALYZE_KDUMP_BIN:-$SCRIPT_DIR/analyze-kdump}"
-CONFIG_FILE="${ANALYZE_KDUMP_CONF:-/opt/kdump-tools/analyze-kdump.conf}"
-SERVERS_FILE="${ANALYZE_KDUMP_SERVERS:-/opt/kdump-tools/servers.conf}"
+if [ -f "$SCRIPT_DIR/../.install-info" ]; then
+    TOOL_BASE=$(cd "$SCRIPT_DIR/.." && pwd)
+else
+    TOOL_BASE=/opt/kdump-tools
+fi
+CONFIG_FILE="${ANALYZE_KDUMP_CONF:-$TOOL_BASE/analyze-kdump.conf}"
+SERVERS_FILE="${ANALYZE_KDUMP_SERVERS:-$TOOL_BASE/servers.conf}"
 WHIPTAIL="${WHIPTAIL:-whiptail}"
 PAGER_CMD="${PAGER_CMD:-less}"
 TITLE="analyze-kdump"
@@ -204,7 +210,7 @@ conf_set() {
 }
 
 report_dir() {
-    conf_get REPORT_DIR /opt/kdump-tools/logs
+    conf_get REPORT_DIR "$TOOL_BASE/logs"
 }
 
 # ---------------------------------------------------------------- 접속 서버
@@ -939,15 +945,15 @@ SETTINGS=(
 
 setting_default() {
     case "$1" in
-        VMLINUX_BASE) echo /opt/kdump-tools/vmlinux ;;
-        REPORT_DIR) echo /opt/kdump-tools/logs ;;
+        VMLINUX_BASE) echo "$TOOL_BASE/vmlinux" ;;
+        REPORT_DIR) echo "$TOOL_BASE/logs" ;;
         LLM_PROVIDER) echo openai ;;
         LLM_MASK_SENSITIVE) echo 1 ;;
         LLM_MAX_REPORT_CHARS) echo 60000 ;;
         LLM_MAX_TOKENS) echo 8192 ;;
         LLM_TIMEOUT) echo 120 ;;
         KDUMP_TOOLS_CHANNEL) echo release ;;
-        KDUMP_TOOLS_REPO) echo 621dev/kdump-tools ;;
+        KDUMP_TOOLS_REPO) echo 621dev/kdump-analyzer ;;
         KDUMP_TOOLS_BRANCH) echo main ;;
         KDUMP_TOOLS_UPDATE_CHECK) echo 1 ;;
     esac
@@ -1917,7 +1923,7 @@ update_from_github() {
 
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/kdump-tools-update.XXXXXX") || return
     clear
-    echo "===== kdump-tools 업데이트 ====="
+    echo "===== kdump-analyzer 업데이트 ====="
     echo "[1/2] 코드 받는 중: $repo ($(update_target_text))"
     if command -v git >/dev/null 2>&1; then
         git -c advice.detachedHead=false clone -q --depth 1 --branch "$ref" "https://github.com/$repo.git" "$tmp/src"
@@ -1952,9 +1958,9 @@ update_from_dir() {
     local dir version
 
     can_update || return
-    dir=$(ui_input "업데이트할 kdump-tools 디렉터리 (install.sh가 있는 위치):" "/tmp/kdump-tools") || return
+    dir=$(ui_input "업데이트할 kdump-analyzer 디렉터리 (install.sh가 있는 위치):" "/tmp/kdump-analyzer") || return
     if [ ! -f "$dir/install.sh" ] || [ ! -f "$dir/bin/analyze-kdump" ]; then
-        ui_msg "kdump-tools 디렉터리가 아닙니다: $dir\n(install.sh와 bin/analyze-kdump가 있어야 합니다)"
+        ui_msg "kdump-analyzer 디렉터리가 아닙니다: $dir\n(install.sh와 bin/analyze-kdump가 있어야 합니다)"
         return
     fi
     dir=$(cd "$dir" && pwd)
@@ -1962,7 +1968,7 @@ update_from_dir() {
     ui_yesno "다음 디렉터리에서 설치할까요?\n\n$dir\n현재: $(version_text "$(current_version)") → 설치: $(version_text "$version")\n\n설정, 접속 서버 목록, 로그, vmlinux는 유지됩니다." || return
 
     clear
-    echo "===== kdump-tools 업데이트 ====="
+    echo "===== kdump-analyzer 업데이트 ====="
     echo "설치 중: $dir ($(version_text "$version"))"
     echo
     run_install "$dir" "" "$dir"
@@ -2081,7 +2087,7 @@ menu_kdump_guide() {
 분석
   메뉴의 '접속 서버 선택'에서 '이 서버'를 고르고 'vmcore 분석'을 실행합니다.
   운영 서버 커널 버전의 vmlinux가 이 서버에 필요합니다.
-  ($(conf_get VMLINUX_BASE /opt/kdump-tools/vmlinux)/<커널 버전>/vmlinux 또는 debuginfo 설치)
+  ($(conf_get VMLINUX_BASE "$TOOL_BASE/vmlinux")/<커널 버전>/vmlinux 또는 debuginfo 설치)
 EOF
     view_file "$guide"
     rm -f "$guide"

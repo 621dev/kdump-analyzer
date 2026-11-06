@@ -2,6 +2,16 @@
 
 버전 번호는 [유의적 버전](https://semver.org/lang/ko/)을 따릅니다. 기능이 추가되면 가운데 자리, 고친 것만 있으면 끝자리를 올립니다.
 GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리스)으로 받을 수 있습니다.
+1.18.3까지는 프로젝트 이름이 `kdump-tools`였습니다. 아래 기록의 링크는 GitHub이 새 주소로 연결합니다.
+
+## [1.19.0] - 2026-11-06
+
+### 변경
+- 프로젝트 이름을 `kdump-tools`에서 `kdump-analyzer`로 바꿨습니다. Debian·Ubuntu의 `kdump-tools` 패키지(덤프를 만드는 쪽)와 헷갈리지 않게 하려는 것입니다.
+  - GitHub 저장소: `621dev/kdump-analyzer` (예전 주소는 GitHub이 자동으로 연결)
+  - 업데이트 기본 저장소, 웹 UI·메뉴 화면의 이름, Windows 바로가기 이름(`kdump-analyzer 웹 UI`, 예전 이름 바로가기는 새로 만들 때 지움)
+  - 그대로 두는 것: 기본 설치 위치 `/opt/kdump-tools`, 웹 UI 데이터 폴더 `~/.kdump-tools-web`, 설정 이름 `KDUMP_TOOLS_*`, 명령 이름 `analyze-kdump`·`analyze-kdump-ui`. 이미 설치된 서버는 그대로 업데이트됩니다.
+- 기본 경로가 설치 위치를 따라갑니다. `install.sh --prefix`로 다른 곳에 설치하면 설정 파일, 서버 목록, vmlinux, 로그의 기본 위치도 그 아래가 됩니다. 설치 정보(`.install-info`)가 없는 곳(무설치 실행, 저장소에서 바로 실행)에서는 예전처럼 `/opt/kdump-tools`를 씁니다.
 
 ## [1.18.3] - 2026-11-06
 
@@ -155,7 +165,8 @@ GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리�
 - 설치 스크립트(명령 등록)와 상황별 원격 분석 방식 (#3)
 - 분석 진행 표시와 메뉴의 이전 화면 이동 (#4)
 
-[1.18.3]: https://github.com/621dev/kdump-tools/compare/v1.18.2...main
+[1.19.0]: https://github.com/621dev/kdump-analyzer/compare/v1.18.3...main
+[1.18.3]: https://github.com/621dev/kdump-tools/compare/v1.18.2...v1.18.3
 [1.18.2]: https://github.com/621dev/kdump-tools/compare/v1.18.0...v1.18.2
 [1.18.1]: https://github.com/621dev/kdump-tools/pull/27
 [1.18.0]: https://github.com/621dev/kdump-tools/compare/v1.17.0...v1.18.0

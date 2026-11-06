@@ -12,12 +12,12 @@
 #
 # 환경변수:
 #   TOOL_DIR    analyze-kdump 저장소 위치 (기본 /opt/kdump-tools-test, 없으면 clone)
-#   TOOL_REPO   clone할 저장소 (기본 https://github.com/621dev/kdump-tools.git)
+#   TOOL_REPO   clone할 저장소 (기본 https://github.com/621dev/kdump-analyzer.git)
 #   TOOL_BRANCH clone할 브랜치 (기본 fix/robustness-and-llm)
 set -e
 
 TOOL_DIR="${TOOL_DIR:-/opt/kdump-tools-test}"
-TOOL_REPO="${TOOL_REPO:-https://github.com/621dev/kdump-tools.git}"
+TOOL_REPO="${TOOL_REPO:-https://github.com/621dev/kdump-analyzer.git}"
 TOOL_BRANCH="${TOOL_BRANCH:-fix/robustness-and-llm}"
 
 die() {

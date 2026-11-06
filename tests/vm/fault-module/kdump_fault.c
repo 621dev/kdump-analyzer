@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * kdump_fault: kdump-tools 검증용 테스트 모듈. 테스트 VM에서만 사용합니다.
+ * kdump_fault: kdump-analyzer 검증용 테스트 모듈. 테스트 VM에서만 사용합니다.
  *   insmod kdump_fault.ko type=<noop|null|bug|gpf|listcorrupt|softlockup|hungtask>
  */
 #include <linux/module.h>
@@ -118,4 +118,4 @@ static void __exit kf_exit(void)
 module_init(kf_init);
 module_exit(kf_exit);
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("kdump-tools fault injection test module");
+MODULE_DESCRIPTION("kdump-analyzer fault injection test module");

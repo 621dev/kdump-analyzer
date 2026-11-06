@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""kdump-tools 웹 UI
+"""kdump-analyzer 웹 UI
 
 노트북(Windows·macOS·Linux)에서 실행하는 로컬 웹 앱입니다. 브라우저로 조작하고,
 분석할 서버에는 SSH로 접속해 analyze-kdump로 crash 리포트를 만든 뒤, 리포트를 가져와
@@ -77,7 +77,7 @@ DEFAULT_SETTINGS = {
     "cli_path": "", "cli_token_file": "", "cli_args": "",
     "mask": True, "max_report_chars": 60000, "max_tokens": 8192, "timeout": 300,
     "crash_timeout": 30,
-    "update_repo": "621dev/kdump-tools", "update_branch": "main",
+    "update_repo": "621dev/kdump-analyzer", "update_branch": "main",
     # release: GitHub의 최신 릴리스(태그)로 업데이트, branch: update_branch의 최신 커밋으로 업데이트
     "update_channel": "release",
 }
@@ -530,7 +530,7 @@ def git(*args, timeout=30):
 
 
 def local_info():
-    """노트북에서 실행 중인 kdump-tools(웹 UI와 무설치 실행에 쓰는 스크립트)의 버전."""
+    """노트북에서 실행 중인 kdump-analyzer(웹 UI와 무설치 실행에 쓰는 스크립트)의 버전."""
     info = {"version": version_text(), "commit": "", "branch": "", "git": False, "dirty": False}
     code, out = git("rev-parse", "HEAD")
     if code == 0 and re.fullmatch(r"[0-9a-f]{40}", out):
@@ -541,7 +541,7 @@ def local_info():
 
 
 def _http_get(url, accept=None, timeout=8):
-    headers = {"User-Agent": "kdump-tools-webui"}
+    headers = {"User-Agent": "kdump-analyzer-webui"}
     if accept:
         headers["Accept"] = accept
     with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as res:
@@ -1498,7 +1498,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send(403, "invalid token", "text/plain")
 
         if not self._authed():
-            return self._send(403, "<meta charset=utf-8><p>kdump-tools 웹 UI를 시작할 때 출력된 주소(토큰 포함)로 접속해 주세요.</p>",
+            return self._send(403, "<meta charset=utf-8><p>kdump-analyzer 웹 UI를 시작할 때 출력된 주소(토큰 포함)로 접속해 주세요.</p>",
                               "text/html; charset=utf-8")
 
         try:
@@ -1727,7 +1727,7 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="kdump-tools 웹 UI")
+    parser = argparse.ArgumentParser(description="kdump-analyzer 웹 UI")
     parser.add_argument("--port", type=int, default=8730)
     parser.add_argument("--data-dir", default=os.path.join(os.path.expanduser("~"), ".kdump-tools-web"))
     parser.add_argument("--no-browser", action="store_true")
@@ -1764,7 +1764,9 @@ def bind_exact_port(port, wait=20):
 
 
 RUN_INFO = "run.json"
-APP_NAME = "kdump-tools 웹 UI"
+APP_NAME = "kdump-analyzer 웹 UI"
+# 예전 이름으로 만든 바로가기. 새로 만들거나 지울 때 함께 지웁니다.
+LEGACY_APP_NAMES = ("kdump-tools 웹 UI",)
 
 
 def run_info_path(data_dir):
@@ -1876,11 +1878,15 @@ def shortcut_command(args):
     else:
         folders = "@([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))"
     name = APP_NAME + ".lnk"
+    # 예전 이름의 바로가기는 새로 만들 때도 지워서 아이콘이 두 개 생기지 않게 합니다.
+    legacy = ", ".join(powershell_quote(n + ".lnk") for n in LEGACY_APP_NAMES)
+    remove_legacy = ("foreach ($f in %s) { foreach ($n in @(%s)) { $p = Join-Path $f $n; "
+                     "if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p; 'removed: ' + $p } } }; ") % (folders, legacy)
     if args.remove_shortcut:
-        body = "foreach ($f in %s) { $p = Join-Path $f %s; if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p; 'removed: ' + $p } }" % (
+        body = remove_legacy + "foreach ($f in %s) { $p = Join-Path $f %s; if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p; 'removed: ' + $p } }" % (
             folders, powershell_quote(name))
     else:
-        body = ("$sh = New-Object -ComObject WScript.Shell; foreach ($f in %s) { New-Item -ItemType Directory -Force -Path $f | Out-Null; "
+        body = remove_legacy + ("$sh = New-Object -ComObject WScript.Shell; foreach ($f in %s) { New-Item -ItemType Directory -Force -Path $f | Out-Null; "
                 "$p = Join-Path $f %s; $l = $sh.CreateShortcut($p); $l.TargetPath = %s; $l.Arguments = %s; "
                 "$l.WorkingDirectory = %s; $l.IconLocation = %s; $l.Description = %s; $l.WindowStyle = 7; $l.Save(); 'created: ' + $p }") % (
             folders, powershell_quote(name), powershell_quote(pythonw), powershell_quote(arguments), powershell_quote(repo),
@@ -1908,7 +1914,7 @@ def manage_shortcut(args):
 
 
 def print_banner(data_dir, url):
-    print("kdump-tools 웹 UI v%s" % version_text())
+    print("kdump-analyzer 웹 UI v%s" % version_text())
     print("데이터: %s" % data_dir)
     print("접속 주소 (이 주소로만 접속할 수 있습니다):")
     print("  " + url, flush=True)
