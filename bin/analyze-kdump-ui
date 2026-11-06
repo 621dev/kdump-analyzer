@@ -910,8 +910,9 @@ SETTINGS=(
     "LLM_MAX_REPORT_CHARS|LLM 입력 최대 문자 수|number"
     "LLM_MAX_TOKENS|LLM 출력 최대 토큰|number"
     "LLM_TIMEOUT|LLM 호출 제한 시간(초)|number"
+    "KDUMP_TOOLS_CHANNEL|업데이트 기준 (최신 릴리스 / 브랜치 최신 커밋)|channel"
     "KDUMP_TOOLS_REPO|업데이트 저장소 (GitHub owner/repo)|text"
-    "KDUMP_TOOLS_BRANCH|업데이트 브랜치|text"
+    "KDUMP_TOOLS_BRANCH|업데이트 브랜치 (업데이트 기준이 branch일 때)|text"
     "KDUMP_TOOLS_UPDATE_CHECK|메뉴 시작 시 최신 버전 확인 (폐쇄망은 끄기)|bool"
 )
 
@@ -924,6 +925,7 @@ setting_default() {
         LLM_MAX_REPORT_CHARS) echo 60000 ;;
         LLM_MAX_TOKENS) echo 8192 ;;
         LLM_TIMEOUT) echo 120 ;;
+        KDUMP_TOOLS_CHANNEL) echo release ;;
         KDUMP_TOOLS_REPO) echo 621dev/kdump-tools ;;
         KDUMP_TOOLS_BRANCH) echo main ;;
         KDUMP_TOOLS_UPDATE_CHECK) echo 1 ;;
@@ -959,6 +961,13 @@ edit_setting() {
                 esac)" "$([ "$p" = "$current" ] && echo ON || echo OFF)")
             done
             value=$(ui_radio "$desc" "${items[@]}") || return
+            ;;
+        channel)
+            value=$(ui_radio "$desc" \
+                release "최신 릴리스 (검증된 버전, 권장)" "$([ "$current" != branch ] && echo ON || echo OFF)" \
+                branch "브랜치 최신 커밋 (KDUMP_TOOLS_BRANCH, 릴리스 전 변경 포함)" "$([ "$current" = branch ] && echo ON || echo OFF)") || return
+            rm -f "$UPDATE_CACHE" 2>/dev/null
+            LATEST_OK=""
             ;;
         bool)
             if ui_yesno "$desc\n\n현재: $current\n\n켤까요?"; then value=1; else value=0; fi
@@ -1675,18 +1684,59 @@ update_branch() {
     conf_get KDUMP_TOOLS_BRANCH "$(setting_default KDUMP_TOOLS_BRANCH)"
 }
 
-# GitHub에서 최신 커밋과 그 커밋의 VERSION을 읽어 LATEST_COMMIT/LATEST_VERSION을 채우고 캐시에 남깁니다.
+# release: 최신 릴리스 태그, branch: KDUMP_TOOLS_BRANCH의 최신 커밋
+update_channel() {
+    case "$(conf_get KDUMP_TOOLS_CHANNEL "$(setting_default KDUMP_TOOLS_CHANNEL)")" in
+        branch) echo branch ;;
+        *) echo release ;;
+    esac
+}
+
+# 업데이트 대상 설명: "최신 릴리스 v1.16.0" 또는 "main 브랜치"
+update_target_text() {
+    if [ "$(update_channel)" = release ]; then
+        printf '최신 릴리스%s' "${LATEST_REF:+ $LATEST_REF}"
+    else
+        printf '%s 브랜치' "$(update_branch)"
+    fi
+}
+
+# a가 b보다 새 버전이면 참 (1.10.0 > 1.9.0)
+version_gt() {
+    [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" = "$1" ]
+}
+
+# GitHub의 최신 릴리스 태그를 LATEST_REF에 채웁니다.
+latest_release_tag() {
+    LATEST_REF=$(curl -fsSL --connect-timeout 3 --max-time 5 \
+        "https://api.github.com/repos/$1/releases/latest" 2>/dev/null \
+        | sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+    case "$LATEST_REF" in
+        ''|*[!A-Za-z0-9._/-]*)
+            LATEST_REF=""
+            return 1
+            ;;
+    esac
+}
+
+# GitHub에서 최신 릴리스(또는 브랜치)의 커밋과 그 커밋의 VERSION을 읽어
+# LATEST_REF/LATEST_COMMIT/LATEST_VERSION을 채우고 캐시에 남깁니다.
 check_latest() {
-    local repo branch
+    local repo
 
     repo=$(update_repo)
-    branch=$(update_branch)
+    LATEST_REF=""
     LATEST_COMMIT=""
     LATEST_VERSION=""
     command -v curl >/dev/null 2>&1 || return 1
     # 메뉴 시작 때 실행하므로 인터넷이 막힌 서버에서도 오래 기다리지 않도록 짧게 끊습니다.
+    if [ "$(update_channel)" = release ]; then
+        latest_release_tag "$repo" || return 1
+    else
+        LATEST_REF=$(update_branch)
+    fi
     LATEST_COMMIT=$(curl -fsSL --connect-timeout 3 --max-time 5 -H 'Accept: application/vnd.github.sha' \
-        "https://api.github.com/repos/$repo/commits/$branch" 2>/dev/null) || return 1
+        "https://api.github.com/repos/$repo/commits/$LATEST_REF" 2>/dev/null) || return 1
     case "$LATEST_COMMIT" in
         ''|*[!0-9a-f]*)
             LATEST_COMMIT=""
@@ -1697,6 +1747,7 @@ check_latest() {
         | head -n 1 | tr -d '[:space:]')
     {
         echo "LATEST_VERSION=${LATEST_VERSION:-unknown}"
+        echo "LATEST_REF=$LATEST_REF"
         echo "LATEST_COMMIT=$LATEST_COMMIT"
         echo "CHECKED_AT=$(date '+%Y-%m-%d %H:%M')"
     } > "$UPDATE_CACHE" 2>/dev/null
@@ -1728,7 +1779,7 @@ for commit in reversed(commits[-30:]):
 LATEST_OK=""
 
 run_latest_check() {
-    ui_info "최신 버전을 확인하는 중... (최대 5초)\n\n$(update_repo) ($(update_branch))"
+    ui_info "최신 버전을 확인하는 중... (최대 5초)\n\n$(update_repo) ($(LATEST_REF='' update_target_text))"
     if check_latest; then
         LATEST_OK=1
     else
@@ -1750,11 +1801,13 @@ latest_status() {
     case "$LATEST_OK" in
         1)
             if [ -n "$current" ] && [ "$current" = "$LATEST_COMMIT" ]; then
-                printf '최신: %s (%s) - 최신 버전 사용 중' "$(version_text "$LATEST_VERSION")" "${LATEST_COMMIT:0:7}"
+                printf '최신: %s (%s) - 최신 버전 사용 중' "$(version_text "$LATEST_VERSION")" "$(update_target_text)"
+            elif [ -n "$current" ] && [ "$(update_channel)" = release ] && ! update_available; then
+                printf '최신: %s (%s) - 최신 릴리스와 같거나 더 새 버전 사용 중' "$(version_text "$LATEST_VERSION")" "$(update_target_text)"
             elif [ -z "$current" ]; then
                 printf '최신: %s (%s) - 현재 설치본의 커밋 정보가 없어 비교 불가' "$(version_text "$LATEST_VERSION")" "${LATEST_COMMIT:0:7}"
             else
-                printf '▲ 업데이트 가능: %s (%s) - 메뉴의 "업데이트"에서 설치' "$(version_text "$LATEST_VERSION")" "${LATEST_COMMIT:0:7}"
+                printf '▲ 업데이트 가능: %s (%s, %s) - 메뉴의 "업데이트"에서 설치' "$(version_text "$LATEST_VERSION")" "$(update_target_text)" "${LATEST_COMMIT:0:7}"
             fi
             ;;
         off)
@@ -1773,9 +1826,14 @@ latest_status() {
 }
 
 update_available() {
-    local current
+    local current version
     current=$(current_commit)
-    [ "$LATEST_OK" = "1" ] && [ -n "$current" ] && [ "$current" != "$LATEST_COMMIT" ]
+    [ "$LATEST_OK" = "1" ] && [ -n "$current" ] && [ "$current" != "$LATEST_COMMIT" ] || return 1
+    # 릴리스 기준에서는 main 등으로 더 새 버전을 설치한 경우 업데이트로 보지 않습니다.
+    if [ "$(update_channel)" = release ]; then
+        version=$(current_version)
+        [ "$version" = unknown ] || version_gt "$LATEST_VERSION" "$version"
+    fi
 }
 
 can_update() {
@@ -1819,23 +1877,29 @@ finish_update() {
 }
 
 update_from_github() {
-    local repo branch tmp commit status
+    local repo ref kind tmp commit status
 
     can_update || return
     repo=$(update_repo)
-    branch=$(update_branch)
-    ui_yesno "GitHub($repo, $branch)에서 최신 버전을 받아 설치할까요?\n\n현재: v$(current_version)\n최신: $(version_text "$LATEST_VERSION") (${LATEST_COMMIT:0:7})\n\n설정, 접속 서버 목록, 로그, vmlinux는 유지됩니다." || return
+    # 메뉴를 확인한 시점의 태그·브랜치를 그대로 설치합니다.
+    ref=${LATEST_REF:-$(update_branch)}
+    if [ "$(update_channel)" = release ] && [ -n "$LATEST_REF" ]; then kind=tags; else kind=heads; fi
+    local warn=""
+    if [ "$(current_version)" != unknown ] && version_gt "$(current_version)" "$LATEST_VERSION"; then
+        warn="\n\n주의: 현재 설치본이 더 새 버전입니다. 계속하면 이전 버전으로 돌아갑니다."
+    fi
+    ui_yesno "GitHub($repo, $(update_target_text))에서 받아 설치할까요?\n\n현재: $(current_text)\n설치: $(version_text "$LATEST_VERSION") (${LATEST_COMMIT:0:7})$warn\n\n설정, 접속 서버 목록, 로그, vmlinux는 유지됩니다." || return
 
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/kdump-tools-update.XXXXXX") || return
     clear
     echo "===== kdump-tools 업데이트 ====="
-    echo "[1/2] 최신 코드 받는 중: $repo ($branch)"
+    echo "[1/2] 코드 받는 중: $repo ($(update_target_text))"
     if command -v git >/dev/null 2>&1; then
-        git clone -q --depth 1 --branch "$branch" "https://github.com/$repo.git" "$tmp/src"
+        git -c advice.detachedHead=false clone -q --depth 1 --branch "$ref" "https://github.com/$repo.git" "$tmp/src"
         status=$?
     elif command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
         mkdir -p "$tmp/src" &&
-            curl -fsSL "https://codeload.github.com/$repo/tar.gz/refs/heads/$branch" | tar xz -C "$tmp/src" --strip-components=1
+            curl -fsSL "https://codeload.github.com/$repo/tar.gz/refs/$kind/$ref" | tar xz -C "$tmp/src" --strip-components=1
         status=$?
     else
         echo "git 또는 curl과 tar가 필요합니다."
@@ -1846,7 +1910,7 @@ update_from_github() {
         commit=$(git -c safe.directory="$tmp/src" -C "$tmp/src" rev-parse HEAD 2>/dev/null || printf '%s' "$LATEST_COMMIT")
         echo "[2/2] 설치 중: $(version_text "$(head -n 1 "$tmp/src/VERSION" 2>/dev/null | tr -d '[:space:]')") (${commit:0:7})"
         echo
-        run_install "$tmp/src" "$commit" "github:$repo@$branch"
+        run_install "$tmp/src" "$commit" "github:$repo@$ref"
         status=$?
     else
         echo "최신 코드를 받지 못했습니다."
@@ -1895,7 +1959,11 @@ menu_update() {
             items+=(changes "변경 내역 보기")
         fi
         if [ "$LATEST_OK" = "1" ]; then
-            items+=(github "GitHub에서 업데이트 ($(update_repo), $(update_branch))")
+            if update_available; then
+                items+=(github "GitHub에서 업데이트 ($(update_repo), $(update_target_text))")
+            else
+                items+=(github "GitHub에서 다시 설치 ($(update_repo), $(update_target_text))")
+            fi
             note=""
         else
             note="\n\nGitHub에 접속하지 못했습니다(인터넷 차단 또는 curl 없음).\n폐쇄망이라면 저장소를 서버에 복사한 뒤 '디렉터리에서 업데이트'를 사용하세요."
