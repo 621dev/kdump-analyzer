@@ -842,6 +842,8 @@ wait_crash_with_progress() {
 
 # 끝나는 시점을 알 수 없는 작업(LLM 호출)을 백그라운드로 실행하며 회전 표시와 경과 시간을 보여줍니다.
 run_with_progress() {
+    # 회전 표시에 쓰는 역슬래시 문자를 그대로 씁니다.
+    # shellcheck disable=SC1003
     local label="$1" pid status=0 start=$SECONDS i=0 spinner='|/-\'
     shift
 
@@ -999,6 +1001,8 @@ run_llm_cli() {
             # 토큰은 명령줄(ps에 보임)이 아니라 이 서브셸의 환경변수로만 넘깁니다.
             (
                 cd "$cwd" || exit 1
+                # 이 하위 셸 안에서만 PATH를 바꿉니다.
+                # shellcheck disable=SC2030
                 export PATH="$cli_dir:$PATH"
                 if [ -n "$token" ]; then
                     export CLAUDE_CODE_OAUTH_TOKEN="$token"
@@ -1021,6 +1025,8 @@ run_llm_cli() {
                 cmd+=(--model "$LLM_MODEL")
             fi
             cmd+=("${extra_args[@]}" -)
+            # 위 하위 셸의 PATH 변경과 무관합니다.
+            # shellcheck disable=SC2031
             (cd "$cwd" && PATH="$cli_dir:$PATH" timeout "$LLM_TIMEOUT" "${cmd[@]}") \
                 < "$prompt_base.codex" > "$log_file" 2>&1 || status=$?
             ;;
@@ -1081,7 +1087,9 @@ curl_config_escape() {
 }
 
 write_llm_payload() {
-    python3 - "$REPORT_FILE" "$LLM_PROVIDER" "$LLM_MODEL" "$LLM_MAX_REPORT_CHARS" "$LLM_MAX_TOKENS" "${LLM_PROMPT_FILE:-}" "$LLM_TEMPERATURE" "$(resolve_openai_token_param)" "$LLM_MASK_SENSITIVE" "$1" > "$1" <<'PY'
+    # "$1"은 .system·.input 파일 이름을 만드는 데만 쓰고 읽지 않습니다.
+    # shellcheck disable=SC2094
+    python3 -"$REPORT_FILE" "$LLM_PROVIDER" "$LLM_MODEL" "$LLM_MAX_REPORT_CHARS" "$LLM_MAX_TOKENS" "${LLM_PROMPT_FILE:-}" "$LLM_TEMPERATURE" "$(resolve_openai_token_param)" "$LLM_MASK_SENSITIVE" "$1" > "$1" <<'PY'
 import io
 import json
 import re

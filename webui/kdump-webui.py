@@ -159,8 +159,8 @@ class Store:
         server["sudo"] = bool(server.get("sudo"))
         if not NAME_RE.match(server["name"] or ""):
             raise ApiError(400, "서버 이름은 영문, 숫자, . _ - 만 쓸 수 있습니다.")
-        if not server["target"] or re.search(r"\s", server["target"]):
-            raise ApiError(400, "접속 대상(user@host)을 입력해 주세요.")
+        if not valid_ssh_target(server["target"]):
+            raise ApiError(400, "접속 대상(user@host)을 공백 없이, '-'로 시작하지 않게 입력해 주세요.")
         if server["method"] not in ("auto", "installed", "upload"):
             raise ApiError(400, "분석 방식이 올바르지 않습니다.")
         with self.lock:
@@ -372,7 +372,15 @@ def ssh_extra_options():
     return _SSH_EXTRA
 
 
+def valid_ssh_target(target):
+    """ssh 접속 대상: 비어 있거나 공백이 있거나 '-'로 시작하면 안 됩니다.
+    '-'로 시작하면 ssh가 옵션(-oProxyCommand=... 등)으로 읽어 노트북에서 명령이 실행될 수 있습니다."""
+    return bool(target) and not target.startswith("-") and not re.search(r"\s", target)
+
+
 def ssh_args(server):
+    if not valid_ssh_target(server.get("target") or ""):
+        raise ApiError(400, "서버 '%s'의 접속 대상이 올바르지 않습니다. 서버 설정을 확인해 주세요." % server.get("name", ""))
     args = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
             "-o", "StrictHostKeyChecking=accept-new"] + ssh_extra_options() + ["-p", str(server.get("port") or 22)]
     if server.get("key_file"):
@@ -1502,6 +1510,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(error.status, {"error": error.message})
         except kdump_llm.LLMError as error:
             self._json(502, {"error": str(error)})
+        except (ValueError, TypeError) as error:
+            # 숫자 칸에 글자를 넣는 등 잘못된 입력은 연결을 끊지 않고 이유를 돌려줍니다.
+            self._json(400, {"error": "입력 값이 올바르지 않습니다: %s" % error})
 
     def _static(self, path):
         name = "index.html" if path in ("/", "") else path.lstrip("/")

@@ -3,6 +3,19 @@
 버전 번호는 [유의적 버전](https://semver.org/lang/ko/)을 따릅니다. 기능이 추가되면 가운데 자리, 고친 것만 있으면 끝자리를 올립니다.
 GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리스)으로 받을 수 있습니다.
 
+## [1.18.3] - 2026-11-06
+
+### 추가
+- 자동 테스트: `tests/run-tests.sh`(가짜 crash로 analyze-kdump·메뉴 59개 항목), `tests/test_webui.py`(웹 UI·LLM 모듈), `tests/shellcheck-embedded.py`(웹 UI 안의 원격 셸 스크립트 검사)
+- GitHub Actions CI: shellcheck, pyflakes, Linux(Python 3.8·3.13)와 Windows 테스트
+- `.shellcheckrc`: 의도한 패턴만 끄고 나머지는 가장 엄격한 수준으로 검사
+
+### 수정
+- 접속 대상(user@host)이 `-`로 시작하면 거부합니다. ssh가 옵션(`-oProxyCommand=...`)으로 읽어 웹 UI를 띄운 노트북이나 메뉴를 실행한 서버에서 명령이 실행될 수 있었습니다(웹 UI는 저장할 때와 접속할 때 모두 확인).
+- 웹 UI에서 숫자 칸에 글자를 넣는 등 잘못된 값이면 연결을 끊지 않고 400 오류와 이유를 돌려줍니다.
+- 구독 CLI 실행 때 작업 폴더로 옮기지 못하면 다른 위치에서 CLI를 실행하지 않고 멈춥니다.
+- shellcheck 지적 정리(배열 첨자, 반환값 확인 방식 등). 동작 변화는 없습니다.
+
 ## [1.18.2] - 2026-11-06
 
 ### 수정
@@ -142,7 +155,8 @@ GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리�
 - 설치 스크립트(명령 등록)와 상황별 원격 분석 방식 (#3)
 - 분석 진행 표시와 메뉴의 이전 화면 이동 (#4)
 
-[1.18.2]: https://github.com/621dev/kdump-tools/compare/v1.18.0...main
+[1.18.3]: https://github.com/621dev/kdump-tools/compare/v1.18.2...main
+[1.18.2]: https://github.com/621dev/kdump-tools/compare/v1.18.0...v1.18.2
 [1.18.1]: https://github.com/621dev/kdump-tools/pull/27
 [1.18.0]: https://github.com/621dev/kdump-tools/compare/v1.17.0...v1.18.0
 [1.17.0]: https://github.com/621dev/kdump-tools/compare/v1.15.1...v1.17.0

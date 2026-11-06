@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint (shellcheck, pyflakes)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: shellcheck version
+        run: shellcheck --version
+      - name: shellcheck (스크립트)
+        run: |
+          shellcheck bin/analyze-kdump bin/analyze-kdump-ui install.sh tests/run-tests.sh tests/vm/kdump-vm-test.sh
+          shellcheck -s bash completion/kdump-tools.bash
+      - name: shellcheck (웹 UI에 들어 있는 원격 셸 스크립트)
+        run: python tests/shellcheck-embedded.py
+      - name: bash 문법
+        run: for f in bin/* install.sh tests/*.sh tests/vm/*.sh; do bash -n "$f"; done
+      - name: pyflakes
+        run: |
+          python -m pip install --quiet pyflakes
+          python -m pyflakes webui/*.py windows/*.py tests/*.py
+
+  test-linux:
+    name: test (Linux, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            python: "3.8"    # README의 최소 버전
+          - os: ubuntu-24.04
+            python: "3.13"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: analyze-kdump·메뉴 테스트 (가짜 crash)
+        run: bash tests/run-tests.sh
+      - name: 웹 UI·LLM 단위 테스트
+        run: python -m unittest discover -s tests -v
+
+  test-windows:
+    name: test (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 웹 UI·LLM 단위 테스트
+        run: python -m unittest discover -s tests -v
