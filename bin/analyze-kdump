@@ -182,10 +182,19 @@ resolve_vmcore() {
         printf '%s' "$target"
         return
     fi
+    # "/var/crash/x/"처럼 끝에 붙은 '/'를 떼어 경로가 "//vmcore"가 되지 않게 합니다.
+    while [ "${#target}" -gt 1 ] && [ "${target%/}" != "$target" ]; do
+        target="${target%/}"
+    done
 
     # 덤프 파일 이름: RHEL·SUSE는 vmcore, Ubuntu·Debian(kdump-tools)은 dump.<YYYYMMDDHHMM>
+    # SSH로 받은 RHEL 덤프는 vmcore.flat(makedumpfile flattened 형식)입니다. 변환해 둔 vmcore가 있으면 그것을 씁니다.
     if [ -f "$target/vmcore" ]; then
         printf '%s' "$target/vmcore"
+        return
+    fi
+    if [ -f "$target/vmcore.flat" ]; then
+        printf '%s' "$target/vmcore.flat"
         return
     fi
     found=$(ls -1t "$target"/dump.[0-9]* 2>/dev/null | head -n 1)
@@ -195,7 +204,61 @@ resolve_vmcore() {
     fi
 
     # /var/crash 처럼 덤프 디렉터리들의 상위 경로가 주어지면 가장 최근 덤프를 사용합니다.
-    ls -1t "$target"/*/vmcore "$target"/*/dump.[0-9]* 2>/dev/null | head -n 1
+    found=$(ls -1t "$target"/*/vmcore "$target"/*/vmcore.flat "$target"/*/dump.[0-9]* 2>/dev/null | head -n 1)
+    if [ -n "$found" ]; then
+        resolve_vmcore "$(dirname "$found")"
+    fi
+}
+
+# makedumpfile -F(SSH 전송)로 만든 flattened 형식은 파일 맨 앞이 "makedumpfile" 서명입니다.
+# crash는 이 형식을 바로 열지 못하므로 makedumpfile -R로 되돌려야 합니다.
+is_flat_dump() {
+    [ "$(head -c 12 "$1" 2>/dev/null | tr -d '\0')" = "makedumpfile" ]
+}
+
+# 디렉터리의 남은 공간(바이트)
+free_bytes() {
+    df -P -B1 "$1" 2>/dev/null | awk 'NR == 2 { print $4 }'
+}
+
+# flattened 덤프를 일반 덤프로 바꾸고 바꾼 파일 경로를 출력합니다.
+# 같은 디렉터리의 vmcore로 만들어 다음 분석과 덤프 목록에서 다시 쓰고,
+# 쓸 수 없거나 공간이 모자라면 임시 작업 디렉터리에 만들어 분석 뒤 지웁니다.
+convert_flat_dump() {
+    local src="$1" size dir out tmp free
+
+    if ! command -v makedumpfile >/dev/null 2>&1; then
+        echo "flattened 형식 덤프를 바꾸려면 makedumpfile이 필요합니다: $src" >&2
+        return 1
+    fi
+    size=$(stat -c '%s' "$src")
+    # 변환하면 대략 원본 크기가 되므로 원본 크기 + 64MB 여유를 확인합니다.
+    for dir in "$(dirname "$src")" work; do
+        if [ "$dir" = work ]; then
+            ensure_work_dir
+            dir="$WORK_DIR"
+        elif [ "$dir/vmcore" = "$src" ]; then
+            continue
+        fi
+        out="$dir/vmcore"
+        [ -d "$dir" ] && [ -w "$dir" ] || continue
+        free=$(free_bytes "$dir")
+        if [ -z "$free" ] || [ "$free" -le $((size + 67108864)) ]; then
+            echo "공간이 모자라 여기에는 변환하지 않습니다: $dir (남은 공간 $((${free:-0} / 1048576))MB)" >&2
+            continue
+        fi
+        tmp="$out.converting.$$"
+        echo "flattened 형식 덤프를 변환하는 중: $src -> $out ($((size / 1048576))MB)" >&2
+        if makedumpfile -R "$tmp" < "$src" >&2 && [ -s "$tmp" ] && mv -f "$tmp" "$out"; then
+            printf '%s' "$out"
+            return 0
+        fi
+        rm -f "$tmp"
+        echo "변환에 실패했습니다: $dir" >&2
+    done
+    echo "flattened 형식 덤프를 변환하지 못했습니다: $src ($((size / 1048576))MB 필요)" >&2
+    echo "덤프 디렉터리나 ${TMPDIR:-/tmp}에 공간을 확보하거나, TMPDIR을 공간이 있는 위치로 지정해 실행해 주세요." >&2
+    return 1
 }
 
 find_vmlinux() {
@@ -337,11 +400,20 @@ arch_summary() {
 # ---- 장애 유형 판정
 
 # 덤프와 함께 저장된 커널 로그를 찾습니다. 없으면 makedumpfile로 vmcore에서 꺼냅니다(vmlinux 불필요, 빠름).
+# 리포트에 남길 덤프 경로. 임시 디렉터리에 변환한 경우는 곧 지워지므로 원본(flattened) 경로를 씁니다.
+vmcore_display() {
+    case "$VMCORE" in
+        "$WORK_DIR"/*) [ -n "$WORK_DIR" ] && [ -n "$FLAT_SOURCE" ] && { printf '%s' "$FLAT_SOURCE"; return; } ;;
+    esac
+    printf '%s' "$VMCORE"
+}
+
 find_dmesg_file() {
     local dir base
 
-    dir=$(dirname "$VMCORE")
-    base=$(basename "$VMCORE")
+    # 변환한 덤프는 원본 위치의 vmcore-dmesg.txt나 dmesg.<시각>을 찾습니다.
+    dir=$(dirname "${FLAT_SOURCE:-$VMCORE}")
+    base=$(basename "${FLAT_SOURCE:-$VMCORE}")
     if [ -s "$dir/vmcore-dmesg.txt" ]; then
         printf '%s' "$dir/vmcore-dmesg.txt"
         return 0
@@ -569,7 +641,7 @@ write_report_json() {
         return 0
     fi
     REPORT_FILE="$REPORT_FILE" JSON_FILE="$json" CRASH_STATUS="$CRASH_STATUS" \
-    J_VMCORE="$VMCORE" J_KERNEL="$KVER" J_VMLINUX="$VMLINUX" \
+    J_VMCORE="$(vmcore_display)" J_KERNEL="$KVER" J_VMLINUX="$VMLINUX" \
     J_ARCH_VMCORE="${VMCORE_ARCH:-}" J_ARCH_VMLINUX="${VMLINUX_ARCH:-}" J_ARCH_HOST="${HOST_ARCH:-}" \
     J_TYPE="${CRASH_TYPE:-unknown}" J_TYPE_LABEL="${CRASH_TYPE_LABEL:-}" J_EVIDENCE="${CRASH_EVIDENCE:-}" \
     J_DMESG="$(dmesg_source_path)" J_MODULES="$(loaded_module_names)" \
@@ -1581,13 +1653,28 @@ VMCORE_INPUT="$VMCORE"
 VMCORE=$(resolve_vmcore "$VMCORE_INPUT")
 
 if [ -z "$VMCORE" ]; then
-    echo "디렉터리에서 덤프 파일(vmcore 또는 dump.<시각>)을 찾을 수 없습니다: $VMCORE_INPUT" >&2
+    echo "디렉터리에서 덤프 파일(vmcore, vmcore.flat 또는 dump.<시각>)을 찾을 수 없습니다: $VMCORE_INPUT" >&2
     exit 1
 fi
 
 if [ ! -f "$VMCORE" ]; then
     echo "vmcore 파일을 찾을 수 없습니다: $VMCORE" >&2
     exit 1
+fi
+
+# SSH 전송으로 받은 flattened 형식이면 일반 덤프로 바꿔서 분석합니다.
+FLAT_SOURCE=""
+if is_flat_dump "$VMCORE"; then
+    if ! is_enabled "${FLAT_CONVERT:-1}"; then
+        echo "makedumpfile flattened 형식 덤프입니다(SSH 전송): $VMCORE" >&2
+        echo "다음처럼 바꾼 뒤 분석하거나, FLAT_CONVERT=1로 자동 변환을 켜 주세요." >&2
+        echo "  makedumpfile -R $(dirname "$VMCORE")/vmcore < $VMCORE" >&2
+        exit 1
+    fi
+    # 변환은 $( ) 안에서 실행되므로 임시 디렉터리는 여기서 만들어야 종료할 때 지워집니다.
+    ensure_work_dir
+    FLAT_SOURCE="$VMCORE"
+    VMCORE=$(convert_flat_dump "$FLAT_SOURCE") || exit 1
 fi
 
 if ! command -v crash >/dev/null 2>&1; then
@@ -1631,6 +1718,7 @@ fi
 check_arch
 
 echo "vmcore:  $VMCORE"
+[ -n "$FLAT_SOURCE" ] && echo "변환 원본: $FLAT_SOURCE"
 echo "kernel:  $KVER"
 echo "vmlinux: $VMLINUX"
 echo "arch:    $(arch_summary)"
@@ -1656,7 +1744,14 @@ if [ "$REPORT_MODE" -eq 1 ]; then
     {
         echo "kdump summary report"
         echo "generated: $(date -Is)"
-        echo "vmcore:    $VMCORE"
+        echo "vmcore:    $(vmcore_display)"
+        if [ -n "$FLAT_SOURCE" ]; then
+            if [ "$(vmcore_display)" = "$FLAT_SOURCE" ]; then
+                echo "converted: 임시 디렉터리에서 변환해 분석 (makedumpfile flattened 형식, 변환본은 분석 뒤 삭제)"
+            else
+                echo "converted: $FLAT_SOURCE (makedumpfile flattened 형식에서 변환)"
+            fi
+        fi
         echo "kernel:    $KVER"
         echo "vmlinux:   $VMLINUX"
         echo "arch:      $(arch_summary)"

@@ -75,6 +75,10 @@ ANALYSIS_PREFIX="kdump-analysis"
 # python3가 필요합니다. 끄려면 0.
 # REPORT_JSON=1
 
+# 선택 사항: SSH로 받은 makedumpfile flattened 형식 덤프(vmcore.flat 등)를 makedumpfile -R로 변환해 분석합니다.
+# 변환본은 같은 디렉터리의 vmcore로 남기고, 쓸 수 없으면 임시 디렉터리에 만들어 분석 뒤 지웁니다. 끄려면 0.
+# FLAT_CONVERT=1
+
 # 선택 사항: 별도 파일로 관리하는 crash 명령 목록.
 # 설정하면 REPORT_COMMANDS보다 우선합니다.
 # REPORT_COMMAND_FILE="/opt/kdump-tools/report-commands.txt"
