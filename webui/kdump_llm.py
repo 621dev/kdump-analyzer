@@ -151,12 +151,89 @@ def mask_text(text):
 
 # ---------------------------------------------------------------- 공통
 
+# ---------------------------------------------------------------- 비밀(API 키·토큰) 보호
+#
+# Windows에서는 DPAPI(CryptProtectData)로 암호화해 저장합니다. 같은 Windows 사용자 계정으로 로그인한 그 PC에서만
+# 풀 수 있어, 파일이 복사되거나 다른 사용자가 읽어도 키가 드러나지 않습니다. 다른 운영체제는 파일 권한(600)으로 지킵니다.
+
+DPAPI_PREFIX = "kdump-dpapi:v1:"
+_DPAPI_ENTROPY = b"kdump-analyzer webui secret"
+
+
+def secret_protection():
+    """이 PC에서 비밀을 지키는 방식: dpapi(Windows) 또는 file-permission."""
+    return "dpapi" if os.name == "nt" else "file-permission"
+
+
+def _dpapi(data, encrypt):
+    import ctypes
+    from ctypes import wintypes
+
+    class Blob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    def blob(raw):
+        buf = ctypes.create_string_buffer(raw, len(raw))
+        return Blob(len(raw), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char))), buf
+
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    func = crypt32.CryptProtectData if encrypt else crypt32.CryptUnprotectData
+    func.argtypes = [ctypes.POINTER(Blob), ctypes.c_void_p, ctypes.POINTER(Blob), ctypes.c_void_p,
+                     ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(Blob)]
+    func.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    data_in, keep1 = blob(data)
+    entropy, keep2 = blob(_DPAPI_ENTROPY)
+    out = Blob()
+    CRYPTPROTECT_UI_FORBIDDEN = 0x1
+    if not func(ctypes.byref(data_in), None, ctypes.byref(entropy), None, None, CRYPTPROTECT_UI_FORBIDDEN,
+                ctypes.byref(out)):
+        raise OSError(ctypes.get_last_error(), "DPAPI %s 실패" % ("암호화" if encrypt else "복호화"))
+    try:
+        return ctypes.string_at(out.pbData, out.cbData)
+    finally:
+        kernel32.LocalFree(ctypes.cast(out.pbData, ctypes.c_void_p))
+
+
+def protect_secret(value):
+    """저장할 비밀 문자열(한 줄). Windows는 DPAPI로 암호화한 값, 다른 운영체제는 그대로."""
+    value = value.strip()
+    if secret_protection() != "dpapi":
+        return value
+    import base64
+    return DPAPI_PREFIX + base64.b64encode(_dpapi(value.encode("utf-8"), True)).decode("ascii")
+
+
+def unprotect_secret(stored):
+    stored = stored.strip()
+    if not stored.startswith(DPAPI_PREFIX):
+        return stored
+    if os.name != "nt":
+        raise ValueError("Windows에서 암호화해 저장한 키라 이 운영체제에서는 풀 수 없습니다. 설정에서 키를 다시 입력해 주세요.")
+    import base64
+    try:
+        return _dpapi(base64.b64decode(stored[len(DPAPI_PREFIX):]), False).decode("utf-8")
+    except (OSError, ValueError) as error:
+        raise ValueError("저장된 키를 풀지 못했습니다(다른 Windows 사용자나 다른 PC에서 저장한 키일 수 있음). "
+                         "설정에서 키를 다시 입력해 주세요. (%s)" % error)
+
+
+def is_protected(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.readline().startswith(DPAPI_PREFIX)
+    except OSError:
+        return False
+
+
 def read_secret(path):
-    """비밀 파일의 첫 줄을 공백·CR 없이 읽습니다."""
+    """비밀 파일의 첫 줄을 공백·CR 없이 읽습니다. DPAPI로 암호화된 값이면 풀어서 돌려줍니다."""
     if not path:
         return ""
     with open(path, encoding="utf-8", errors="replace") as f:
-        return f.readline().strip()
+        return unprotect_secret(f.readline())
 
 
 def build_input(report_text, settings):

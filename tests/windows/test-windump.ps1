@@ -76,6 +76,10 @@ try {
     Check "D1: 다른 섹션(lm t n)" ($rep -match "(?m)^===== cdb> lm t n =====$" -and $rep -match "fake output: lm t n")
     Check "D1: 표시 줄은 리포트에 남지 않음" ($rep -notmatch "=====KDA=====")
     Check "D1: 실행 로그 섹션" ($rep -match "(?m)^===== cdb 실행 로그 \(exit 0\) =====$")
+    # 프로세스 목록은 오래 걸려 기본에서 빼고 -ProcessList로만 넣습니다.
+    Check "D1: 기본은 프로세스 목록 없음" ($rep -notmatch "(?m)^===== cdb> !process 0 0 =====$")
+    $r2 = Run "d1" (@("-Dump", $new, "-ProcessList") + $common)
+    Check "-ProcessList: 프로세스 목록 섹션" ((Report-Of $r2) -match "(?m)^===== cdb> !process 0 0 =====$")
     Check "D1: JSON 유형·버그체크" ($j -and $j.crash_type.type -eq "oops" -and $j.bugcheck.code -eq "0xd1" -and $j.bugcheck.image -eq "myfault.sys")
     Check "D1: JSON 원인 후보 모듈" ($j -and @($j.suspect_modules) -contains "myfault.sys")
     Check "D1: JSON 시스템 값" ($j -and $j.sys.UPTIME -eq "0 days 0:12:34.567" -and $j.os -eq "windows")
