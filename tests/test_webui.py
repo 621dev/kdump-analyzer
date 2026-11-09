@@ -239,6 +239,59 @@ class AutoWatcherTest(unittest.TestCase):
             self.store.save_server(dict(webui.DEFAULT_SERVER, name="db03", target="u@h", auto="always"))
 
 
+class SecretTest(unittest.TestCase):
+    """API 키·토큰 저장: Windows는 DPAPI로 암호화, 다른 운영체제는 파일 권한. 예전 평문은 시작할 때 암호화."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = webui.Store(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_save_and_read_round_trip(self):
+        path = self.store.save_secret("openai-api-key", "  sk-test-123\n")
+        self.assertEqual(kdump_llm.read_secret(path), "sk-test-123")
+        with open(path, encoding="utf-8") as f:
+            stored = f.read()
+        if os.name == "nt":
+            self.assertTrue(stored.startswith(kdump_llm.DPAPI_PREFIX))
+            self.assertNotIn("sk-test-123", stored)          # 파일에는 키가 그대로 남지 않음
+        else:
+            self.assertEqual(stored, "sk-test-123\n")
+
+    def test_plaintext_files_still_readable(self):
+        path = os.path.join(self.tmp.name, "secrets", "old-key")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("plain-key\r\n")
+        self.assertEqual(kdump_llm.read_secret(path), "plain-key")
+
+    @unittest.skipUnless(os.name == "nt", "DPAPI는 Windows에서만 씁니다")
+    def test_existing_plaintext_secrets_are_protected(self):
+        folder = os.path.join(self.tmp.name, "secrets")
+        for name, value in (("openai-api-key", "sk-old"), ("claude-oauth-token", "tok-old")):
+            with open(os.path.join(folder, name), "w", encoding="utf-8") as f:
+                f.write(value + "\n")
+        self.assertEqual(self.store.protect_existing_secrets(), ["claude-oauth-token", "openai-api-key"])
+        for name, value in (("openai-api-key", "sk-old"), ("claude-oauth-token", "tok-old")):
+            path = os.path.join(folder, name)
+            self.assertTrue(kdump_llm.is_protected(path))
+            self.assertEqual(kdump_llm.read_secret(path), value)
+        self.assertEqual(self.store.protect_existing_secrets(), [])   # 이미 암호화한 파일은 그대로
+
+    @unittest.skipUnless(os.name == "nt", "DPAPI는 Windows에서만 씁니다")
+    def test_broken_protected_value_gives_clear_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            kdump_llm.unprotect_secret(kdump_llm.DPAPI_PREFIX + "AAAA")
+        self.assertIn("다시 입력", str(ctx.exception))
+
+    def test_protected_value_on_other_os(self):
+        if os.name == "nt":
+            self.skipTest("Windows가 아닌 운영체제의 동작입니다")
+        with self.assertRaises(ValueError):
+            kdump_llm.unprotect_secret(kdump_llm.DPAPI_PREFIX + "AAAA")
+
+
 class SettingsTest(unittest.TestCase):
     def test_update_source_defaults(self):
         self.assertEqual(webui.update_source({}), ("621dev/kdump-analyzer", "release", "main"))

@@ -1656,8 +1656,9 @@ function fillSettings() {
     if (el.type === "checkbox") el.checked = !!s[el.name];
     else el.value = s[el.name] ?? "";
   }
-  $("#api-key-state").textContent = s.api_key_saved ? "(저장된 키 있음)" : "(저장된 키 없음)";
-  $("#cli-token-state").textContent = s.cli_token_saved ? "(저장된 토큰 있음)" : "";
+  const how = s.secret_protection === "dpapi" ? " · 이 Windows 사용자 계정으로 암호화" : "";
+  $("#api-key-state").textContent = s.api_key_saved ? `(저장된 키 있음${how})` : "(저장된 키 없음)";
+  $("#cli-token-state").textContent = s.cli_token_saved ? `(저장된 토큰 있음${how})` : "";
   $("#api-key-input").value = "";
   $("#cli-token-input").value = "";
   $("#settings-error").textContent = "";
