@@ -292,6 +292,123 @@ class SecretTest(unittest.TestCase):
             kdump_llm.unprotect_secret(kdump_llm.DPAPI_PREFIX + "AAAA")
 
 
+class DumpManagementTest(unittest.TestCase):
+    """덤프 보관 관리: 경로 확인, 삭제(덤프 디렉터리 안만), 노트북으로 받기."""
+    LINUX = dict(webui.DEFAULT_SERVER, name="db01", target="u@h", crash_dir="/var/crash")
+    WIN = dict(webui.DEFAULT_SERVER, name="win01", target="Administrator@h", os="windows", sudo=False,
+               tool=webui.WIN_TOOL, crash_dir="C:\\Windows")
+
+    def test_dump_in_dir(self):
+        self.assertTrue(webui.dump_in_dir(self.LINUX, "/var/crash/10.0.0.1-2026/vmcore"))
+        self.assertFalse(webui.dump_in_dir(self.LINUX, "/var/crashes/x/vmcore"))
+        self.assertFalse(webui.dump_in_dir(self.LINUX, "/var/crash/../etc/passwd"))
+        self.assertFalse(webui.dump_in_dir(self.LINUX, "/etc/passwd"))
+        self.assertTrue(webui.dump_in_dir(self.WIN, "C:\\Windows\\MEMORY.DMP"))
+        self.assertTrue(webui.dump_in_dir(self.WIN, "c:\\windows\\Minidump\\1.dmp"))
+        self.assertFalse(webui.dump_in_dir(self.WIN, "C:\\Windows\\..\\Users\\a.dmp"))
+        self.assertFalse(webui.dump_in_dir(self.WIN, "C:\\WindowsOld\\MEMORY.DMP"))
+
+    def test_local_dump_name_and_size(self):
+        self.assertEqual(webui.local_dump_name(self.LINUX, "/var/crash/10.0.0.1-2026-11-09/vmcore"), "10.0.0.1-2026-11-09-vmcore")
+        self.assertEqual(webui.local_dump_name(self.WIN, "C:\\Windows\\MEMORY.DMP"), "Windows-MEMORY.DMP")
+        self.assertEqual(webui.human_size(512), "512 B")
+        self.assertEqual(webui.human_size(3 * 1024 ** 3), "3.0 GB")
+
+    def test_delete_rejects_outside_before_ssh(self):
+        orig = webui.ssh_text
+        webui.ssh_text = lambda *a, **k: self.fail("SSH로 보내면 안 됩니다")
+        try:
+            with self.assertRaises(webui.ApiError):
+                webui.delete_dump(self.LINUX, "/etc/passwd")
+        finally:
+            webui.ssh_text = orig
+
+    @unittest.skipIf(sys.platform == "win32", "readlink -f와 심볼릭 링크가 있는 Linux에서만 실행합니다")
+    def test_remote_delete_and_cat_script(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = os.path.realpath(d)
+            crash = os.path.join(d, "crash")
+            sub = os.path.join(crash, "10.0.0.1-2026")
+            os.makedirs(sub)
+            for rel, data in (("10.0.0.1-2026/vmcore", b"core"), ("10.0.0.1-2026/vmcore-dmesg.txt", b"log"), ("loose.dmp", b"x")):
+                with open(os.path.join(crash, rel), "wb") as f:
+                    f.write(data)
+            outside = os.path.join(d, "secret")
+            with open(outside, "w") as f:
+                f.write("keep")
+            os.symlink(outside, os.path.join(crash, "link-out"))
+
+            def run(script, path):
+                return subprocess.run(["sh", "-c", script, "sh", crash, path], capture_output=True)
+
+            r = run(webui.REMOTE_DUMP_CAT, os.path.join(sub, "vmcore"))
+            self.assertEqual((r.returncode, r.stdout), (0, b"core"))
+            self.assertEqual(run(webui.REMOTE_DUMP_CAT, os.path.join(crash, "link-out")).returncode, 4)
+            self.assertEqual(run(webui.REMOTE_DUMP_DELETE, os.path.join(crash, "link-out")).returncode, 4)
+            self.assertTrue(os.path.exists(outside))                       # 링크로 밖을 가리켜도 지우지 않음
+            self.assertEqual(run(webui.REMOTE_DUMP_DELETE, os.path.join(crash, "loose.dmp")).returncode, 0)
+            self.assertFalse(os.path.exists(os.path.join(crash, "loose.dmp")))
+            self.assertEqual(run(webui.REMOTE_DUMP_DELETE, os.path.join(sub, "vmcore")).returncode, 0)
+            self.assertFalse(os.path.exists(sub))                          # 함께 저장된 파일까지 디렉터리째
+            self.assertTrue(os.path.isdir(crash))
+            self.assertEqual(run(webui.REMOTE_DUMP_DELETE, os.path.join(sub, "vmcore")).returncode, 3)
+
+    @unittest.skipUnless(os.name == "nt" and shutil.which("powershell"), "Windows PowerShell이 필요합니다")
+    def test_windows_delete_locally(self):
+        orig = webui.ssh_text
+
+        def run(server, argv, timeout=60):
+            r = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
+            return r.returncode, r.stdout.decode("utf-8", "replace")
+        webui.ssh_text = run
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                d = os.path.realpath(d)
+                os.makedirs(os.path.join(d, "Minidump"))
+                dump = os.path.join(d, "Minidump", "1.dmp")
+                with open(dump, "wb") as f:
+                    f.write(b"x")
+                server = dict(self.WIN, crash_dir=d)
+                ok, msg = webui.delete_dump(server, dump)
+                self.assertTrue(ok, msg)
+                self.assertFalse(os.path.exists(dump))
+                ok, msg = webui.delete_dump(server, dump)                  # 이미 지운 덤프
+                self.assertFalse(ok)
+        finally:
+            webui.ssh_text = orig
+
+    def _download(self, payload, size):
+        with tempfile.TemporaryDirectory() as d:
+            store = webui.Store(d)
+            store.save_server(self.LINUX)
+            jobs = webui.Jobs(store)
+            job = webui.Job("download", "db01", vmcore="/var/crash/a/vmcore")
+            code = "import sys; sys.stdout.buffer.write(%r)" % payload
+            orig = (webui.ssh_args, webui.list_vmcores)
+            webui.ssh_args = lambda server: [sys.executable, "-c", code]
+            webui.list_vmcores = lambda server: [{"path": "/var/crash/a/vmcore", "size": size, "mtime": 1}]
+            try:
+                jobs._run_download(job, store.server("db01"))
+                with open(job.saved, "rb") as f:
+                    return job, f.read(), os.listdir(os.path.join(d, "dumps", "db01"))
+            except webui.ApiError as error:
+                return job, error, os.listdir(os.path.join(d, "dumps", "db01"))
+            finally:
+                webui.ssh_args, webui.list_vmcores = orig
+
+    def test_download_saves_file(self):
+        job, data, files = self._download(b"vmcore-bytes", 12)
+        self.assertEqual(data, b"vmcore-bytes")
+        self.assertEqual(files, ["a-vmcore"])
+        self.assertTrue(job.saved.endswith("a-vmcore"))
+
+    def test_download_size_mismatch_removes_partial(self):
+        job, error, files = self._download(b"short", 100)
+        self.assertIsInstance(error, webui.ApiError)
+        self.assertIn("받지 못했습니다", error.message)
+        self.assertEqual(files, [])                                        # 받다 만 .part 파일은 지움
+
+
 class SettingsTest(unittest.TestCase):
     def test_update_source_defaults(self):
         self.assertEqual(webui.update_source({}), ("621dev/kdump-analyzer", "release", "main"))

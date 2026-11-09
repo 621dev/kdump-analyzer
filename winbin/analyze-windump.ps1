@@ -236,6 +236,8 @@ function Invoke-Cdb([string]$cdb, [string]$dumpPath, [string]$symbols, [string[]
         $elapsed = [int]((Get-Date) - $start).TotalSeconds
         if ($elapsed -ge $timeout) {
             try { Stop-Process -Id $p.Id -Force } catch { }
+            # 끝낸 프로세스가 출력 파일을 놓을 때까지 잠시 기다립니다(바로 읽으면 "다른 프로세스가 사용 중"이 남).
+            try { [void]$p.WaitForExit(10000) } catch { }
             return [pscustomobject]@{ ExitCode = 124; TimedOut = $true; Seconds = $elapsed }
         }
         if (((Get-Date) - $last).TotalSeconds -ge 15) {
@@ -253,6 +255,24 @@ function Invoke-Cdb([string]$cdb, [string]$dumpPath, [string]$symbols, [string[]
         Remove-Item -LiteralPath $errFile -ErrorAction SilentlyContinue
     }
     return [pscustomobject]@{ ExitCode = $code; TimedOut = $false; Seconds = [int]((Get-Date) - $start).TotalSeconds }
+}
+
+# 다른 프로세스가 아직 쥐고 있을 수 있는 파일을 공유 모드로 읽습니다. 시간 초과로 cdb를 끝낸 직후에는
+# 파일 핸들이 잠시 남아 있어, 그대로 읽으면 실패하고 리포트를 남기지 못했습니다.
+function Read-SharedText([string]$path) {
+    for ($i = 0; $i -lt 10; $i++) {
+        try {
+            $fs = New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+                ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+            try {
+                $reader = New-Object IO.StreamReader($fs, [Text.Encoding]::UTF8, $true)
+                return $reader.ReadToEnd()
+            } finally { $fs.Dispose() }
+        } catch [IO.IOException] {
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    return ""
 }
 
 # cdb 출력을 섹션(명령별 출력)으로 나눕니다. 표시 줄 앞에 프롬프트가 붙는 경우도 있어 줄 안에서 찾습니다.
@@ -407,7 +427,7 @@ $cmds = Get-ReportCommands $Commands
 $result = Invoke-Cdb $cdb $dumpFile $SymbolPath $cmds $rawFile $TimeoutSec
 $raw = ""
 if (Test-Path -LiteralPath $rawFile) {
-    $raw = [IO.File]::ReadAllText($rawFile)
+    $raw = Read-SharedText $rawFile
     Remove-Item -LiteralPath $rawFile -ErrorAction SilentlyContinue
 }
 $parsed = Split-CdbOutput $raw
