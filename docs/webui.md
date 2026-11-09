@@ -53,6 +53,8 @@ python webui/kdump-webui.py
 
 원격 서버 분석 방식은 **원격 설치본 실행**과 **무설치 실행**(스크립트를 원격 임시 디렉터리로 보내 실행한 뒤 지움), 그리고 둘 중 하나를 고르는 **자동 선택**을 지원합니다. SSH 키 인증으로 비밀번호 없이 접속할 수 있어야 하고, sudo를 쓰면 원격 서버에 비밀번호 없는 sudo(NOPASSWD)가 필요합니다. 처음 접속하는 서버의 호스트 키는 자동으로 등록합니다(`StrictHostKeyChecking=accept-new`).
 
+노트북의 Hyper-V 기본 스위치(Default Switch)로 띄운 테스트 VM은 다시 켤 때마다 IP가 바뀔 수 있습니다. 접속 대상을 `tester@<VM 호스트 이름>.mshome.net`처럼 이름으로 넣으면 IP가 바뀌어도 그대로 접속됩니다.
+
 LLM 분석은 `webui/kdump_llm.py`에서 합니다. analyze-kdump와 같은 방식(마스킹, 섹션 단위 축소, provider 호출, 구독 CLI)을 Python으로 옮긴 것이라 Windows에서도 동작하고, 분석 파일 형식도 같습니다.
 - Claude Code는 시스템 프롬프트를 파일(`--system-prompt-file`)로 넘깁니다.
 - Windows에서는 npm 실행기(`claude.cmd`) 대신 안의 실제 `claude.exe`를 실행합니다. `.cmd`를 거치면 cmd.exe가 인자를 다시 해석하기 때문입니다.
