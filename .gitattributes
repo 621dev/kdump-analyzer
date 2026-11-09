@@ -13,3 +13,4 @@ CHANGELOG.md text eol=lf
 LICENSE text eol=lf
 .shellcheckrc text eol=lf
 .github/** text eol=lf
+winbin/** text eol=lf

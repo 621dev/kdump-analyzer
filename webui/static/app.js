@@ -1,7 +1,7 @@
 "use strict";
 
 // 서버(kdump-webui.py)의 API_LEVEL과 같아야 합니다. 다르면 업데이트 뒤 서버를 다시 시작하지 않은 것입니다.
-const API_LEVEL = 6;
+const API_LEVEL = 7;
 
 // ---------------------------------------------------------------- 상태와 공통
 
@@ -177,7 +177,7 @@ function renderSidebar() {
     const dot = health ? (health.ok ? "ok" : "err") : "";
     const item = h(`<li class="server-item ${state.page === "server" && state.selected === s.name ? "active" : ""}">
       <span class="dot ${dot}"></span>
-      <div style="min-width:0"><div class="name">${esc(s.name)}</div><div class="sub">${esc(s.target)}</div></div>
+      <div style="min-width:0"><div class="name">${esc(s.name)}${isWindows(s) ? ' <span class="os-tag">Windows</span>' : ""}</div><div class="sub">${esc(s.target)}</div></div>
     </li>`);
     item.addEventListener("click", () => selectServer(s.name));
     list.append(item);
@@ -336,7 +336,7 @@ function renderMain() {
 
   const panel = h(`<div class="card">
     <div class="tabs">
-      <button class="tab ${state.tab === "vmcores" ? "active" : ""}" data-tab="vmcores">vmcore</button>
+      <button class="tab ${state.tab === "vmcores" ? "active" : ""}" data-tab="vmcores">${isWindows(server) ? "메모리 덤프" : "vmcore"}</button>
       <button class="tab ${state.tab === "results" ? "active" : ""}" data-tab="results">분석 결과</button>
       <button class="tab ${state.tab === "prepare" ? "active" : ""}" data-tab="prepare">서버 준비</button>
     </div>
@@ -588,15 +588,23 @@ async function runPrepare(server, actions) {
 
 // ---------------------------------------------------------------- 분석 기록
 
+// 서버 종류(운영체제)별 기본값
+const OS_DEFAULTS = {
+  linux: { tool: "/opt/kdump-analyzer/bin/analyze-kdump", crash_dir: "/var/crash" },
+  windows: { tool: "C:\\ProgramData\\kdump-analyzer\\bin\\analyze-windump.ps1", crash_dir: "C:\\Windows" },
+};
+const isWindows = s => !!s && s.os === "windows";
+
 // 서버 설치 위치: 1.20.0부터 새로 설치하면 NEW_PREFIX, 그 전 기본 위치는 LEGACY_PREFIX
 const NEW_PREFIX = "/opt/kdump-analyzer";
 const LEGACY_PREFIX = "/opt/kdump-tools";
 
 // 리포트의 장애 유형(analyze-kdump가 커널 로그로 판정, 1.16.0부터) 표시
-const TYPE_TONE = { oops: "err", mce: "err", hung_task: "warn", soft_lockup: "warn", hard_lockup: "warn",
-  rcu_stall: "warn", oom: "warn", nmi: "warn", other: "warn" };
+const TYPE_TONE = { oops: "err", mce: "err", memory: "err", hung_task: "warn", soft_lockup: "warn", hard_lockup: "warn",
+  rcu_stall: "warn", oom: "warn", nmi: "warn", critical_process: "warn", storage: "warn", other: "warn" };
 const TYPE_SHORT = { hung_task: "hung task", soft_lockup: "soft lockup", hard_lockup: "hard lockup", rcu_stall: "RCU stall",
-  oom: "OOM", oops: "oops", sysrq: "수동 덤프", mce: "MCE", nmi: "NMI", other: "기타 패닉", unknown: "판단 불가" };
+  oom: "OOM", oops: "oops", sysrq: "수동 덤프", mce: "MCE", nmi: "NMI", other: "기타 패닉", unknown: "판단 불가",
+  memory: "메모리 손상", critical_process: "핵심 프로세스 종료", storage: "디스크·부팅" };
 
 function typePill(type, label) {
   if (!type) return "";
@@ -619,6 +627,7 @@ function recordList(records, showServer) {
     const sum = (rep && rep.summary) || {};
     if (sum.uninterruptible) facts.push(`<span>D 상태 태스크 ${sum.uninterruptible}개</span>`);
     if (sum.tainted && sum.tainted.length) facts.push(`<span>taint 모듈: ${esc(sum.tainted.join(", "))}</span>`);
+    if (sum.suspect && sum.suspect.length) facts.push(`<span>원인 후보: ${esc(sum.suspect.join(", "))}</span>`);
     if (rep && rep.vmcore) facts.push(`<span class="path">${esc(rep.vmcore)}</span>`);
     if (!rep) facts.push('<span>원본 리포트가 없습니다</span>');
     const llm = latest ? `${esc(PROVIDER_LABEL[latest.provider] || latest.provider || "LLM")}${latest.model ? " · " + esc(latest.model) : ""}` : "";
@@ -953,7 +962,7 @@ function drawServerVersions() {
     const installed = info && info.ok && info.installed;
     const verb = installed ? "업그레이드" : "설치";
     const row = h(`<tr>
-      <td><div style="font-weight:600">${esc(s.name)}</div><div class="muted" style="font-size:12px">${esc(s.target)}</div></td>
+      <td><div style="font-weight:600">${esc(s.name)}${isWindows(s) ? ' <span class="os-tag">Windows</span>' : ""}</div><div class="muted" style="font-size:12px">${esc(s.target)}</div></td>
       <td style="white-space:nowrap">${info && info.ok && info.installed ? `v${esc(info.version)}${info.commit ? `<div class="muted path">${esc(info.commit)}</div>` : ""}` : (info && info.loading ? '<span class="spinner"></span>' : "—")}</td>
       <td class="muted" style="font-size:12.5px">${info && info.ok && info.installed
         ? `${esc(info.prefix || "")}${info.installed_at ? "<br>" + esc(info.installed_at) : ""}${info.source ? "<br>" + esc(info.source) : ""}`
@@ -963,7 +972,7 @@ function drawServerVersions() {
         <button class="btn small" data-act="check">확인</button>
         <button class="btn small ${st.cls === "up" ? "primary" : ""}" data-act="local" ${running || !(info && info.ok) ? "disabled" : ""}
           title="노트북의 v${esc(local.version)}를 SSH로 보내 설치합니다. 서버에 인터넷이 없어도 됩니다.">노트북 버전 ${verb}</button>
-        <button class="btn small" data-act="github" ${running || !(info && info.ok) ? "disabled" : ""}
+        <button class="btn small" data-act="github" ${running || !(info && info.ok) || isWindows(s) ? "disabled" : ""}
           title="서버가 GitHub에서 직접 받아 설치합니다(${esc(latestTarget(latest) || "최신")}). 서버에 인터넷이 필요합니다.">GitHub ${latest && latest.ok && latest.channel === "release" ? esc(latest.tag) : "최신"} ${verb}</button>
         ${movable ? `<button class="btn small" data-act="move" ${running ? "disabled" : ""}
           title="설정·서버 목록·vmlinux·로그를 포함해 ${esc(NEW_PREFIX)}로 옮깁니다. 예전 경로에는 링크를 남깁니다.">새 위치로 옮기기</button>` : ""}
@@ -1106,7 +1115,11 @@ function summaryBox(s) {
   row("판정 근거", s.evidence ? `<code>${esc(s.evidence)}</code>` : "");
   row("패닉 메시지", s.panic ? `<span class="panic">${esc(s.panic)}</span>` : "");
   row("D 상태 태스크", s.uninterruptible === null ? "" : `${s.uninterruptible}개`);
-  row("taint 모듈", s.tainted.length ? esc(s.tainted.join(", ")) : "없음");
+  if (s.os === "windows") {
+    row("원인 후보 드라이버", s.suspect && s.suspect.length ? esc(s.suspect.join(", ")) : "");
+  } else {
+    row("taint 모듈", s.tainted.length ? esc(s.tainted.join(", ")) : "없음");
+  }
   row("불러온 모듈 심볼", s.modules.length ? esc(s.modules.join(", ")) : "");
   const sys = Object.entries(s.sys || {}).map(([k, v]) => `${esc(k)} ${esc(v)}`).join(" · ");
   row("시스템", sys);
@@ -1225,15 +1238,36 @@ function openServerDialog(server) {
   form.reset();
   $("#server-error").textContent = "";
   $("#server-dialog-title").textContent = server ? "서버 수정" : "서버 추가";
-  const values = server || { port: 22, tool: "/opt/kdump-analyzer/bin/analyze-kdump", crash_dir: "/var/crash", method: "auto", sudo: true };
+  const values = server ? Object.assign({ os: "linux" }, server)
+    : { os: "linux", port: 22, tool: OS_DEFAULTS.linux.tool, crash_dir: OS_DEFAULTS.linux.crash_dir, method: "auto", sudo: true };
   for (const el of form.elements) {
     if (!el.name) continue;
     if (el.name === "original") el.value = server ? server.name : "";
     else if (el.type === "checkbox") el.checked = !!values[el.name];
     else if (values[el.name] !== undefined) el.value = values[el.name];
   }
+  applyOsToForm(form, false);
   dialog.showModal();
 }
+
+// 운영체제에 맞춰 양식의 이름표와 기본 경로를 바꿉니다. 사용자가 바꾼 경로는 그대로 둡니다.
+function applyOsToForm(form, switched) {
+  const os = form.elements.os.value;
+  const win = os === "windows";
+  $("#label-tool").textContent = win ? "분석 스크립트 경로 (analyze-windump.ps1)" : "원격 analyze-kdump 경로";
+  $("#label-dumpdir").textContent = win ? "덤프 디렉터리 (MEMORY.DMP, Minidump)" : "crash 디렉터리";
+  $("#label-sudo").hidden = win;
+  $("#windows-hint").hidden = !win;
+  if (switched) {
+    const other = OS_DEFAULTS[win ? "linux" : "windows"];
+    for (const key of ["tool", "crash_dir"]) {
+      const el = form.elements[key];
+      if (!el.value.trim() || el.value.trim() === other[key]) el.value = OS_DEFAULTS[os][key];
+    }
+  }
+}
+
+$("#server-os").addEventListener("change", e => applyOsToForm(e.target.form, true));
 
 $("#server-form").addEventListener("submit", async e => {
   if (e.submitter && e.submitter.value === "cancel") return;

@@ -175,7 +175,7 @@ class ReportSummaryTest(unittest.TestCase):
         self.assertEqual((s["type"], s["uninterruptible"], s["tainted"], s["modules"]), ("hung_task", 2, ["kdump_fault"], ["xfs"]))
         # 화면에 보일 sys 값만 남기고 호스트 이름(NODENAME)은 넣지 않습니다.
         self.assertEqual(s["sys"], {"UPTIME": "00:52:06", "LOAD AVERAGE": "1.29, 0.56, 0.36", "TASKS": "135"})
-        self.assertEqual(info["summary"], {"uninterruptible": 2, "tainted": ["kdump_fault"], "crash_exit": 0})
+        self.assertEqual(info["summary"], {"uninterruptible": 2, "tainted": ["kdump_fault"], "crash_exit": 0, "suspect": []})
 
     def test_broken_or_odd_json_is_ignored(self):
         with tempfile.TemporaryDirectory() as d:
@@ -188,6 +188,224 @@ class ReportSummaryTest(unittest.TestCase):
         self.assertEqual(webui.MOVE_TARGET, "/opt/kdump-analyzer")
         self.assertTrue(webui.REMOTE_MOVE.startswith(webui.INSTALL_FALLBACK_SH))
         self.assertIn("--move-to", webui.REMOTE_MOVE)
+
+
+class WindowsServerTest(unittest.TestCase):
+    SERVER = dict(webui.DEFAULT_SERVER, name="win01", target="Administrator@10.0.0.5", os="windows",
+                  tool=webui.WIN_TOOL, crash_dir=webui.WIN_DUMP_DIR, sudo=True)
+
+    def setUp(self):
+        self.orig = (webui.ssh_text, webui.ssh_run)
+        self.sent = []
+
+    def tearDown(self):
+        webui.ssh_text, webui.ssh_run = self.orig
+
+    def decode(self, argv):
+        import base64
+        self.assertEqual(argv[:6], ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand"])
+        return base64.b64decode(argv[6]).decode("utf-16-le")
+
+    def test_command_has_no_sudo_and_needs_no_quoting(self):
+        argv = webui.win_argv("'a b' + \"c\"")
+        command = webui.remote_command(self.SERVER, argv)
+        self.assertFalse(command.startswith("sudo"))
+        self.assertEqual(command, " ".join(argv))  # base64라 따옴표가 붙지 않음
+        self.assertLess(len(command), 8191)
+        self.assertTrue(self.decode(argv).endswith("'a b' + \"c\""))
+
+    def test_script_is_sent_by_scp_not_stdin(self):
+        # Windows OpenSSH를 거친 PowerShell은 큰 표준 입력에서 불규칙하게 멈춥니다(실제 VM에서 확인). 스크립트는 scp로 보냅니다.
+        _, name = webui.win_install_command(self.SERVER, "1.22.0", "abc", "t")
+        self.assertRegex(name, r"^kdump-analyzer-[0-9a-f]{32}\.ps1$")
+        _, name2 = webui.win_report_command(self.SERVER, r"C:\Windows\MEMORY.DMP", "upload", 60)
+        self.assertNotEqual(name, name2)
+        self.assertIsNone(webui.win_report_command(self.SERVER, r"C:\Windows\MEMORY.DMP", "installed", 60)[1])
+
+    def test_split_stream_handles_crlf(self):
+        # 실제 VM에서 \r\n 줄이 모두 진행 표시로 취급돼 report: 줄을 놓치던 문제
+        pieces, rest = webui.split_stream("cdb 실행 중\r\nreport:  C:\\x.txt\r\njson:  C:\\x.json\r")
+        self.assertEqual(pieces, [("cdb 실행 중", "\n"), ("report:  C:\\x.txt", "\n")])
+        self.assertEqual(rest, "json:  C:\\x.json\r")  # 다음 조각의 \n을 기다림
+        pieces, rest = webui.split_stream(rest + "\n")
+        self.assertEqual((pieces, rest), ([("json:  C:\\x.json", "\n")], ""))
+        # Linux의 진행 표시(\r로 갱신)와 일반 줄은 그대로
+        pieces, rest = webui.split_stream("[1/3] a\r[2/3] b\rdone\nnext")
+        self.assertEqual(pieces, [("[1/3] a", "\r"), ("[2/3] b", "\r"), ("done", "\n")])
+        self.assertEqual(rest, "next")
+
+    def test_vmcore_path_follows_server_os(self):
+        # 실제 VM에서 Windows 경로가 '/'로 시작하지 않는다고 분석 작업이 거부되던 문제
+        linux = dict(self.SERVER, os="linux")
+        self.assertTrue(webui.valid_vmcore_path(self.SERVER, r"C:\Windows\MEMORY.DMP"))
+        self.assertTrue(webui.valid_vmcore_path(self.SERVER, r"D:\dumps\Minidump\110826-3234-01.dmp"))
+        self.assertFalse(webui.valid_vmcore_path(self.SERVER, "/var/crash/x/vmcore"))
+        self.assertFalse(webui.valid_vmcore_path(self.SERVER, "C:\\a\nb"))
+        self.assertTrue(webui.valid_vmcore_path(linux, "/var/crash/x/vmcore"))
+        self.assertFalse(webui.valid_vmcore_path(linux, r"C:\Windows\MEMORY.DMP"))
+        self.assertFalse(webui.valid_vmcore_path(linux, None))
+
+    def test_scp_upload_arguments(self):
+        calls = []
+
+        class Done:
+            returncode, stdout = 0, b""
+
+        orig = webui.subprocess.run
+        webui.subprocess.run = lambda argv, **kw: (calls.append(argv), Done())[1]
+        try:
+            server = dict(self.SERVER, target="Administrator@172.17.178.80", port=2222, key_file="C:/k/id")
+            self.assertEqual(webui.scp_upload(server, "a.ps1", "kdump-analyzer-x.ps1")[0], 0)
+            with self.assertRaises(webui.ApiError):
+                webui.scp_upload(server, "a.ps1", "../evil.ps1")
+        finally:
+            webui.subprocess.run = orig
+        argv = calls[-1]
+        self.assertEqual(argv[:2], ["scp", "-q"])
+        self.assertEqual(argv[argv.index("-P") + 1], "2222")
+        self.assertNotIn("-p", argv)
+        self.assertEqual(argv[argv.index("-i") + 1], "C:/k/id")
+        self.assertEqual(argv[-2:], ["a.ps1", "Administrator@172.17.178.80:kdump-analyzer-x.ps1"])
+
+    def test_ps_quote(self):
+        self.assertEqual(webui.ps_quote("C:\\it's"), "'C:\\it''s'")
+
+    def test_list_vmcores_parses_powershell_output(self):
+        def fake(server, argv, timeout=60):
+            self.sent.append(self.decode(argv))
+            return 0, "1793950000 1048576 C:\\Windows\\MEMORY.DMP\r\n1793940000 262144 C:\\Windows\\Minidump\\110625-1-01.dmp\r\n"
+        webui.ssh_text = fake
+        items = webui.list_vmcores(self.SERVER)
+        self.assertEqual([i["path"] for i in items], ["C:\\Windows\\MEMORY.DMP", "C:\\Windows\\Minidump\\110625-1-01.dmp"])
+        self.assertIn("'C:\\Windows'", self.sent[0])
+
+    def test_fetch_remote_file_decodes_base64(self):
+        import base64
+        payload = "리포트\n".encode("utf-8")
+
+        def fake(server, argv, stdin=None, timeout=60, data=False):
+            self.sent.append(self.decode(argv))
+            return 0, base64.b64encode(payload) + b"\r\n"
+        webui.ssh_run = fake
+        self.assertEqual(webui.fetch_remote_file(self.SERVER, "C:\\x\\r.txt"), (0, payload))
+        self.assertIn("ReadAllBytes('C:\\x\\r.txt')", self.sent[0])
+
+    def test_save_server_validates_windows(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = webui.Store(d)
+            saved = store.save_server(dict(self.SERVER))
+            self.assertEqual((saved["os"], saved["sudo"]), ("windows", False))
+            with self.assertRaises(webui.ApiError):
+                store.save_server(dict(self.SERVER, tool="/opt/kdump-analyzer/bin/analyze-kdump"))
+            with self.assertRaises(webui.ApiError):
+                store.save_server(dict(self.SERVER, os="solaris"))
+
+    def test_windows_summary_and_prompt(self):
+        import json
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "kdump-report-1.txt")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("windows dump summary report\n")
+            with open(webui.summary_path(path), "w", encoding="utf-8") as f:
+                json.dump({"os": "windows", "crash_type": {"type": "oops"}, "suspect_modules": ["myfault.sys"]}, f)
+            s = webui.load_summary(path)
+        self.assertEqual((s["os"], s["suspect"]), ("windows", ["myfault.sys"]))
+        system, _ = kdump_llm.build_input("windows dump summary report\n===== cdb> !analyze -v =====\nx\n", {"mask": False})
+        self.assertIn("Windows kernel crash dump", system)
+        system, _ = kdump_llm.build_input("kdump summary report\n", {"mask": False})
+        self.assertIn("Linux kernel crash dump", system)
+
+    @unittest.skipUnless(os.name == "nt" and shutil.which("powershell"), "Windows PowerShell이 필요합니다")
+    def test_powershell_snippets_run_locally(self):
+        # 이 PC에서 원격용 PowerShell 명령을 그대로 실행해 문법 오류가 없는지와 출력 형식을 확인합니다.
+        def run(argv):
+            r = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
+            return r.returncode, r.stdout.decode("utf-8", errors="replace")
+
+        webui.ssh_text = lambda server, argv, timeout=60: run(argv)
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "Minidump"))
+            open(os.path.join(d, "Minidump", "1.dmp"), "wb").close()
+            open(os.path.join(d, "MEMORY.DMP"), "wb").close()
+            server = dict(self.SERVER, crash_dir=d, tool=os.path.join(d, "bin", "analyze-windump.ps1"))
+            self.assertEqual(sorted(os.path.basename(i["path"]) for i in webui.list_vmcores(server)), ["1.dmp", "MEMORY.DMP"])
+            info = webui.win_test_server(server)
+            self.assertTrue(info["ok"], info)
+            self.assertEqual((info["vmcores"], info["tool"]), ("2", ""))
+            self.assertEqual(webui.win_server_version(server)["installed"], False)
+            check = webui.win_prepare_check(server)
+            self.assertEqual(check["family"], "Windows")
+            self.assertIn("cdb", [i["id"] for i in check["items"]])
+            self.assertIn(webui.probe_method(server), ("upload", "none"))
+
+    @unittest.skipUnless(os.name == "nt" and shutil.which("powershell"), "Windows PowerShell이 필요합니다")
+    def test_install_and_report_end_to_end_locally(self):
+        # SSH 대신 이 PC에서 그대로 실행: 노트북 버전 설치 -> 설치본 실행, 무설치 실행 -> 리포트 가져오기
+        fake_cdb = os.path.join(ROOT, "tests", "windows", "fake-cdb.ps1")
+
+        def run(argv, stdin=None, env=None):
+            r = subprocess.run(argv, input=stdin, stdin=None if stdin is not None else subprocess.DEVNULL,
+                               capture_output=True, timeout=300, env=env)
+            return r.returncode, r.stdout
+
+        webui.ssh_run = lambda server, argv, stdin=None, timeout=60, data=False: run(argv, stdin)
+        webui.ssh_text = lambda server, argv, timeout=60: (lambda c, o: (c, o.decode("utf-8", "replace")))(*run(argv))
+        with tempfile.TemporaryDirectory() as d:
+            d = os.path.realpath(d)  # 짧은 이름(GSITM-~1)을 실제 이름으로
+            dumps = os.path.join(d, "Windows")
+            os.makedirs(os.path.join(dumps, "Minidump"))
+            dump = os.path.join(dumps, "MEMORY.DMP")
+            open(dump, "wb").close()
+            server = dict(self.SERVER, crash_dir=dumps, tool=os.path.join(d, "ka", "bin", "analyze-windump.ps1"))
+            env = dict(os.environ, KDUMP_CDB=fake_cdb, FAKE_CDB_CASE="d1", REPORT_DIR=os.path.join(d, "upload-logs"))
+
+            # scp 대신 이 PC의 홈 폴더(원격 명령이 보는 $HOME)에 복사합니다.
+            home = os.path.expanduser("~")
+
+            def upload(name):
+                shutil.copyfile(webui.WIN_SCRIPT, os.path.join(home, name))
+
+            # 설치
+            argv, name = webui.win_install_command(server, "1.22.0", "abc1234", "webui:test")
+            upload(name)
+            code, out = run(argv)
+            self.assertEqual(code, 0, out.decode("utf-8", "replace"))
+            info = webui.win_server_version(server)
+            self.assertEqual((info["installed"], info["version"], info["prefix"]), (True, "1.22.0", os.path.join(d, "ka")))
+            self.assertEqual(webui.probe_method(server), "installed")
+
+            for method in ("installed", "upload"):
+                argv, name = webui.win_report_command(server, dump, method, 60)
+                if name:
+                    upload(name)
+                # 설치본은 설치 위치의 logs에, 무설치 실행은 REPORT_DIR에 씁니다.
+                run_env = dict(env)
+                if method == "installed":
+                    run_env.pop("REPORT_DIR")
+                code, out = run(argv, None, run_env)
+                text = out.decode("utf-8", "replace")
+                self.assertEqual(code, 0, text)
+                report = [l.split(":", 1)[1].strip() for l in text.splitlines() if l.startswith("report:")][0]
+                summary = [l.split(":", 1)[1].strip() for l in text.splitlines() if l.startswith("json:")][0]
+                if method == "installed":
+                    self.assertTrue(report.startswith(os.path.join(d, "ka", "logs")), report)  # 설치 위치의 logs
+                else:
+                    self.assertTrue(report.startswith(env["REPORT_DIR"]), report)
+                code, data = webui.fetch_remote_file(server, report)
+                self.assertEqual(code, 0)
+                body = data.decode("utf-8")
+                self.assertTrue(body.startswith("windows dump summary report\n"), method)
+                self.assertIn("type:      커널 예외 (드라이버가 잘못된 IRQL에서 메모리 접근) [oops]", body)
+                code, data = webui.fetch_remote_file(server, summary)
+                self.assertEqual(json_loads(data)["bugcheck"]["image"], "myfault.sys")
+            # 설치·무설치 실행 모두 보낸 임시 스크립트를 남기지 않습니다.
+            leftovers = [f for f in os.listdir(home) if f.startswith("kdump-analyzer-") and f.endswith(".ps1")]
+            self.assertEqual(leftovers, [])
+
+
+def json_loads(data):
+    import json
+    return json.loads(data.decode("utf-8"))
 
 
 class FetchLatestTest(unittest.TestCase):

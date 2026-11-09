@@ -57,7 +57,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(APP_DIR)
 # 화면(app.js)과 서버가 주고받는 API의 판. API를 바꿀 때 app.js의 API_LEVEL과 함께 올립니다.
 # 업데이트 뒤 서버를 다시 시작하지 않으면 화면이 이 값의 차이로 알아채고 안내합니다.
-API_LEVEL = 6
+API_LEVEL = 7
 
 # 화면의 "다시 시작"은 감시 프로세스가 서버를 새 코드로 다시 띄우는 방식입니다.
 RESTART_EXIT = 75                     # 서버가 이 코드로 끝나면 감시 프로세스가 다시 띄웁니다
@@ -65,6 +65,7 @@ ENV_WORKER = "KDUMP_WEBUI_WORKER"     # 감시 프로세스가 띄운 서버임�
 ENV_TOKEN = "KDUMP_WEBUI_TOKEN"       # 다시 시작해도 같은 토큰(브라우저 쿠키 유지)
 ENV_PORT = "KDUMP_WEBUI_PORT"         # 다시 시작해도 같은 포트
 STATIC_DIR = os.path.join(APP_DIR, "static")
+WIN_SCRIPT = os.path.join(os.path.dirname(APP_DIR), "winbin", "analyze-windump.ps1")
 ANALYZE_SCRIPT = os.path.join(REPO_DIR, "bin", "analyze-kdump")
 
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -84,13 +85,17 @@ DEFAULT_SETTINGS = {
 UPDATE_CHANNELS = ("release", "branch")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
-TOOL_VERSION_RE = re.compile(r"analyze-kdump (\S+?)(?: \(commit ([0-9a-f]+)\))?(?:, 설치 (.+))?$")
+TOOL_VERSION_RE = re.compile(r"analyze-(?:kdump|windump) (\S+?)(?: \(commit ([0-9a-f]+)\))?(?:, 설치 (.+))?$")
 # 새 서버의 기본 원격 경로. 서버에 이 경로가 없고 예전 기본 위치(/opt/kdump-tools)에만 설치돼 있으면
 # 원격 스크립트가 예전 위치를 씁니다(with_install_fallback).
 DEFAULT_TOOL = "/opt/kdump-analyzer/bin/analyze-kdump"
+# Windows 서버의 기본값: 분석 스크립트 설치 위치와 덤프가 있는 디렉터리(MEMORY.DMP, Minidump)
+WIN_TOOL = r"C:\ProgramData\kdump-analyzer\bin\analyze-windump.ps1"
+WIN_DUMP_DIR = r"C:\Windows"
+SERVER_OS = ("linux", "windows")
 DEFAULT_SERVER = {
     "name": "", "target": "", "port": 22, "key_file": "", "sudo": True,
-    "tool": DEFAULT_TOOL, "crash_dir": "/var/crash", "method": "auto",
+    "tool": DEFAULT_TOOL, "crash_dir": "/var/crash", "method": "auto", "os": "linux",
 }
 
 
@@ -166,6 +171,12 @@ class Store:
             raise ApiError(400, "접속 대상(user@host)을 공백 없이, '-'로 시작하지 않게 입력해 주세요.")
         if server["method"] not in ("auto", "installed", "upload"):
             raise ApiError(400, "분석 방식이 올바르지 않습니다.")
+        if server.get("os") not in SERVER_OS:
+            raise ApiError(400, "운영체제는 linux 또는 windows여야 합니다.")
+        if server["os"] == "windows":
+            server["sudo"] = False  # Windows는 관리자 계정으로 접속합니다(sudo 없음).
+            if not server["tool"].lower().endswith("\\bin\\analyze-windump.ps1"):
+                raise ApiError(400, "Windows 서버의 분석 스크립트 경로는 ...\\bin\\analyze-windump.ps1 형태여야 합니다 (기본 %s)." % WIN_TOOL)
         with self.lock:
             servers = [s for s in self.servers() if s["name"] not in (original, server["name"])]
             if original != server["name"] and any(s["name"] == server["name"] for s in self.servers()):
@@ -353,6 +364,7 @@ def load_summary(report_path):
         "evidence": str(ctype.get("evidence") or ""), "panic": str(data.get("panic") or ""),
         "uninterruptible": count if isinstance(count, int) else None,
         "tainted": names("tainted_modules"), "modules": names("module_symbols"),
+        "suspect": names("suspect_modules"), "os": str(data.get("os") or "linux"),
         "crash_exit": data.get("crash_exit") if isinstance(data.get("crash_exit"), int) else None,
         "sys": {k: str(sysv[k]) for k in SUMMARY_SYS_KEYS if k in sysv},
     }
@@ -387,7 +399,7 @@ def parse_result_head(path):
             info["panic"] = _plain(m.group(1))
         summary = load_summary(path)
         if summary:
-            info["summary"] = {k: summary[k] for k in ("uninterruptible", "tainted", "crash_exit")}
+            info["summary"] = {k: summary[k] for k in ("uninterruptible", "tainted", "crash_exit", "suspect")}
             if summary["type"] and not info.get("type"):
                 info["type"], info["type_label"] = summary["type"], summary["label"]
     return info
@@ -514,7 +526,74 @@ def human_duration(seconds):
 
 def remote_command(server, argv):
     command = " ".join(shlex.quote(a) for a in argv)
-    return ("sudo -n " + command) if server.get("sudo") else command
+    return ("sudo -n " + command) if server.get("sudo") and not is_windows(server) else command
+
+
+def is_windows(server):
+    return (server or {}).get("os") == "windows"
+
+
+def split_stream(buffer):
+    """출력 버퍼를 ([(줄, 구분자)], 남은 버퍼)로 나눕니다. 구분자는 "\\n"(완성된 줄) 또는 "\\r"(진행 표시 갱신).
+
+    Windows 서버의 출력은 줄 끝이 \\r\\n이라 이것도 완성된 줄("\\n")로 봅니다. 버퍼 끝의 \\r은 다음 조각이
+    \\n으로 시작할 수 있으므로 남겨 둡니다.
+    """
+    pieces = []
+    while True:
+        match = re.search(r"\r\n|[\r\n]", buffer)
+        if not match:
+            break
+        if match.group() == "\r" and match.end() == len(buffer):
+            break
+        sep = "\r" if match.group() == "\r" else "\n"
+        pieces.append((buffer[:match.start()], sep))
+        buffer = buffer[match.end():]
+    return pieces, buffer
+
+
+def valid_vmcore_path(server, path):
+    """덤프 경로가 서버 운영체제의 절대 경로인지 확인합니다 (Linux /..., Windows C:\\...)."""
+    if not isinstance(path, str) or not path or "\n" in path or "\r" in path or "\0" in path:
+        return False
+    if is_windows(server):
+        return re.match(r"^[A-Za-z]:\\", path) is not None
+    return path.startswith("/")
+
+
+def ps_quote(value):
+    """PowerShell 작은따옴표 문자열 (작은따옴표는 두 번 씁니다)."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+# Windows 원격 명령은 powershell -EncodedCommand로 보냅니다. Windows의 sshd는 명령을 cmd.exe로 넘기는데,
+# base64에는 따옴표가 필요한 문자가 없어 인용 문제가 생기지 않습니다. cmd.exe 명령 길이 제한(8191자)이 있어
+# 짧은 스크립트만 이렇게 보내고, 분석 스크립트 자체는 표준 입력으로 보냅니다.
+WIN_PRELUDE = "[Console]::OutputEncoding=[Text.Encoding]::UTF8;$ProgressPreference='SilentlyContinue';"
+# analyze-windump.ps1의 Find-Cdb와 같은 순서로 cdb.exe를 찾습니다.
+WIN_FIND_CDB = r"""function Find-Cdb{foreach($p in @(${env:ProgramFiles(x86)},$env:ProgramFiles)){if($p){$c=Join-Path $p 'Windows Kits\10\Debuggers\x64\cdb.exe';if(Test-Path -LiteralPath $c){return $c}}};$g=Get-Command cdb.exe -ErrorAction SilentlyContinue;if($g){return $g.Source};return $null};"""
+# 덤프 디렉터리(기본 C:\Windows)의 *.dmp(MEMORY.DMP)와 Minidump\*.dmp
+WIN_DUMPS = r"""function Get-Dumps($d){@(Get-ChildItem -LiteralPath $d -Filter *.dmp -File -ErrorAction SilentlyContinue)+@(Get-ChildItem -LiteralPath (Join-Path $d 'Minidump') -Filter *.dmp -File -ErrorAction SilentlyContinue)|Where-Object{$_}|Sort-Object FullName -Unique};"""
+
+
+def win_argv(script):
+    data = (WIN_PRELUDE + script).encode("utf-16-le")
+    return ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-EncodedCommand", base64.b64encode(data).decode("ascii")]
+
+
+def fetch_remote_file(server, path, timeout=120):
+    """원격 파일 내용을 바이트로 가져옵니다. Windows는 콘솔 인코딩을 거치지 않도록 base64로 받습니다."""
+    if not is_windows(server):
+        return ssh_run(server, ["cat", path], timeout=timeout, data=True)
+    code, data = ssh_run(server, win_argv("[Convert]::ToBase64String([IO.File]::ReadAllBytes(%s))" % ps_quote(path)),
+                         timeout=timeout, data=True)
+    if code != 0:
+        return code, data
+    try:
+        return 0, base64.b64decode(b"".join(data.split()), validate=True)
+    except ValueError:  # binascii.Error 포함
+        return 1, data
 
 
 def ssh_run(server, argv, stdin=None, timeout=60, data=False):
@@ -545,6 +624,11 @@ def ssh_text(server, argv, timeout=60):
 
 
 def probe_method(server):
+    if is_windows(server):
+        code, out = ssh_text(server, win_argv(WIN_FIND_CDB + "if(Test-Path -LiteralPath %s){'installed'}elseif(Find-Cdb){'upload'}else{'none'}"
+                                              % ps_quote(server["tool"])), timeout=30)
+        out = out.strip().splitlines()[-1:] or [""]
+        return out[0] if code == 0 else ""
     code, out = ssh_text(server, ["sh", "-c", with_install_fallback(
                                   'if [ -x "$1" ]; then echo installed; '
                                   'elif command -v crash >/dev/null 2>&1; then echo upload; '
@@ -554,6 +638,8 @@ def probe_method(server):
 
 
 def test_server(server):
+    if is_windows(server):
+        return win_test_server(server)
     code, out = ssh_text(server, ["sh", "-c", with_install_fallback("""
 echo "host=$(hostname)"; echo "user=$(id -un)"
 if [ -x "$1" ]; then echo "tool=$("$1" --version 2>/dev/null | grep '^analyze-kdump ' | head -n 1)"; [ -n "$("$1" --version 2>/dev/null | grep '^analyze-kdump ')" ] || echo "tool=installed (version unknown)"; else echo "tool="; fi
@@ -578,6 +664,17 @@ DUMP_LIST_SH = ('for f in "$1"/*/vmcore "$1"/*/vmcore.flat "$1"/*/dump.[0-9]*; d
 
 
 def list_vmcores(server):
+    if is_windows(server):
+        code, out = ssh_text(server, win_argv(WIN_DUMPS + "Get-Dumps %s|Sort-Object LastWriteTime -Descending|ForEach-Object{'{0} {1} {2}' -f [int64](($_.LastWriteTimeUtc-[datetime]'1970-01-01').TotalSeconds),$_.Length,$_.FullName}"
+                                              % ps_quote(server["crash_dir"])), timeout=40)
+        if code != 0:
+            raise ApiError(502, "덤프 목록을 읽지 못했습니다: %s" % out.strip()[-300:])
+        items = []
+        for line in out.splitlines():
+            parts = line.strip().split(" ", 2)
+            if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+                items.append({"mtime": int(parts[0]), "size": int(parts[1]), "path": parts[2]})
+        return items
     # 덤프 파일 이름: RHEL·SUSE는 <디렉터리>/vmcore, Ubuntu·Debian(kdump-tools)은 <YYYYMMDDHHMM>/dump.<YYYYMMDDHHMM>
     code, out = ssh_text(server, ["sh", "-c", DUMP_LIST_SH,
                                   "sh", server["crash_dir"]], timeout=40)
@@ -721,6 +818,8 @@ def self_update(settings):
 
 def server_version(server):
     """원격 서버에 설치된 analyze-kdump의 버전과 설치 정보."""
+    if is_windows(server):
+        return win_server_version(server)
     code, out = ssh_text(server, ["sh", "-c", with_install_fallback("""
 t=$(command -v "$1" 2>/dev/null || true)
 if [ -n "$t" ] && [ -x "$t" ]; then
@@ -934,8 +1033,171 @@ def _num(value):
         return 0
 
 
+# ---------------------------------------------------------------- Windows 서버
+
+def _win_lines(out):
+    info = {}
+    for line in out.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip():
+            info[key.strip()] = value.strip()
+    return info
+
+
+def win_test_server(server):
+    script = WIN_FIND_CDB + WIN_DUMPS + r"""$t=%s;$d=%s
+"host=$env:COMPUTERNAME";"user=$env:USERNAME"
+if(Test-Path -LiteralPath $t){$v=(& $t -Version 2>$null|Select-Object -First 1);"tool=$v"}else{"tool="}
+$c=Find-Cdb;if($c){"crash=cdb $((Get-Item -LiteralPath $c).VersionInfo.ProductVersion)"}else{"crash="}
+"vmcores=$(@(Get-Dumps $d).Count)"
+""" % (ps_quote(server["tool"]), ps_quote(server["crash_dir"]))
+    code, out = ssh_text(server, win_argv(script), timeout=60)
+    info = {"ok": code == 0, "raw": out.strip()[-600:]}
+    info.update(_win_lines(out))
+    if code == 0:
+        info["method"] = "installed" if info.get("tool") else ("upload" if info.get("crash") else "none")
+    return info
+
+
+def win_server_version(server):
+    script = r"""$t=%s
+if(Test-Path -LiteralPath $t){$v=(& $t -Version 2>$null|Select-Object -First 1);"version=$v";$b=Split-Path -Parent (Split-Path -Parent $t);"prefix=$b";$f=Join-Path $b '.install-info';if(Test-Path -LiteralPath $f){Get-Content -LiteralPath $f|Where-Object{$_ -match '^(SOURCE|INSTALLED_AT)='}}}else{"version="}""" % ps_quote(server["tool"])
+    code, out = ssh_text(server, win_argv(script), timeout=60)
+    info = {"ok": code == 0, "server": server["name"], "os": "windows"}
+    if code != 0:
+        info["error"] = (out.strip().splitlines() or ["SSH 접속 실패"])[-1][-300:]
+        return info
+    for key, value in _win_lines(out).items():
+        if key in ("version", "prefix", "SOURCE", "INSTALLED_AT"):
+            info[key.lower()] = value
+    info["installed"] = bool(info.get("version"))
+    match = TOOL_VERSION_RE.match(info.get("version", ""))
+    if match:
+        info["version"], info["commit"] = match.group(1), match.group(2) or ""
+        if not info.get("installed_at"):
+            info["installed_at"] = match.group(3) or ""
+    return info
+
+
+def win_upload_name():
+    """분석 스크립트를 보낼 원격 임시 파일 이름(접속 계정의 홈 폴더 기준)."""
+    return "kdump-analyzer-%s.ps1" % uuid.uuid4().hex
+
+
+def scp_upload(server, local_path, remote_name, timeout=120):
+    """로컬 파일을 원격 계정의 홈 폴더에 remote_name으로 보냅니다. (종료 코드, 출력)
+
+    Windows 서버에는 표준 입력으로 큰 데이터를 보내지 않습니다. Windows OpenSSH를 거친 PowerShell은
+    표준 입력이 크면(실제 VM에서 수십 KB) 끝을 받지 못하고 멈추는 일이 불규칙하게 생깁니다. scp는 안정적입니다.
+    """
+    if not re.match(r"^[A-Za-z0-9._-]+$", remote_name):
+        raise ApiError(400, "원격 파일 이름이 올바르지 않습니다.")
+    ssh = ssh_args(server)
+    options = ssh[1:-1]
+    # ssh의 -p(포트)는 scp에서 -P입니다.
+    options = ["-P" if o == "-p" else o for o in options]
+    target = ssh[-1]
+    user, _, host = target.rpartition("@")
+    if ":" in host:
+        host = "[%s]" % host
+    dest = "%s%s:%s" % (user + "@" if user else "", host, remote_name)
+    try:
+        result = subprocess.run(["scp", "-q"] + options + [local_path, dest], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+        return result.returncode, result.stdout
+    except subprocess.TimeoutExpired:
+        return 124, b"scp timeout"
+    except OSError as error:
+        return 127, ("scp를 실행할 수 없습니다: %s" % error).encode()
+
+
+def win_report_command(server, vmcore, method, limit):
+    """Windows 서버에서 리포트를 만드는 명령 (argv, 먼저 홈 폴더로 보낼 분석 스크립트 이름 또는 None)."""
+    args = "-Dump %s -TimeoutSec %d" % (ps_quote(vmcore), limit)
+    if method == "installed":
+        return win_argv("& %s %s; exit $LASTEXITCODE" % (ps_quote(server["tool"]), args)), None
+    # 무설치 실행: scp로 홈 폴더에 보낸 분석 스크립트를 실행하고 지웁니다.
+    name = win_upload_name()
+    script = ("$f=Join-Path $HOME %s;"
+              "try{& $f %s}finally{Remove-Item -LiteralPath $f -ErrorAction SilentlyContinue};exit $LASTEXITCODE"
+              % (ps_quote(name), args))
+    return win_argv(script), name
+
+
+def win_install_command(server, version, commit, label):
+    """분석 스크립트를 서버 설정의 경로(...\bin\analyze-windump.ps1)에 설치하는 명령
+    (argv, 먼저 홈 폴더로 보낼 분석 스크립트 이름)."""
+    name = win_upload_name()
+    script = ("$f=Join-Path $HOME %s;$t=%s;$base=Split-Path -Parent (Split-Path -Parent $t);"
+              "try{New-Item -ItemType Directory -Force -Path (Split-Path -Parent $t),(Join-Path $base 'logs')|Out-Null;"
+              "Copy-Item -LiteralPath $f -Destination $t -Force -ErrorAction Stop}"
+              "finally{Remove-Item -LiteralPath $f -ErrorAction SilentlyContinue};"
+              "Set-Content -LiteralPath (Join-Path $base '.install-info') -Encoding UTF8 -Value @('VERSION=%s','COMMIT=%s',('INSTALLED_AT='+(Get-Date -Format 'yyyy-MM-dd HH:mm')),'SOURCE=%s');"
+              "'설치: '+$t" % (ps_quote(name), ps_quote(server["tool"]), version.replace("'", ""), commit,
+                               label.replace("'", "")))
+    return win_argv(script), name
+
+
+WIN_DUMP_MODES = {"0": "만들지 않음", "1": "전체 메모리 덤프", "2": "커널 메모리 덤프", "3": "작은 메모리 덤프(Minidump)",
+                  "7": "자동 메모리 덤프"}
+
+
+def win_prepare_check(server):
+    """Windows 서버의 덤프 분석 환경 점검. 1단계에서는 점검과 분석 스크립트 설치만 합니다."""
+    script = WIN_FIND_CDB + r"""$c=Find-Cdb;"cdb=$c";if($c){"cdb_version=$((Get-Item -LiteralPath $c).VersionInfo.ProductVersion)"}
+$cc=Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl' -ErrorAction SilentlyContinue;"dump_mode=$($cc.CrashDumpEnabled)";"dump_file=$($cc.DumpFile)";"auto_reboot=$($cc.AutoReboot)"
+$pf=@(Get-CimInstance Win32_PageFileUsage -ErrorAction SilentlyContinue);"pagefile_mb=$(($pf|Measure-Object AllocatedBaseSize -Sum).Sum)"
+$os=Get-CimInstance Win32_OperatingSystem;"os_name=$($os.Caption)";"kernel=$($os.Version)";"mem_kb=$($os.TotalVisibleMemorySize)"
+$dr=Get-PSDrive ($env:SystemDrive.TrimEnd(':'));"disk_free=$($dr.Free)";"system_drive=$env:SystemDrive"
+"admin=$(([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))"
+"""
+    code, out = ssh_text(server, win_argv(script), timeout=90)
+    if code != 0 and "cdb=" not in out:
+        raise ApiError(502, "서버를 점검하지 못했습니다: %s" % (out.strip().splitlines() or ["SSH 접속 실패"])[-1][-300:])
+    i = _win_lines(out)
+    tool = win_server_version(server)
+    items = []
+
+    def add(item_id, label, status, detail, action=None, note=None):
+        items.append({"id": item_id, "label": label, "status": status, "detail": detail, "action": action, "note": note})
+
+    mode = i.get("dump_mode", "")
+    if mode in ("", "0"):
+        add("dumpconf", "덤프 설정", "missing", "블루스크린 때 덤프를 만들지 않음 (CrashDumpEnabled=%s)" % (mode or "없음"),
+            None, "시스템 속성 → 고급 → 시작 및 복구에서 '커널 메모리 덤프'를 고르거나 tests/vm/windows-vm-setup.md의 덤프 설정을 따르세요.")
+    else:
+        add("dumpconf", "덤프 설정", "ok", "%s · %s" % (WIN_DUMP_MODES.get(mode, "CrashDumpEnabled=" + mode), i.get("dump_file") or "MEMORY.DMP"))
+    pagefile = _num(i.get("pagefile_mb"))
+    if pagefile:
+        add("pagefile", "페이지 파일", "ok", "%d MB" % pagefile)
+    else:
+        add("pagefile", "페이지 파일", "missing", "없음 · 페이지 파일이 없으면 커널 덤프를 만들지 못할 수 있습니다", None,
+            "시스템 드라이브에 '시스템이 관리하는 크기'의 페이지 파일을 두세요.")
+    if i.get("cdb"):
+        add("cdb", "디버거 (cdb)", "ok", "cdb %s · %s" % (i.get("cdb_version", ""), i["cdb"]))
+    else:
+        add("cdb", "디버거 (cdb)", "missing", "Debugging Tools for Windows가 없음", None,
+            "Windows SDK 설치 파일로 'Debugging Tools for Windows'만 설치하세요 (winsdksetup.exe /features OptionId.WindowsDesktopDebuggers /quiet).")
+    free = _num(i.get("disk_free"))
+    if free:
+        add("disk", "저장 공간", "ok" if free > 5 * 1024 ** 3 else "warn",
+            "%s 여유 %.1f GB%s" % (i.get("system_drive", ""), free / 1024 ** 3,
+                                   "" if free > 5 * 1024 ** 3 else " · 덤프와 심볼에 공간이 부족할 수 있습니다"))
+    if tool.get("installed"):
+        add("tool", "분석 스크립트", "ok", "v%s %s" % (tool.get("version", ""), tool.get("prefix", "")))
+    else:
+        add("tool", "분석 스크립트", "missing", "설치되어 있지 않음 · 무설치 실행으로도 분석할 수 있습니다", "tool")
+    if i.get("admin") != "True":
+        add("admin", "관리자 권한", "missing", "접속 계정이 관리자가 아님", None,
+            "MEMORY.DMP를 읽으려면 관리자 계정으로 접속해야 합니다.")
+    return {"os": i.get("os_name", "Windows"), "family": "Windows", "kernel": i.get("kernel", ""), "pkg": "",
+            "root": i.get("admin") == "True", "items": items}
+
+
 def prepare_check(server):
     """서버의 kdump 분석 환경을 점검해 항목 목록으로 돌려줍니다. 서버에서 바꾸는 것은 없습니다."""
+    if is_windows(server):
+        return win_prepare_check(server)
     code, out = ssh_text(server, ["sh", "-c", REMOTE_CHECK, "sh", server["crash_dir"], vmlinux_base(server)],
                          timeout=60)
     if code != 0 and "os_id=" not in out:
@@ -1272,7 +1534,8 @@ class Jobs:
         timeout(초)을 주면 원격에서는 REMOTE_TIMEOUT 감시로, 로컬에서는 감시 타이머로 이중으로 끊습니다.
         시간을 넘기면 (124, 출력)을 돌려주고 job.timed_out을 켭니다.
         """
-        if timeout:
+        if timeout and not is_windows(server):
+            # Windows는 분석 스크립트가 -TimeoutSec으로 직접 cdb를 끝내고, 여기서는 아래 감시만 합니다.
             argv = with_remote_timeout(argv, timeout)
         proc = subprocess.Popen(ssh_args(server) + [remote_command(server, argv)],
                                 stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
@@ -1301,11 +1564,8 @@ class Jobs:
             if not chunk:
                 break
             buffer += chunk.decode("utf-8", errors="replace")
-            while True:
-                match = re.search(r"[\r\n]", buffer)
-                if not match:
-                    break
-                segment, sep, buffer = buffer[:match.start()], match.group(), buffer[match.end():]
+            pieces, buffer = split_stream(buffer)
+            for segment, sep in pieces:
                 segment = ANSI_RE.sub("", segment)
                 if segment.startswith("내려받는 중:") and job.progress:
                     job.progress = dict(job.progress, label="%s · %s" % (job.step_label, segment.strip()))
@@ -1337,7 +1597,49 @@ class Jobs:
         if llm:
             self.run_llm(job)
 
+    def _run_report_windows(self, job, server):
+        job.phase = "서버 확인 중"
+        method = server.get("method") or "auto"
+        if method == "auto":
+            method = probe_method(server)
+            if method not in ("installed", "upload"):
+                raise ApiError(502, "Windows 서버에 분석 스크립트나 cdb(Debugging Tools for Windows)가 없어 분석할 수 없습니다.")
+        job.method = method
+        job.log("분석 방식: %s" % ("원격 설치본 실행" if method == "installed" else "무설치 실행"))
+        limit = crash_timeout_seconds(self.store.settings())
+        argv, upload = win_report_command(server, job.vmcore, method, limit)
+        if upload:
+            self._win_upload(job, server, upload)
+        job.phase = "cdb 리포트 생성 중"
+        code, text = self._stream(job, server, argv, timeout=limit + 120)
+        remote_report = remote_json = ""
+        for line in text.splitlines():
+            if line.startswith("report:"):
+                remote_report = line.split(":", 1)[1].strip()
+            elif line.startswith("json:"):
+                remote_json = line.split(":", 1)[1].strip()
+        if not remote_report:
+            raise ApiError(502, "리포트를 만들지 못했습니다 (종료 코드 %d). 로그를 확인해 주세요." % code)
+        job.phase = "리포트 가져오는 중"
+        fetch_code, data = fetch_remote_file(server, remote_report)
+        if fetch_code != 0:
+            raise ApiError(502, "리포트를 가져오지 못했습니다.")
+        name = re.split(r"[\\/]", remote_report)[-1]
+        if not FILE_RE.match(name):
+            name = "kdump-report-%s.txt" % time.strftime("%Y%m%d-%H%M%S")
+        local_report = os.path.join(self.store.report_dir(server["name"]), name)
+        with open(local_report, "wb") as f:
+            f.write(data)
+        job.report = name
+        job.log("리포트 저장: %s" % name)
+        if remote_json:
+            self._fetch_summary(job, server, remote_json, local_report)
+        if code != 0:
+            raise ApiError(502, "cdb 실행이 실패했거나 버그체크를 읽지 못했습니다 (종료 코드 %d). 리포트 끝의 실행 로그를 확인해 주세요." % code)
+
     def _run_report(self, job, server):
+        if is_windows(server):
+            return self._run_report_windows(job, server)
         job.phase = "서버 확인 중"
         method = server.get("method") or "auto"
         if method == "auto":
@@ -1385,7 +1687,7 @@ class Jobs:
                 raise ApiError(502, "리포트를 만들지 못했습니다 (종료 코드 %d). 로그를 확인해 주세요." % code)
 
             job.phase = "리포트 가져오는 중"
-            fetch_code, data = ssh_run(server, ["cat", remote_report], timeout=120, data=True)
+            fetch_code, data = fetch_remote_file(server, remote_report)
             if fetch_code != 0:
                 raise ApiError(502, "리포트를 가져오지 못했습니다.")
             name = os.path.basename(remote_report)
@@ -1406,7 +1708,7 @@ class Jobs:
 
     def _fetch_summary(self, job, server, remote_json, local_report):
         """리포트 옆의 JSON 요약을 가져옵니다. 없거나 깨졌으면 리포트만 남기고 넘어갑니다."""
-        code, data = ssh_run(server, ["cat", remote_json], timeout=60, data=True)
+        code, data = fetch_remote_file(server, remote_json, timeout=60)
         try:
             if code != 0:
                 raise ValueError("가져오지 못했습니다")
@@ -1453,7 +1755,34 @@ class Jobs:
         with self.server_slot(server["name"]).hold(job):
             self._run_upgrade(job, server)
 
+    def _win_upload(self, job, server, name):
+        job.phase = "분석 스크립트 보내는 중"
+        code, out = scp_upload(server, WIN_SCRIPT, name)
+        if code != 0:
+            text = out.decode("utf-8", "replace").strip()
+            if text:
+                job.log(text)
+            raise ApiError(502, "분석 스크립트를 서버로 보내지 못했습니다 (scp 종료 코드 %d)." % code)
+
+    def _install_windows(self, job, server):
+        if job.source != "local":
+            raise ApiError(400, "Windows 서버는 '노트북 버전 설치'만 지원합니다.")
+        local = local_info()
+        label = "webui:%s" % (local["commit"][:7] or "v" + local["version"])
+        job.log("노트북 버전 v%s의 분석 스크립트를 설치합니다: %s" % (local["version"], server["tool"]))
+        argv, upload = win_install_command(server, local["version"], local["commit"], label)
+        self._win_upload(job, server, upload)
+        job.phase = "설치 중"
+        code, _ = self._stream(job, server, argv, timeout=300)
+        if code != 0:
+            raise ApiError(502, "설치에 실패했습니다 (종료 코드 %d). 관리자 계정인지 확인해 주세요." % code)
+        info = win_server_version(server)
+        job.version = info.get("version")
+        job.log("설치된 버전: %s" % (info.get("version") or "확인 실패"))
+
     def _run_upgrade(self, job, server):
+        if is_windows(server):
+            return self._install_windows(job, server)
         settings = self.store.settings()
         repo, channel, branch = update_source(settings)
         if not REPO_RE.match(repo) or not BRANCH_RE.match(branch):
@@ -1492,6 +1821,8 @@ class Jobs:
             self._run_move(job, server)
 
     def _run_move(self, job, server):
+        if is_windows(server):
+            raise ApiError(400, "설치 위치 옮기기는 Linux 서버에서만 합니다.")
         job.phase = "설치 위치 확인 중"
         before = server_version(server)
         if not before.get("ok"):
@@ -1757,7 +2088,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             kind = body.get("kind")
             if kind in ("report", "llm"):
                 vmcore = body.get("vmcore", "")
-                if not vmcore.startswith("/") or "\n" in vmcore:
+                if not valid_vmcore_path(server, vmcore):
                     raise ApiError(400, "vmcore 경로가 올바르지 않습니다.")
                 job = Job(kind, server["name"], vmcore=vmcore)
                 app.jobs.start(job, lambda j: app.jobs.run_report(j, kind == "llm"),
@@ -1797,7 +2128,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not isinstance(vmcores, list) or not 1 <= len(vmcores) <= 100:
                 raise ApiError(400, "vmcore를 1~100개 골라 주세요.")
             for vmcore in vmcores:
-                if not isinstance(vmcore, str) or not vmcore.startswith("/") or "\n" in vmcore:
+                if not valid_vmcore_path(server, vmcore):
                     raise ApiError(400, "vmcore 경로가 올바르지 않습니다.")
             created, skipped = [], []
             if kind == "llm-only":

@@ -49,12 +49,18 @@
     <h2 id="server-dialog-title">서버 추가</h2>
     <input type="hidden" name="original">
     <div class="grid">
+      <label>운영체제
+        <select name="os" id="server-os">
+          <option value="linux">Linux (kdump)</option>
+          <option value="windows">Windows (메모리 덤프)</option>
+        </select>
+      </label>
       <label>이름<input name="name" required pattern="[A-Za-z0-9._-]+" placeholder="db01"></label>
       <label>접속 대상<input name="target" required placeholder="ops@10.0.0.11"></label>
       <label>SSH 포트<input name="port" type="number" min="1" max="65535" value="22"></label>
       <label>SSH 키 파일 <span class="hint">(비우면 기본 키)</span><input name="key_file" placeholder="C:\Users\me\.ssh\id_ed25519"></label>
-      <label>원격 analyze-kdump 경로<input name="tool" value="/opt/kdump-analyzer/bin/analyze-kdump"></label>
-      <label>crash 디렉터리<input name="crash_dir" value="/var/crash"></label>
+      <label><span id="label-tool">원격 analyze-kdump 경로</span><input name="tool" value="/opt/kdump-analyzer/bin/analyze-kdump"></label>
+      <label><span id="label-dumpdir">crash 디렉터리</span><input name="crash_dir" value="/var/crash"></label>
       <label>분석 방식
         <select name="method">
           <option value="auto">자동 선택 (설치본 → 무설치)</option>
@@ -62,7 +68,8 @@
           <option value="upload">무설치 실행 (스크립트를 임시로 보내 실행)</option>
         </select>
       </label>
-      <label class="check"><input type="checkbox" name="sudo" checked> 원격 명령을 sudo로 실행 <span class="hint">(비밀번호 없는 sudo 필요)</span></label>
+      <label class="check" id="label-sudo"><input type="checkbox" name="sudo" checked> 원격 명령을 sudo로 실행 <span class="hint">(비밀번호 없는 sudo 필요)</span></label>
+      <p class="hint" id="windows-hint" hidden>Windows 서버는 OpenSSH 서버를 켜고 관리자 계정으로 SSH 키 접속이 되어야 합니다. 분석에는 Debugging Tools for Windows(cdb)가 필요합니다.</p>
     </div>
     <p class="form-error" id="server-error"></p>
     <div class="modal-actions">

@@ -5,6 +5,7 @@ Linux 커널 패닉 덤프(`vmcore`)를 빠르게 분석하기 위한 도구 모
 - **`analyze-kdump`**: 서버에서 실행하는 분석 명령. 리포트 생성과 LLM 분석을 합니다.
 - **`analyze-kdump-ui`**: 서버 터미널에서 쓰는 메뉴 화면. 장애 현장에서 SSH로 접속해 씁니다.
 - **웹 UI** (`webui/kdump-webui.py`): 노트북 브라우저에서 여러 서버를 SSH로 관리하고 분석합니다.
+- **Windows 분석 스크립트** (`winbin/analyze-windump.ps1`): Windows 서버의 블루스크린 메모리 덤프를 `cdb`로 분석합니다. 웹 UI에서 Windows 서버로 함께 씁니다.
 
 RHEL·Rocky·Alma 계열과 Ubuntu·Debian을 지원합니다. 예전 이름은 `kdump-tools`였는데, Debian·Ubuntu의 `kdump-tools` 패키지(덤프를 만드는 쪽)와 헷갈리지 않도록 v1.19.0에서 `kdump-analyzer`로 바꿨습니다. 그 패키지가 만든 덤프도 분석합니다.
 
@@ -58,7 +59,7 @@ sudo analyze-kdump -r /var/crash
 - [사용법](#사용법) (리포트, 종료 코드, 장애 유형 판정, LLM 입력 축소와 마스킹)
 - [설정 파일](#설정-파일) (LLM provider, 구독 계정 사용)
 - [vmlinux 추가 방법](#vmlinux-추가-방법)
-- [웹 UI](#웹-ui) · [터미널 메뉴 UI](#터미널-메뉴-ui) (상황별 사용 방식, 중앙 분석 서버 구성)
+- [웹 UI](#웹-ui) · [Windows 서버 (메모리 덤프)](#windows-서버-메모리-덤프) · [터미널 메뉴 UI](#터미널-메뉴-ui) (상황별 사용 방식, 중앙 분석 서버 구성)
 - [자동 테스트와 CI](#자동-테스트와-ci) · [테스트 VM에서 검증하기](#테스트-vm에서-검증하기) · [로그 디렉터리](#로그-디렉터리) · [라이선스](#라이선스)
 
 ## 주요 기능
@@ -75,6 +76,7 @@ sudo analyze-kdump -r /var/crash
 - 터미널 메뉴(`analyze-kdump-ui`): vmcore 선택, 분석, 결과 보기, 원격 서버 관리, 설정, 업데이트를 메뉴로 합니다.
 - 웹 UI: 노트북(Windows·macOS·Linux) 브라우저에서 서버 관리, 서버 준비(kdump 환경 점검·설치), 여러 덤프 일괄 분석과 작업 대기열, 진행 바, 분석 기록과 판정 요약, 리포트 검색, 서버별 설치·업그레이드를 합니다.
 - 업데이트는 기본으로 GitHub 최신 릴리스를 받습니다(브랜치 최신 커밋 선택 가능).
+- Windows 서버: 웹 UI에서 블루스크린 메모리 덤프를 `cdb`로 분석하고, 버그체크 코드로 장애 유형과 원인 후보 드라이버를 보여 줍니다([Windows 서버](#windows-서버-메모리-덤프)).
 
 ## 디렉터리 구조
 
@@ -93,6 +95,8 @@ sudo analyze-kdump -r /var/crash
 ├── bin/
 │   ├── analyze-kdump
 │   └── analyze-kdump-ui
+├── winbin/
+│   └── analyze-windump.ps1    # Windows 서버용 분석 스크립트 (웹 UI가 Windows 서버에 보냄)
 ├── webui/                     # 노트북에서 실행하는 웹 UI (서버에는 필요 없음)
 │   ├── kdump-webui.py
 │   ├── kdump_llm.py           # LLM 분석 (Python, Windows에서도 동작)
@@ -627,6 +631,50 @@ LLM 분석은 `webui/kdump_llm.py`에서 합니다. analyze-kdump와 같은 방�
 - 업데이트 기준, 저장소, 브랜치(기본 최신 릴리스, `621dev/kdump-analyzer`, `main`)는 같은 화면의 "업데이트 설정"에서 바꿀 수 있습니다.
 
 웹 UI에 없는 기능: crash 셸 직접 입력, vmcore를 가져와 로컬에서 crash로 분석하는 기능(Windows에서는 crash가 동작하지 않음), 구독 CLI 설치와 로그인(노트북에서 `claude auth login`이나 `codex login`으로 직접 로그인하거나, 설정에서 장기 토큰을 붙여넣음).
+
+## Windows 서버 (메모리 덤프)
+
+웹 UI에서 서버를 추가할 때 **운영체제**를 **Windows**로 고르면, Windows 서버의 블루스크린 메모리 덤프(`MEMORY.DMP`, `Minidump\*.dmp`)를 Linux 서버와 같은 화면에서 분석합니다. 리포트와 JSON 요약을 Linux와 같은 형식으로 만들어 분석 기록, 요약 상자, LLM 분석을 그대로 씁니다.
+
+**서버에 필요한 것** (자세한 순서는 [tests/vm/windows-vm-setup.md](tests/vm/windows-vm-setup.md))
+- OpenSSH 서버와 관리자 계정의 SSH 키 접속(`administrators_authorized_keys`)
+- Debugging Tools for Windows(`cdb.exe`, Windows SDK에서 이것만 설치)
+- 덤프 설정(커널 메모리 덤프 등)과 페이지 파일
+- 심볼: 기본은 Microsoft 심볼 서버에서 받아 `C:\ProgramData\kdump-analyzer\symbols`에 캐시합니다. 인터넷이 막혀 있으면 사내 심볼 저장소를 `KDUMP_SYMBOL_PATH` 환경변수나 `-SymbolPath`로 지정합니다.
+
+**분석 스크립트** `winbin/analyze-windump.ps1` (Windows PowerShell 5.1에서 동작)
+
+```powershell
+C:\ProgramData\kdump-analyzer\bin\analyze-windump.ps1                 # 가장 최근 덤프
+C:\ProgramData\kdump-analyzer\bin\analyze-windump.ps1 -Dump C:\Windows\MEMORY.DMP -TimeoutSec 1800
+```
+
+- `cdb`로 `!analyze -v`, `.bugcheck`, `vertarget`, `!thread`, `kv`, `!running -it`, `lm t n`, `!vm`, `!locks`, `!process 0 0`을 실행해 명령별 섹션으로 나눈 리포트(`kdump-report-*.txt`)와 JSON 요약을 `C:\ProgramData\kdump-analyzer\logs`에 만듭니다.
+- 버그체크 코드로 장애 유형을 판정하고, `!analyze -v`가 지목한 원인 후보 드라이버(`IMAGE_NAME`)를 근거로 남깁니다. NMI·수동 덤프는 일부러 낸 것이라 지목된 드라이버(예: `GenuineIntel.sys`)를 원인 후보가 아닌 '처리 드라이버'로만 표시합니다.
+- 분석 시간(Windows Server 2025 VM, 커널 메모리 덤프 510MB 기준): 처음에는 심볼을 받느라 2분 남짓, 그다음부터 약 1.5분(대부분 `!process 0 0`)입니다. 미니덤프는 약 20초입니다.
+
+| 유형 | 버그체크 코드 |
+|---|---|
+| 커널 예외 (oops) | 0x0A, 0xD1, 0x50, 0x1E, 0x3B, 0x7E, 0x7F, 0x8E, 0x139 |
+| 메모리 손상 | 0x19, 0xC2, 0xC5, 0x1A, 0x4E |
+| CPU 지연 (soft/hard lockup) | 0x133 DPC_WATCHDOG_VIOLATION, 0x101 CLOCK_WATCHDOG_TIMEOUT |
+| 응답 없음 (hung task) | 0x9F DRIVER_POWER_STATE_FAILURE, 0x9E USER_MODE_HEALTH_MONITOR |
+| 핵심 프로세스 종료 | 0xEF, 0xF4 |
+| 하드웨어 (MCE), NMI | 0x124, 0x9C / 0x80 |
+| 수동 덤프 | 0xE2, 0xDEADDEAD, 0x1C8 |
+| 디스크·부팅 | 0x7B, 0xED, 0x77, 0x7A |
+
+- 종료 코드: 0 정상, 1 사용법·환경 오류(덤프나 cdb 없음), 2 cdb 실패·시간 초과·버그체크를 읽지 못함(리포트는 남김).
+
+**웹 UI에서**
+- 덤프 목록은 서버 설정의 덤프 디렉터리(기본 `C:\Windows`)의 `*.dmp`와 `Minidump\*.dmp`입니다.
+- 분석 방식은 Linux와 같습니다: 원격 설치본 실행(`C:\ProgramData\kdump-analyzer\bin\analyze-windump.ps1`), 무설치 실행(스크립트를 보내 임시로 실행하고 지움), 자동 선택.
+- 버전·업데이트 화면의 **노트북 버전 설치/업그레이드**로 분석 스크립트를 설치합니다(GitHub에서 설치는 아직 Linux만).
+- 서버 준비 탭은 점검(덤프 설정, 페이지 파일, cdb, 저장 공간, 관리자 권한)과 분석 스크립트 설치를 합니다. 디버거 설치와 덤프 설정 변경은 안내만 합니다.
+- LLM 분석은 Windows용 지시문(버그체크, 원인 드라이버, Driver Verifier 등)을 씁니다.
+- 원격 명령은 `powershell -EncodedCommand`로 보내 Windows `cmd.exe`의 인용 문제를 피합니다. 분석 스크립트는 `scp`로 접속 계정의 홈 폴더에 보낸 뒤 옮기거나 실행하고 지웁니다(Windows OpenSSH를 거친 PowerShell은 큰 표준 입력에서 멈출 수 있어서입니다). 리포트는 base64로 가져와 인코딩이 깨지지 않게 합니다.
+
+**아직 안 되는 것**: 서버 준비 탭의 자동 설치(디버거, 덤프 설정), GitHub에서 설치, 터미널 메뉴(`analyze-kdump-ui`)의 Windows 서버, 설치 위치 옮기기.
 
 ## 터미널 메뉴 UI
 

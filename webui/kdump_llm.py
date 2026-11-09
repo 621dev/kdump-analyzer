@@ -26,6 +26,13 @@ Start the report with exactly one line in the form "판정: <one Korean sentence
 Include: probable root cause, evidence, impacted subsystem/process, confidence, and recommended next actions.
 If evidence is insufficient, say what additional crash commands or data are needed."""
 
+WINDOWS_PROMPT = """You are a senior Windows kernel crash dump (bugcheck / blue screen) analyst.
+The report was produced with cdb (Debugging Tools for Windows) from a Windows memory dump: !analyze -v, .bugcheck, vertarget, thread and stack, running processors, loaded modules, memory, locks and processes.
+Analyze it and write a concise Korean incident report.
+Start the report with exactly one line in the form "판정: <one Korean sentence stating the probable root cause>" before any heading or table.
+Include: bugcheck code and meaning, probable root cause (suspect driver or component), evidence, impacted process/subsystem, confidence, and recommended next actions (driver/firmware updates, Driver Verifier, hardware checks).
+If evidence is insufficient (for example symbols failed to load), say what additional cdb commands or data are needed."""
+
 MASK_NOTE = """
 
 Some identifiers in the report are masked as <HOSTNAME>, <IPV4>, <MAC> or <EMAIL>. Treat them as placeholders, not as errors."""
@@ -47,6 +54,14 @@ SECTION_POLICY = {
     "taint 모듈 관련 태스크 (foreach bt에서 추림)": (2, "head"),
     "crash> log": (3, "tail"),
     "crash> ps": (1, "head"),
+    # Windows 덤프 리포트 (cdb)
+    "cdb> !analyze -v": (4, "head"),
+    "cdb> kv": (2, "head"),
+    "cdb> !thread": (2, "head"),
+    "cdb> !running -it": (2, "head"),
+    "cdb> !locks": (1, "head"),
+    "cdb> lm t n": (1, "head"),
+    "cdb> !process 0 0": (1, "head"),
 }
 
 
@@ -150,7 +165,8 @@ def build_input(report_text, settings):
     if mask:
         report = mask_text(report)
     report = fit(report, int(settings.get("max_report_chars") or 60000))
-    system = DEFAULT_PROMPT
+    # Windows 덤프 리포트(analyze-windump.ps1)는 Windows용 지시문을 씁니다.
+    system = WINDOWS_PROMPT if report_text.lstrip().startswith("windows dump summary report") else DEFAULT_PROMPT
     prompt_file = settings.get("prompt_file")
     if prompt_file:
         with open(prompt_file, encoding="utf-8", errors="replace") as f:
