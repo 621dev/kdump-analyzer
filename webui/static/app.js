@@ -317,6 +317,7 @@ function renderMain() {
           <span>${esc(server.target)}:${esc(server.port)}</span>
           <span>분석 방식: ${esc(METHOD_LABEL[server.method] || server.method)}</span>
           <span>${server.sudo ? "sudo 사용" : "sudo 사용 안 함"}</span>
+          ${server.auto && server.auto !== "off" ? `<span class="auto-tag" title="${esc(autoTitle(server))}">자동 분석: ${esc(AUTO_LABEL[server.auto])}</span>` : ""}
         </div>
         <div class="meta" id="health-line">${healthText}</div>
       </div>
@@ -1406,8 +1407,8 @@ function openServerDialog(server) {
   form.reset();
   $("#server-error").textContent = "";
   $("#server-dialog-title").textContent = server ? "서버 수정" : "서버 추가";
-  const values = server ? Object.assign({ os: "linux" }, server)
-    : { os: "linux", port: 22, tool: OS_DEFAULTS.linux.tool, crash_dir: OS_DEFAULTS.linux.crash_dir, method: "auto", sudo: true };
+  const values = server ? Object.assign({ os: "linux", auto: "off" }, server)
+    : { os: "linux", port: 22, tool: OS_DEFAULTS.linux.tool, crash_dir: OS_DEFAULTS.linux.crash_dir, method: "auto", sudo: true, auto: "off" };
   for (const el of form.elements) {
     if (!el.name) continue;
     if (el.name === "original") el.value = server ? server.name : "";
@@ -1446,6 +1447,7 @@ $("#server-form").addEventListener("submit", async e => {
     if (!el.name) continue;
     data[el.name] = el.type === "checkbox" ? el.checked : el.value.trim();
   }
+  if (data.auto && data.auto !== "off") askNotifyPermission();
   try {
     const saved = await api("POST", "/api/servers", data);
     await loadState();
@@ -1541,6 +1543,8 @@ function onJobFinished(job) {
     loadServerVersion(job.server);
     return;
   }
+  if (job.auto) notifyDesktop(job.status === "done" ? `자동 분석 완료: ${job.server}` : `자동 분석 실패: ${job.server}`,
+    job.status === "done" ? (job.vmcore || "") : (job.error || job.vmcore || ""));
   const left = [...state.jobs.values()].filter(isActive).length;
   toast((job.status === "done" ? `${job.server}: 분석을 마쳤습니다.` : `${job.server}: 실패했습니다.`) + (left ? ` 남은 작업 ${left}개` : ""));
   if (job.status === "done") scheduleJobClose(job.id);
@@ -1591,7 +1595,7 @@ function renderJobs() {
       ? `설치 위치 옮기기 (${NEW_PREFIX})`
       : job.kind === "uninstall"
       ? `분석 도구 삭제 (${(job.actions || [])[0] === "all" ? "전부" : "프로그램만"})`
-      : { report: "리포트 생성", llm: "리포트 + LLM 분석", reanalyze: "LLM 분석" }[job.kind];
+      : (job.auto ? "자동 · " : "") + { report: "리포트 생성", llm: "리포트 + LLM 분석", reanalyze: "LLM 분석" }[job.kind];
     let pct = null;
     if (job.status === "running" && job.progress && job.progress.total) {
       pct = Math.round(job.progress.current / job.progress.total * 100);
@@ -1772,6 +1776,59 @@ $("#nav-history").addEventListener("click", openHistory);
 $("#nav-versions").addEventListener("click", openVersions);
 $("#version").addEventListener("click", openVersions);
 
+// ---------------------------------------------------------------- 새 덤프 자동 분석
+
+const AUTO_LABEL = { off: "끄기", report: "리포트", llm: "리포트 + LLM" };
+const AUTO_POLL_MS = 15000;
+
+function autoTitle(server) {
+  const st = (state.auto || {})[server.name];
+  if (!st) return "아직 확인하지 않았습니다. 웹 UI가 켜져 있는 동안 설정의 주기마다 확인합니다.";
+  const when = new Date(st.checked * 1000).toLocaleTimeString();
+  if (st.error) return `마지막 확인 ${when}: 실패 (${st.error})`;
+  if (st.baseline !== undefined) return `마지막 확인 ${when}: 기존 덤프 ${st.baseline}개를 기준으로 기록 (이후 새 덤프만 분석)`;
+  return `마지막 확인 ${when}: 새 덤프 ${st.found}개`;
+}
+
+function askNotifyPermission() {
+  try {
+    if ("Notification" in window && Notification.permission === "default") Notification.requestPermission();
+  } catch (_) { /* 알림을 못 쓰는 브라우저는 화면 알림만 씁니다. */ }
+}
+
+function notifyDesktop(title, body) {
+  try {
+    if ("Notification" in window && Notification.permission === "granted" && document.visibilityState !== "visible") {
+      new Notification(title, { body, tag: "kdump-" + title });
+    }
+  } catch (_) { /* 무시 */ }
+}
+
+// 서버가 자동으로 시작한 작업을 화면에 데려옵니다. 작업 카드와 진행 표시는 직접 시작한 작업과 같습니다.
+let autoTimer = null;
+function watchAuto() {
+  if (autoTimer) return;
+  const tick = async () => {
+    try {
+      const r = await api("GET", "/api/auto");
+      state.auto = r.status || {};
+      let added = 0;
+      for (const job of r.jobs || []) {
+        if (state.jobs.has(job.id) || !isActive(job)) continue;
+        state.jobs.set(job.id, job);
+        added++;
+        toast(`새 덤프를 찾아 자동 분석을 시작했습니다: ${job.server}`);
+        notifyDesktop(`새 덤프 발견: ${job.server}`, job.vmcore || "");
+      }
+      if (added) { renderJobs(); pollJobs(); }
+      const tag = document.querySelector(".auto-tag");
+      const server = state.servers.find(s => s.name === state.selected);
+      if (tag && server) tag.title = autoTitle(server);
+    } catch (_) { /* 다음 주기에 다시 시도 */ }
+  };
+  autoTimer = setInterval(tick, AUTO_POLL_MS);
+}
+
 // ---------------------------------------------------------------- 시작
 
 async function loadState() {
@@ -1779,6 +1836,7 @@ async function loadState() {
   state.version = data.version;
   state.settings = data.settings;
   state.servers = data.servers;
+  state.auto = data.auto || {};
   state.apiMismatch = data.api !== API_LEVEL;
   state.supervised = !!data.supervised;
   state.startedAt = data.started_at;
@@ -1812,6 +1870,6 @@ loadState().then(() => {
   }
   renderMain();
   restoringRoute = false;
-  renderJobs(); pollJobs(); loadVersions().then(() => { if (state.page === "versions") renderMain(); }); }).catch(e => {
+  renderJobs(); pollJobs(); watchAuto(); loadVersions().then(() => { if (state.page === "versions") renderMain(); }); }).catch(e => {
   $("#main").innerHTML = `<div class="card"><p class="form-error">${esc(e.message)}</p></div>`;
 });

@@ -68,6 +68,13 @@
           <option value="upload">무설치 실행 (스크립트를 임시로 보내 실행)</option>
         </select>
       </label>
+      <label>새 덤프 자동 분석 <span class="hint">(웹 UI가 켜져 있는 동안 주기적으로 확인)</span>
+        <select name="auto">
+          <option value="off">끄기</option>
+          <option value="report">리포트만 만들기</option>
+          <option value="llm">리포트 + LLM 분석</option>
+        </select>
+      </label>
       <label class="check" id="label-sudo"><input type="checkbox" name="sudo" checked> 원격 명령을 sudo로 실행 <span class="hint">(비밀번호 없는 sudo 필요)</span></label>
       <p class="hint" id="windows-hint" hidden>Windows 서버는 OpenSSH 서버를 켜고 관리자 계정으로 SSH 키 접속이 되어야 합니다. 분석에는 Debugging Tools for Windows(cdb)가 필요합니다.</p>
     </div>
@@ -140,6 +147,7 @@
       <h3>crash 리포트</h3>
       <div class="grid three">
         <label>crash 제한 시간(분) <span class="hint">(넘기면 중단, 1~1440)</span><input name="crash_timeout" type="number" min="1" max="1440"></label>
+        <label>자동 분석 확인 주기(분) <span class="hint">(새 덤프 자동 분석을 켠 서버, 1~1440)</span><input name="auto_interval" type="number" min="1" max="1440"></label>
       </div>
     </section>
     <p class="form-error" id="settings-error"></p>

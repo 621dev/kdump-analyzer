@@ -82,6 +82,7 @@ DEFAULT_SETTINGS = {
     "update_repo": "621dev/kdump-analyzer", "update_branch": "main",
     # release: GitHub의 최신 릴리스(태그)로 업데이트, branch: update_branch의 최신 커밋으로 업데이트
     "update_channel": "release",
+    "auto_interval": 10,   # 새 덤프 자동 분석: 서버를 확인하는 주기(분)
 }
 UPDATE_CHANNELS = ("release", "branch")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -97,7 +98,10 @@ SERVER_OS = ("linux", "windows")
 DEFAULT_SERVER = {
     "name": "", "target": "", "port": 22, "key_file": "", "sudo": True,
     "tool": DEFAULT_TOOL, "crash_dir": "/var/crash", "method": "auto", "os": "linux",
+    # 새 덤프 자동 분석: off | report(리포트) | llm(리포트 + LLM 분석)
+    "auto": "off",
 }
+AUTO_MODES = ("off", "report", "llm")
 
 
 def version_text():
@@ -172,6 +176,8 @@ class Store:
             raise ApiError(400, "접속 대상(user@host)을 공백 없이, '-'로 시작하지 않게 입력해 주세요.")
         if server["method"] not in ("auto", "installed", "upload"):
             raise ApiError(400, "분석 방식이 올바르지 않습니다.")
+        if server.get("auto") not in AUTO_MODES:
+            raise ApiError(400, "자동 분석은 off, report, llm 중 하나여야 합니다.")
         if server.get("os") not in SERVER_OS:
             raise ApiError(400, "운영체제는 linux 또는 windows여야 합니다.")
         if server["os"] == "windows":
@@ -1624,6 +1630,7 @@ class Job:
         self.actions = []           # prepare: 실행할 준비 동작
         self.step_label = ""        # prepare: 지금 실행 중인 동작 이름
         self.version = None         # upgrade: 설치 후 서버 버전
+        self.auto = False           # 새 덤프 자동 분석이 시작한 작업
         self.started = time.time()
         self.finished = None
         self.lock = threading.Lock()
@@ -1641,7 +1648,7 @@ class Job:
                     "report": self.report, "analysis": self.analysis, "status": self.status,
                     "phase": self.phase, "progress": self.progress, "logs": self.logs[-60:],
                     "error": self.error, "method": self.method, "source": self.source, "actions": self.actions,
-                    "version": self.version, "started": self.started,
+                    "version": self.version, "started": self.started, "auto": self.auto,
                     "elapsed": int((self.finished or time.time()) - (self.run_started or self.started))}
 
 
@@ -1782,6 +1789,17 @@ class Jobs:
             job.timed_out = True
             job.log("시간 제한(%s)을 넘겨 중단했습니다." % human_duration(timeout))
         return code, "\n".join(text_all)
+
+    def start_report(self, server_name, vmcore, kind, auto=False):
+        """리포트(kind=report) 또는 리포트 + LLM 분석(kind=llm) 작업을 그 서버의 대기열에 넣습니다."""
+        job = Job(kind, server_name, vmcore=vmcore)
+        job.auto = auto
+        return self.start(job, lambda j: self.run_report(j, kind == "llm"), self.server_slot(server_name))
+
+    def active_vmcores(self, server_name):
+        with self.lock:
+            return {j.vmcore for j in self.items.values()
+                    if j.server == server_name and j.vmcore and j.status in ("queued", "running")}
 
     def run_report(self, job, llm):
         server = self.store.server(job.server)
@@ -2139,6 +2157,112 @@ class Jobs:
 
 # ---------------------------------------------------------------- HTTP
 
+class AutoWatcher:
+    """새 덤프 자동 분석: 자동 분석을 켠 서버의 덤프 목록을 주기적으로 읽어, 새로 생긴 덤프로 작업을 시작합니다.
+
+    - 켠 뒤 처음 확인할 때는 이미 있던 덤프를 기준으로만 기록하고 분석하지 않습니다(예전 덤프를 한꺼번에 돌리지 않게).
+    - 같은 경로라도 수정 시각이 바뀌면 새 덤프로 봅니다(Windows의 MEMORY.DMP는 블루스크린마다 덮어씀).
+    - 방금 쓰인 덤프(SETTLE초 이내)는 다 써질 때까지 다음 확인으로 미룹니다.
+    - 본 덤프 목록은 데이터 폴더의 auto-seen.json에 남아 웹 UI를 다시 시작해도 이어집니다.
+    """
+
+    TICK = 30        # 확인할 서버가 있는지 보는 간격(초)
+    SETTLE = 60      # 수정 시각이 이보다 최근인 덤프는 아직 쓰는 중일 수 있어 미룹니다(초)
+
+    def __init__(self, store, jobs, list_dumps=None, now=time.time):
+        self.store = store
+        self.jobs = jobs
+        self.list_dumps = list_dumps or list_vmcores
+        self.now = now
+        self.lock = threading.Lock()
+        self.status = {}     # 서버 이름 -> {"checked", "next", "error", "found", "baseline"}
+        self.stop = threading.Event()
+
+    def start(self):
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while not self.stop.wait(self.TICK):
+            try:
+                self.tick()
+            except Exception as error:  # noqa: BLE001 - 감시 스레드는 멈추지 않게 합니다.
+                print("자동 분석 확인 중 오류: %s" % error, file=sys.stderr)
+
+    def interval(self):
+        try:
+            minutes = int(self.store.settings().get("auto_interval") or DEFAULT_SETTINGS["auto_interval"])
+        except (TypeError, ValueError):
+            minutes = DEFAULT_SETTINGS["auto_interval"]
+        return max(1, min(minutes, 1440)) * 60
+
+    def tick(self, force=False):
+        """확인할 때가 된 서버를 확인합니다. force면 시각과 상관없이 모두 확인합니다."""
+        servers = [s for s in self.store.servers() if s.get("auto", "off") != "off"]
+        names = {s["name"] for s in servers}
+        seen = self.store._load("auto-seen.json", {})
+        # 자동 분석을 끄거나 지운 서버의 기록은 버립니다. 다시 켜면 그때 있는 덤프를 새 기준으로 삼습니다.
+        dropped = [n for n in seen if n not in names]
+        with self.lock:
+            for n in list(self.status):
+                if n not in names:
+                    del self.status[n]
+        now = self.now()
+        changed = bool(dropped)
+        for n in dropped:
+            del seen[n]
+        for server in servers:
+            st = self.status.get(server["name"], {})
+            if not force and st.get("next", 0) > now:
+                continue
+            changed |= self.check(server, seen, now)
+        if changed:
+            with self.store.lock:
+                self.store._save("auto-seen.json", seen)
+
+    def check(self, server, seen, now):
+        name = server["name"]
+        st = {"checked": now, "next": now + self.interval(), "error": None, "found": 0}
+        try:
+            items = self.list_dumps(server)
+        except Exception as error:  # noqa: BLE001 - 접속 실패는 화면에 보여 주고 다음 주기에 다시 봅니다.
+            st["error"] = getattr(error, "message", str(error))[:300]
+            with self.lock:
+                self.status[name] = dict(self.status.get(name, {}), **st)
+            return False
+        known = seen.get(name)
+        current = {i["path"]: i["mtime"] for i in items}
+        if known is None:
+            # 처음: 지금 있는 덤프를 기준으로 삼습니다.
+            seen[name] = {"since": now, "dumps": current}
+            st["baseline"] = len(current)
+            with self.lock:
+                self.status[name] = st
+            return True
+        dumps = known.setdefault("dumps", {})
+        active = self.jobs.active_vmcores(name)
+        kind = "llm" if server.get("auto") == "llm" else "report"
+        for path, mtime in sorted(current.items(), key=lambda kv: kv[1]):
+            if dumps.get(path) == mtime:
+                continue
+            if now - mtime < self.SETTLE:
+                continue  # 아직 쓰는 중일 수 있습니다. 다음 확인 때 다시 봅니다.
+            dumps[path] = mtime
+            if path in active:
+                continue
+            self.jobs.start_report(name, path, kind, auto=True)
+            st["found"] += 1
+        # 서버에서 사라진 덤프는 기록에서도 지웁니다(같은 이름으로 다시 생기면 새 덤프로 봄).
+        for path in [p for p in dumps if p not in current]:
+            del dumps[path]
+        with self.lock:
+            self.status[name] = st
+        return True
+
+    def snapshot(self):
+        with self.lock:
+            return {name: dict(st) for name, st in self.status.items()}
+
+
 class App:
     def __init__(self, store, port, token=None, supervised=False):
         self.store = store
@@ -2152,6 +2276,8 @@ class App:
         self.started_version = version_text()  # 이 서버 프로세스를 시작할 때의 버전
         self.latest = None
         threading.Thread(target=self.check_latest, daemon=True).start()
+        self.auto = AutoWatcher(store, self.jobs)
+        self.auto.start()
 
     def check_latest(self):
         settings = self.store.settings()
@@ -2278,9 +2404,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if parts == ["state"] and method == "GET":
             return self._json(200, {"version": version_text(), "settings": app.public_settings(),
                                     "servers": store.servers(), "jobs": app.jobs.recent(),
+                                    "auto": app.auto.snapshot(),
                                     "platform": sys.platform, "api": API_LEVEL,
                                     "running_version": app.started_version,
                                     "supervised": app.supervised, "started_at": app.started_at})
+        if parts == ["auto"] and method == "GET":
+            return self._json(200, {"status": app.auto.snapshot(),
+                                    "jobs": [j for j in app.jobs.recent() if j.get("auto")]})
+        if parts == ["auto", "check"] and method == "POST":
+            app.auto.tick(force=True)
+            return self._json(200, {"status": app.auto.snapshot(),
+                                    "jobs": [j for j in app.jobs.recent() if j.get("auto")]})
         if parts == ["shutdown"] and method == "POST":
             body = self._body()
             with app.jobs.lock:
@@ -2335,9 +2469,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 vmcore = body.get("vmcore", "")
                 if not valid_vmcore_path(server, vmcore):
                     raise ApiError(400, "vmcore 경로가 올바르지 않습니다.")
-                job = Job(kind, server["name"], vmcore=vmcore)
-                app.jobs.start(job, lambda j: app.jobs.run_report(j, kind == "llm"),
-                               app.jobs.server_slot(server["name"]))
+                job = app.jobs.start_report(server["name"], vmcore, kind)
             elif kind == "prepare":
                 actions = body.get("actions")
                 if not valid_prepare_actions(server, actions):
@@ -2433,9 +2565,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = self._body()
             if "provider" in body and body["provider"] not in kdump_llm.PROVIDERS:
                 raise ApiError(400, "알 수 없는 provider입니다.")
-            for key in ("max_report_chars", "max_tokens", "timeout", "crash_timeout"):
+            for key in ("max_report_chars", "max_tokens", "timeout", "crash_timeout", "auto_interval"):
                 if key in body:
                     body[key] = int(body[key])
+            if "auto_interval" in body and not 1 <= body["auto_interval"] <= 1440:
+                raise ApiError(400, "자동 분석 확인 주기는 1~1440분이어야 합니다.")
             if "crash_timeout" in body and not 1 <= body["crash_timeout"] <= 1440:
                 raise ApiError(400, "crash 제한 시간은 1~1440분이어야 합니다.")
             if "update_repo" in body and not REPO_RE.match(str(body["update_repo"])):
