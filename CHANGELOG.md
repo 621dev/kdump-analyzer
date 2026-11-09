@@ -8,14 +8,14 @@ GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리�
 
 ### 추가
 - Windows 서버의 블루스크린 메모리 덤프 분석 (1단계: 분석과 웹 UI 연결)
-  - `winbin/analyze-windump.ps1`: `cdb`로 `!analyze -v` 등을 실행해 Linux와 같은 형식의 리포트·JSON 요약을 만듭니다. 버그체크 코드로 장애 유형을 판정하고 원인 후보 드라이버를 근거로 남깁니다. Windows PowerShell 5.1에서 동작하고, `-TimeoutSec`으로 cdb 시간 제한을 둡니다.
+  - `winbin/analyze-windump.ps1`: `cdb`로 `!analyze -v` 등을 실행해 Linux와 같은 형식의 리포트·JSON 요약을 만듭니다. 버그체크 코드로 장애 유형을 판정하고 원인 후보 드라이버를 근거로 남깁니다. Windows PowerShell 5.1에서 동작하고, `-TimeoutSec`으로 cdb 시간 제한을 둡니다. `-CdbPath`로 지정한 cdb가 없으면 다른 cdb로 넘어가지 않고 오류로 끝냅니다.
   - 웹 UI: 서버 추가 양식에 **운영체제**(Linux/Windows). Windows 서버의 덤프 목록, 연결 테스트, 버전 확인, 원격 설치본·무설치 실행, 노트북 버전 설치, 서버 준비 점검(덤프 설정, 페이지 파일, cdb, 저장 공간, 관리자 권한)
   - NMI·수동 덤프에서는 `!analyze -v`가 지목한 드라이버를 원인 후보가 아닌 '처리 드라이버'로 표시 (실제 Hyper-V NMI 덤프에서 `GenuineIntel.sys`가 지목됨)
   - Windows Server 2025 평가판 VM의 실제 블루스크린 덤프(커널 메모리 덤프, 미니덤프)로 설치·설치본 실행·무설치 실행 확인
   - 분석 기록과 요약 상자에 원인 후보 드라이버, Windows 장애 유형(메모리 손상, 핵심 프로세스 종료, 디스크·부팅)
   - LLM 분석: Windows 리포트에는 Windows용 지시문, cdb 섹션별 입력 축소 비율
   - 원격 명령은 `powershell -EncodedCommand`, 분석 스크립트는 `scp`로 보내고 리포트는 base64로 가져옴
-- 테스트: 가짜 cdb로 분석 스크립트 25개 항목(`tests/windows/test-windump.ps1`, CI에서 Windows PowerShell 5.1·PowerShell 7), 웹 UI의 Windows 명령을 이 PC에서 실제로 실행하는 테스트
+- 테스트: 가짜 cdb로 분석 스크립트 27개 항목(`tests/windows/test-windump.ps1`, CI에서 Windows PowerShell 5.1·PowerShell 7), 웹 UI의 Windows 명령을 이 PC에서 실제로 실행하는 테스트
 - `tests/vm/windows-vm-setup.md`: Windows Server 테스트 VM 준비 순서
 - 웹 UI API 판 7
 
