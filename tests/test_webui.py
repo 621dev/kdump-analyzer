@@ -234,6 +234,21 @@ class WindowsServerTest(unittest.TestCase):
         self.assertEqual(pieces, [("[1/3] a", "\r"), ("[2/3] b", "\r"), ("done", "\n")])
         self.assertEqual(rest, "next")
 
+    def test_stream_keeps_output_when_remote_stops_reading(self):
+        # 원격이 표준 입력(설치 묶음)을 다 받기 전에 끝나도 BrokenPipeError 대신 원격의 이유가 로그에 남습니다.
+        code = "import sys; print('no install prefix: x'); sys.stdout.flush(); sys.exit(3)"
+        orig = webui.ssh_args
+        webui.ssh_args = lambda server: [sys.executable, "-c", code]
+        try:
+            job = webui.Job("upgrade", "srv")
+            jobs = webui.Jobs.__new__(webui.Jobs)
+            rc, text = jobs._stream(job, dict(webui.DEFAULT_SERVER, name="srv", target="u@h"), ["true"],
+                                    stdin=b"x" * (4 * 1024 * 1024), timeout=60)
+        finally:
+            webui.ssh_args = orig
+        self.assertEqual(rc, 3)
+        self.assertIn("no install prefix: x", text)
+
     def test_vmcore_path_follows_server_os(self):
         # 실제 VM에서 Windows 경로가 '/'로 시작하지 않는다고 분석 작업이 거부되던 문제
         linux = dict(self.SERVER, os="linux")
@@ -574,6 +589,26 @@ class ShellSnippetTest(unittest.TestCase):
         argv = webui.with_remote_timeout(["sh", "-c", "cat; exit 3"], 30)
         r = subprocess.run(argv, input=b"hello\n", capture_output=True)
         self.assertEqual((r.returncode, r.stdout), (3, b"hello\n"))
+
+    def test_install_prefix_for_bare_command_name(self):
+        # 서버 설정이 명령 이름(analyze-kdump)이고 등록된 명령이 없으면(삭제 뒤 다시 설치) 기본 위치를 씁니다.
+        # 가짜 id(일반 사용자)로 root 확인에서 멈추게 해 실제로 설치하지는 않습니다.
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "id"), "w") as f:
+                f.write("#!/bin/sh\necho 1000\n")
+            os.chmod(os.path.join(d, "id"), 0o755)
+            env = dict(os.environ, PATH=d + os.pathsep + "/usr/bin:/bin")
+
+            def run(tool):
+                return subprocess.run(["sh", "-c", webui.REMOTE_INSTALL, "sh", tool, "local", "r", "main", "", "t", "heads"],
+                                      stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env)
+
+            r = run("analyze-kdump")
+            self.assertEqual(r.returncode, 4, r.stdout)  # 설치 위치는 정했고 root 확인에서 멈춤
+            self.assertRegex(r.stdout, r"등록된 analyze-kdump 명령이 없어 /opt/kdump-(analyzer|tools) 에 설치합니다")
+            r = run("kdump-thing")
+            self.assertEqual(r.returncode, 3, r.stdout)
+            self.assertIn("설치 위치를 알 수 없습니다", r.stdout)
 
     @unittest.skipIf(sys.platform == "win32", "심볼릭 링크와 readlink -f가 있는 Linux에서만 실행합니다")
     def test_remote_uninstall(self):

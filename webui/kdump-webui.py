@@ -1380,6 +1380,15 @@ t=$(command -v "$tool" 2>/dev/null || true)
 if [ -n "$t" ]; then t=$(readlink -f "$t"); else t="$tool"; fi
 case "$t" in
   /*/bin/analyze-kdump) prefix=${t%/bin/analyze-kdump} ;;
+  analyze-kdump)
+    # 경로 대신 명령 이름(analyze-kdump)이 설정돼 있는데 등록된 명령이 없으면(처음 설치, 삭제 뒤 다시 설치)
+    # 기본 위치에 설치합니다. 예전 위치에만 설치돼 있으면 그곳을 씁니다(install.sh와 같은 규칙).
+    if [ ! -e /opt/kdump-analyzer/bin/analyze-kdump ] && [ -x /opt/kdump-tools/bin/analyze-kdump ]; then
+      prefix=/opt/kdump-tools
+    else
+      prefix=/opt/kdump-analyzer
+    fi
+    echo "등록된 $tool 명령이 없어 $prefix 에 설치합니다." ;;
   *) echo "설치 위치를 알 수 없습니다: $tool (서버 설정의 원격 analyze-kdump 경로를 /opt/kdump-analyzer/bin/analyze-kdump 형태로 지정해 주세요)"; exit 3 ;;
 esac
 [ "$(id -u)" -eq 0 ] || { echo "root 권한이 필요합니다. 서버 설정에서 sudo를 켜 주세요(비밀번호 없는 sudo 필요)."; exit 4; }
@@ -1687,8 +1696,19 @@ class Jobs:
             watchdog.daemon = True
             watchdog.start()
         if stdin:
-            proc.stdin.write(stdin)
-            proc.stdin.close()
+            # 표준 입력은 따로 보내면서 출력을 읽습니다. 원격이 입력을 다 받기 전에 끝나면(설치 위치 오류 등)
+            # 쓰기가 BrokenPipeError로 실패하는데, 그래도 원격이 남긴 이유가 작업 로그에 보이도록 무시합니다.
+            def feed():
+                try:
+                    proc.stdin.write(stdin)
+                except OSError:
+                    pass
+                finally:
+                    try:
+                        proc.stdin.close()
+                    except OSError:
+                        pass
+            threading.Thread(target=feed, daemon=True).start()
         buffer = ""
         text_all = []
         while True:
