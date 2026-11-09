@@ -126,7 +126,7 @@ install_files() {
         done
         # 저장소 폴더를 지워도 업데이트·해제를 할 수 있도록 설치 스크립트도 함께 둡니다.
         install -m 755 "$SRC_DIR/install.sh" "$PREFIX/install.sh"
-        for f in tests completion; do
+        for f in tests completion docs; do
             if [ -d "$SRC_DIR/$f" ]; then
                 mkdir -p "$PREFIX/$f"
                 cp -R "$SRC_DIR/$f/." "$PREFIX/$f/"

@@ -1345,13 +1345,13 @@ def prepare_check(server):
 # 서버에 보낼 설치 묶음. install.sh가 복사하는 파일만 담습니다.
 BUNDLE_FILES = ("install.sh", "VERSION", "README.md", "CHANGELOG.md", "LICENSE",
                 "analyze-kdump.conf.sample", "servers.conf.sample")
-BUNDLE_DIRS = ("bin", "completion")
+BUNDLE_DIRS = ("bin", "completion", "docs")
 
 
 def build_bundle():
     """설치 파일을 푸는 셸 스크립트를 만듭니다. 최소 설치 서버에는 tar가 없을 수 있어 base64(coreutils)만 씁니다.
     서버에서 sh -s -- <대상 디렉터리>로 실행합니다."""
-    lines = ['set -e', 'd="$1"', 'mkdir -p "$d/bin" "$d/completion"']
+    lines = ['set -e', 'd="$1"', 'mkdir -p ' + " ".join('"$d/%s"' % d for d in BUNDLE_DIRS)]
 
     def add(rel, mode):
         with open(os.path.join(REPO_DIR, rel), "rb") as f:
@@ -1456,7 +1456,8 @@ exit $status
 # $1 도구 경로, $2 program(프로그램 파일만, 설정·서버 목록·로그·vmlinux는 남김) | all(설치 디렉터리 통째로)
 UNINSTALL_MODES = ("program", "all")
 # install.sh가 설치 디렉터리에 복사하는 것(BUNDLE_FILES·BUNDLE_DIRS)과 설치 정보
-PROGRAM_FILES = BUNDLE_DIRS + BUNDLE_FILES + (".install-info",)
+# tests는 GitHub에서 설치하거나 저장소에서 install.sh를 실행할 때 함께 복사됩니다.
+PROGRAM_FILES = BUNDLE_DIRS + BUNDLE_FILES + ("tests", ".install-info")
 REMOTE_UNINSTALL = with_install_fallback(r"""
 tool="$1"; mode="$2"; shift 2
 t=$(command -v "$tool" 2>/dev/null || true)
