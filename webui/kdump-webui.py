@@ -702,8 +702,8 @@ DUMP_DISK_SH = 'df -Pk "$1" 2>/dev/null | awk \'NR == 2 { printf "%.0f %.0f\\n",
 # 그 디렉터리(vmcore-dmesg.txt 등 함께 저장된 파일 포함)를 지웁니다.
 REMOTE_DUMP_DELETE = r"""
 d=$(readlink -f "$1" 2>/dev/null); f=$(readlink -f "$2" 2>/dev/null)
-[ -n "$d" ] && [ "$d" != / ] || { echo "덤프 디렉터리가 올바르지 않습니다: $1"; exit 4; }
-[ -n "$f" ] && [ -f "$f" ] || { echo "덤프가 없습니다: $2"; exit 3; }
+if [ -z "$d" ] || [ "$d" = / ]; then echo "덤프 디렉터리가 올바르지 않습니다: $1"; exit 4; fi
+if [ -z "$f" ] || [ ! -f "$f" ]; then echo "덤프가 없습니다: $2"; exit 3; fi
 case "$f" in
   "$d"/*) ;;
   *) echo "덤프 디렉터리($d) 밖의 파일은 지우지 않습니다: $f"; exit 4 ;;
@@ -723,7 +723,7 @@ fi
 # $1 덤프 디렉터리, $2 덤프 파일 -> 파일 내용(표준 출력). 노트북으로 받을 때 씁니다(sudo로 읽기 위해 scp 대신).
 REMOTE_DUMP_CAT = r"""
 d=$(readlink -f "$1" 2>/dev/null); f=$(readlink -f "$2" 2>/dev/null)
-[ -n "$d" ] && [ "$d" != / ] && [ -n "$f" ] && [ -f "$f" ] || { echo "덤프가 없습니다: $2" >&2; exit 3; }
+if [ -z "$d" ] || [ "$d" = / ] || [ -z "$f" ] || [ ! -f "$f" ]; then echo "덤프가 없습니다: $2" >&2; exit 3; fi
 case "$f" in "$d"/*) ;; *) echo "덤프 디렉터리 밖의 파일은 보내지 않습니다: $f" >&2; exit 4 ;; esac
 exec cat -- "$f"
 """
