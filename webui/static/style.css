@@ -204,6 +204,9 @@ dialog h3 { margin: 4px 0 10px; font-size: 14px; color: var(--muted); }
 label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; font-weight: 600; }
 label input, label select { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); font-weight: 400; }
 label.check { flex-direction: row; align-items: center; gap: 8px; font-weight: 500; }
+label.radio-choice { align-items: flex-start; }
+label.radio-choice input { margin-top: 3px; padding: 0; }
+label.radio-choice .muted { font-weight: 400; }
 /* display를 지정한 요소에도 hidden 속성이 먹도록 (예: Windows 서버의 sudo 항목) */
 [hidden] { display: none !important; }
 .hint { color: var(--muted); font-weight: 400; font-size: 12px; }
