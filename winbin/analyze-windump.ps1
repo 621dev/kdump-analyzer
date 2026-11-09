@@ -75,8 +75,12 @@ function Get-DumpCandidates([string]$path) {
 # ---------------------------------------------------------------- cdb 찾기
 
 function Find-Cdb([string]$explicit) {
+    # -CdbPath로 직접 지정했으면 그 경로만 씁니다. 없을 때 다른 cdb로 조용히 넘어가지 않습니다.
+    if ($explicit) {
+        if (Test-Path -LiteralPath $explicit -PathType Leaf) { return (Resolve-Path -LiteralPath $explicit).Path }
+        return $null
+    }
     $candidates = @()
-    if ($explicit) { $candidates += $explicit }
     $fromEnv = [Environment]::GetEnvironmentVariable("KDUMP_CDB")
     if ($fromEnv) { $candidates += $fromEnv }
     foreach ($pf in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
@@ -366,6 +370,10 @@ if (-not $dumps -or $dumps.Count -eq 0) {
 $dumpFile = $dumps[0].FullName
 
 $cdb = Find-Cdb $CdbPath
+if (-not $cdb -and $CdbPath) {
+    Write-Output "cdb.exe를 찾을 수 없습니다: -CdbPath로 지정한 $CdbPath 가 없습니다."
+    exit 1
+}
 if (-not $cdb) {
     Write-Output "cdb.exe를 찾을 수 없습니다. Debugging Tools for Windows(Windows SDK)를 설치하거나 -CdbPath로 지정해 주세요."
     exit 1
