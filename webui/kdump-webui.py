@@ -18,6 +18,7 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import socketserver
 import base64
 import contextlib
@@ -58,7 +59,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(APP_DIR)
 # 화면(app.js)과 서버가 주고받는 API의 판. API를 바꿀 때 app.js의 API_LEVEL과 함께 올립니다.
 # 업데이트 뒤 서버를 다시 시작하지 않으면 화면이 이 값의 차이로 알아채고 안내합니다.
-API_LEVEL = 8
+API_LEVEL = 9
 
 # 화면의 "다시 시작"은 감시 프로세스가 서버를 새 코드로 다시 띄우는 방식입니다.
 RESTART_EXIT = 75                     # 서버가 이 코드로 끝나면 감시 프로세스가 다시 띄웁니다
@@ -687,6 +688,112 @@ def list_vmcores(server):
         if len(parts) == 3 and parts[0].isdigit():
             items.append({"mtime": int(parts[0]), "size": int(parts[1]), "path": parts[2]})
     return items
+
+
+# ---------------------------------------------------------------- 덤프 보관 관리
+# 덤프 디렉터리의 남은 공간, 덤프 삭제, 덤프를 노트북으로 받기.
+# 삭제와 받기는 덤프 디렉터리 안의 파일만 다룹니다. 화면에서 고른 경로라도 서버에서 실제 경로(심볼릭 링크 해석)로
+# 다시 확인합니다.
+
+# $1 덤프 디렉터리 -> "전체바이트 남은바이트"
+DUMP_DISK_SH = 'df -Pk "$1" 2>/dev/null | awk \'NR == 2 { printf "%.0f %.0f\\n", $2 * 1024, $4 * 1024 }\''
+
+# $1 덤프 디렉터리, $2 덤프 파일. 덤프 디렉터리 바로 아래 파일이면 그 파일만, 한 단계 아래(<디렉터리>/vmcore)면
+# 그 디렉터리(vmcore-dmesg.txt 등 함께 저장된 파일 포함)를 지웁니다.
+REMOTE_DUMP_DELETE = r"""
+d=$(readlink -f "$1" 2>/dev/null); f=$(readlink -f "$2" 2>/dev/null)
+[ -n "$d" ] && [ "$d" != / ] || { echo "덤프 디렉터리가 올바르지 않습니다: $1"; exit 4; }
+[ -n "$f" ] && [ -f "$f" ] || { echo "덤프가 없습니다: $2"; exit 3; }
+case "$f" in
+  "$d"/*) ;;
+  *) echo "덤프 디렉터리($d) 밖의 파일은 지우지 않습니다: $f"; exit 4 ;;
+esac
+parent=$(dirname "$f")
+if [ "$parent" = "$d" ]; then
+  rm -f -- "$f" || exit 5
+  echo "삭제했습니다: $f"
+elif [ "$(dirname "$parent")" = "$d" ]; then
+  rm -rf -- "$parent" || exit 5
+  echo "삭제했습니다: $parent/ (덤프와 함께 저장된 파일 포함)"
+else
+  echo "덤프 디렉터리의 한 단계 아래까지만 지웁니다: $f"; exit 4
+fi
+"""
+
+# $1 덤프 디렉터리, $2 덤프 파일 -> 파일 내용(표준 출력). 노트북으로 받을 때 씁니다(sudo로 읽기 위해 scp 대신).
+REMOTE_DUMP_CAT = r"""
+d=$(readlink -f "$1" 2>/dev/null); f=$(readlink -f "$2" 2>/dev/null)
+[ -n "$d" ] && [ "$d" != / ] && [ -n "$f" ] && [ -f "$f" ] || { echo "덤프가 없습니다: $2" >&2; exit 3; }
+case "$f" in "$d"/*) ;; *) echo "덤프 디렉터리 밖의 파일은 보내지 않습니다: $f" >&2; exit 4 ;; esac
+exec cat -- "$f"
+"""
+
+WIN_DUMP_CHECK = r"""function Test-InDumpDir($dir,$file){$d=(Resolve-Path -LiteralPath $dir -ErrorAction Stop).Path.TrimEnd('\');$f=(Resolve-Path -LiteralPath $file -ErrorAction Stop).Path
+if($d.Length -le 3){throw "덤프 디렉터리가 드라이브 바로 아래라 지우지 않습니다: $d"}
+if(-not $f.StartsWith($d+'\',[StringComparison]::OrdinalIgnoreCase)){throw "덤프 디렉터리($d) 밖의 파일은 다루지 않습니다: $f"}
+if(-not (Test-Path -LiteralPath $f -PathType Leaf)){throw "덤프가 없습니다: $f"};return $f};"""
+
+
+def dump_in_dir(server, path):
+    """화면에서 받은 덤프 경로가 서버 덤프 디렉터리 안인지 먼저 확인합니다(서버에서 다시 확인함)."""
+    if not valid_vmcore_path(server, path):
+        return False
+    base = server["crash_dir"].rstrip("\\/")
+    sep = "\\" if is_windows(server) else "/"
+    if is_windows(server):
+        return path.lower().startswith(base.lower() + sep) and ".." not in path.split(sep)
+    return path.startswith(base + sep) and ".." not in path.split(sep)
+
+
+def dump_disk(server):
+    """덤프 디렉터리가 있는 디스크의 전체·남은 크기(바이트). 읽지 못하면 None."""
+    if is_windows(server):
+        code, out = ssh_text(server, win_argv("$v=(Get-Item -LiteralPath %s -ErrorAction Stop).PSDrive;'{0} {1}' -f ($v.Used+$v.Free),$v.Free"
+                                              % ps_quote(server["crash_dir"])), timeout=40)
+    else:
+        code, out = ssh_text(server, ["sh", "-c", DUMP_DISK_SH, "sh", server["crash_dir"]], timeout=40)
+    match = re.search(r"(\d+) (\d+)\s*$", out.strip()) if code == 0 else None
+    if not match:
+        return None
+    return {"total": int(match.group(1)), "free": int(match.group(2))}
+
+
+def delete_dump(server, path):
+    """덤프를 지웁니다. (성공 여부, 서버가 남긴 메시지)"""
+    if not dump_in_dir(server, path):
+        raise ApiError(400, "덤프 디렉터리(%s) 안의 덤프만 지울 수 있습니다." % server["crash_dir"])
+    if is_windows(server):
+        argv = win_argv(WIN_DUMP_CHECK + "try{$f=Test-InDumpDir %s %s;Remove-Item -LiteralPath $f -Force -ErrorAction Stop;\"삭제했습니다: $f\"}catch{$_.Exception.Message;exit 4}"
+                        % (ps_quote(server["crash_dir"]), ps_quote(path)))
+    else:
+        argv = ["sh", "-c", REMOTE_DUMP_DELETE, "sh", server["crash_dir"], path]
+    code, out = ssh_text(server, argv, timeout=120)
+    return code == 0, out.strip()[-500:]
+
+
+def local_dump_name(server, path):
+    """노트북에 저장할 파일 이름: <서버>/<상위 디렉터리>-<파일> (예: db01/10.0.0.11-2026-11-09-vmcore)."""
+    parts = [p for p in re.split(r"[\\/]", path) if p]
+    name = "-".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name)
+
+
+def human_size(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return ("%d %s" % (n, unit)) if unit == "B" else ("%.1f %s" % (n, unit))
+        n /= 1024.0
+
+
+def scp_download_args(server, remote_path, local_path):
+    """Windows 서버의 파일을 scp로 받는 명령. Windows OpenSSH는 /C:/... 형태의 경로를 받습니다."""
+    ssh = ssh_args(server)
+    options = ["-P" if o == "-p" else o for o in ssh[1:-1]]
+    user, _, host = ssh[-1].rpartition("@")
+    if ":" in host:
+        host = "[%s]" % host
+    remote = "/" + remote_path.replace("\\", "/")
+    return ["scp", "-q"] + options + ["%s%s:%s" % (user + "@" if user else "", host, remote), local_path]
 
 
 # ---------------------------------------------------------------- 버전과 업그레이드
@@ -1584,6 +1691,7 @@ class Job:
         self.actions = []           # prepare: 실행할 준비 동작
         self.step_label = ""        # prepare: 지금 실행 중인 동작 이름
         self.version = None         # upgrade: 설치 후 서버 버전
+        self.saved = None           # download: 노트북에 저장한 파일 경로
         self.started = time.time()
         self.finished = None
         self.lock = threading.Lock()
@@ -1601,7 +1709,7 @@ class Job:
                     "report": self.report, "analysis": self.analysis, "status": self.status,
                     "phase": self.phase, "progress": self.progress, "logs": self.logs[-60:],
                     "error": self.error, "method": self.method, "source": self.source, "actions": self.actions,
-                    "version": self.version, "started": self.started,
+                    "version": self.version, "started": self.started, "saved": self.saved,
                     "elapsed": int((self.finished or time.time()) - (self.run_started or self.started))}
 
 
@@ -1644,7 +1752,8 @@ class Jobs:
 
     def cancel(self, job_id):
         job = self.get(job_id)
-        if job.status != "queued":
+        # 덤프 받기는 오래 걸릴 수 있어 진행 중에도 멈출 수 있습니다(받던 파일은 지움).
+        if job.status != "queued" and not (job.kind == "download" and job.status == "running"):
             raise ApiError(409, "대기 중인 작업만 취소할 수 있습니다.")
         job.cancelled = True
         return job
@@ -2020,6 +2129,71 @@ class Jobs:
             raise ApiError(502, "삭제한 뒤에도 설치가 남아 있습니다 (v%s). 로그를 확인해 주세요." % after.get("version", "?"))
         job.log("삭제를 마쳤습니다. 이 서버는 이제 무설치 실행으로 분석합니다.")
 
+    def run_download(self, job):
+        server = self.store.server(job.server)
+        with self.server_slot(server["name"]).hold(job):
+            self._run_download(job, server)
+
+    def _run_download(self, job, server):
+        """덤프를 노트북의 데이터 폴더(dumps/<서버>/)로 받습니다. Linux는 sudo로 읽어 SSH로, Windows는 scp로 받습니다."""
+        if not dump_in_dir(server, job.vmcore or ""):
+            raise ApiError(400, "덤프 디렉터리(%s) 안의 덤프만 받을 수 있습니다." % server["crash_dir"])
+        job.phase = "덤프 크기 확인 중"
+        item = next((i for i in list_vmcores(server) if i["path"] == job.vmcore), None)
+        if not item:
+            raise ApiError(404, "서버에 덤프가 없습니다: %s" % job.vmcore)
+        size = item["size"]
+        folder = os.path.join(self.store.dir, "dumps", server["name"])
+        os.makedirs(folder, exist_ok=True)
+        free = shutil.disk_usage(folder).free
+        if free < size + 1024 ** 3:
+            raise ApiError(507, "노트북의 남은 공간이 모자랍니다: 필요 %s, 남은 공간 %s (여유 1GB 포함)"
+                           % (human_size(size + 1024 ** 3), human_size(free)))
+        base = local_dump_name(server, job.vmcore)
+        dest, n = os.path.join(folder, base), 2
+        while os.path.exists(dest):
+            stem, ext = os.path.splitext(base)
+            dest, n = os.path.join(folder, "%s-%d%s" % (stem, n, ext)), n + 1
+        part = dest + ".part"
+        job.log("받는 중: %s (%s) -> %s" % (job.vmcore, human_size(size), dest))
+        if is_windows(server):
+            argv = scp_download_args(server, job.vmcore, part)
+            out = open(os.devnull, "wb")
+        else:
+            argv = ssh_args(server) + [remote_command(server, ["sh", "-c", REMOTE_DUMP_CAT, "sh", server["crash_dir"], job.vmcore])]
+            out = open(part, "wb")
+        started = time.time()
+        try:
+            with out:
+                proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.PIPE)
+                while proc.poll() is None:
+                    if job.cancelled:
+                        proc.kill()
+                        break
+                    got = os.path.getsize(part) if os.path.exists(part) else 0
+                    job.phase = "받는 중"
+                    job.progress = {"current": got // 1048576, "total": max(1, size // 1048576),
+                                    "label": "%s / %s" % (human_size(got), human_size(size)),
+                                    "elapsed": int(time.time() - started)}
+                    time.sleep(1)
+                err = proc.communicate()[1].decode("utf-8", "replace").strip()
+            got = os.path.getsize(part) if os.path.exists(part) else 0
+            if job.cancelled:
+                raise JobCancelled()
+            if proc.returncode != 0 or got != size:
+                if err:
+                    job.log(err[-500:])
+                raise ApiError(502, "덤프를 받지 못했습니다 (종료 코드 %s, 받은 크기 %s / %s)."
+                               % (proc.returncode, human_size(got), human_size(size)))
+            os.replace(part, dest)
+            part = None
+        finally:
+            if part and os.path.exists(part):
+                os.remove(part)
+        job.saved = dest
+        job.progress = None
+        job.log("저장했습니다: %s (%d초)" % (dest, time.time() - started))
+
     def run_move(self, job):
         server = self.store.server(job.server)
         with self.server_slot(server["name"]).hold(job):
@@ -2285,7 +2459,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             result["latest"] = app.latest
             return self._json(200, result)
         if len(parts) == 3 and parts[0] == "servers" and parts[2] == "vmcores" and method == "GET":
-            return self._json(200, {"vmcores": list_vmcores(store.server(parts[1]))})
+            server = store.server(parts[1])
+            return self._json(200, {"vmcores": list_vmcores(server)})
+        if len(parts) == 3 and parts[0] == "servers" and parts[2] == "disk" and method == "GET":
+            return self._json(200, {"disk": dump_disk(store.server(parts[1]))})
+        if len(parts) == 3 and parts[0] == "servers" and parts[2] == "dump-delete" and method == "POST":
+            body = self._body()
+            server = store.server(parts[1])
+            if body.get("confirm") != server["name"]:
+                raise ApiError(400, "확인을 위해 서버 이름을 입력해 주세요.")
+            if any(j.get("vmcore") == body.get("path") and j["status"] in ("queued", "running")
+                   for j in app.jobs.recent() if j["server"] == server["name"]):
+                raise ApiError(409, "이 덤프로 진행 중이거나 대기 중인 작업이 있어 지우지 않았습니다.")
+            ok, message = delete_dump(server, body.get("path", ""))
+            if not ok:
+                raise ApiError(502, "덤프를 지우지 못했습니다: %s" % message)
+            return self._json(200, {"ok": True, "message": message})
 
         if parts == ["jobs"] and method == "POST":
             body = self._body()
@@ -2312,6 +2501,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 job = Job(kind, server["name"])
                 job.source = source
                 app.jobs.start(job, app.jobs.run_upgrade, app.jobs.server_slot(server["name"]))
+            elif kind == "download":
+                vmcore = body.get("vmcore", "")
+                if not dump_in_dir(server, vmcore):
+                    raise ApiError(400, "덤프 디렉터리 안의 덤프만 받을 수 있습니다.")
+                job = Job(kind, server["name"], vmcore=vmcore)
+                app.jobs.start(job, app.jobs.run_download, app.jobs.server_slot(server["name"]))
             elif kind == "move":
                 job = Job(kind, server["name"])
                 job.source = "local"

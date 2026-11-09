@@ -1,7 +1,7 @@
 "use strict";
 
 // 서버(kdump-webui.py)의 API_LEVEL과 같아야 합니다. 다르면 업데이트 뒤 서버를 다시 시작하지 않은 것입니다.
-const API_LEVEL = 8;
+const API_LEVEL = 9;
 
 // ---------------------------------------------------------------- 상태와 공통
 
@@ -349,6 +349,52 @@ function renderMain() {
   else renderResults(server);
 }
 
+// 덤프 디렉터리 디스크의 남은 공간을 목록 머리글에 붙입니다(느린 서버에서도 목록이 먼저 보이도록 따로 읽음).
+async function loadDumpDisk(server) {
+  try {
+    const r = await api("GET", `/api/servers/${encodeURIComponent(server.name)}/disk`);
+    const el = $("#vm-disk");
+    if (!el || !r.disk) return;
+    const pct = r.disk.total ? Math.round((1 - r.disk.free / r.disk.total) * 100) : 0;
+    el.innerHTML = ` · 디스크 남은 공간 <b class="${pct >= 90 ? "warn-text" : ""}">${fmtSize(r.disk.free)}</b> / ${fmtSize(r.disk.total)} (${pct}% 사용)`;
+  } catch (_) { /* 디스크 정보는 없어도 됩니다. */ }
+}
+
+function deleteDump(server, v, rec) {
+  const analyzed = rec ? (rec.analyses ? `분석 ${rec.analyses}건 있음` : "리포트 있음") : "아직 분석하지 않음";
+  const linux = !isWindows(server);
+  const overlay = h(`<div class="overlay"><div class="overlay-box" style="max-width:520px">
+    <b>${esc(server.name)}에서 덤프 삭제</b>
+    <div class="path" style="word-break:break-all">${esc(v.path)}</div>
+    <div class="muted" style="font-size:13px">${fmtSize(v.size)} · ${fmtTime(v.mtime)} · ${esc(analyzed)}</div>
+    <div style="font-size:13px">${linux ? "덤프와 같은 디렉터리에 함께 저장된 파일(vmcore-dmesg.txt 등)도 지웁니다." : "덤프 파일을 지웁니다."}
+      <b>되돌릴 수 없습니다.</b> 노트북에 저장된 리포트와 분석은 지우지 않습니다.${rec ? "" : ' <span class="warn-text">아직 분석하지 않은 덤프입니다.</span>'}</div>
+    <label><span>확인을 위해 서버 이름 <b>${esc(server.name)}</b>을(를) 입력하세요</span><input type="text" id="dd-confirm" autocomplete="off"></label>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
+      <button class="btn small" id="dd-cancel">취소</button>
+      <button class="btn small danger" id="dd-ok" disabled>삭제</button></div>
+  </div></div>`);
+  const input = overlay.querySelector("#dd-confirm");
+  const ok = overlay.querySelector("#dd-ok");
+  input.addEventListener("input", () => { ok.disabled = input.value.trim() !== server.name; });
+  overlay.querySelector("#dd-cancel").addEventListener("click", () => overlay.remove());
+  overlay.addEventListener("click", e => { if (e.target === overlay) overlay.remove(); });
+  ok.addEventListener("click", async () => {
+    ok.disabled = true;
+    try {
+      const r = await api("POST", `/api/servers/${encodeURIComponent(server.name)}/dump-delete`, { path: v.path, confirm: server.name });
+      overlay.remove();
+      toast(r.message || "삭제했습니다.");
+      renderVmcores(server, true);
+    } catch (e) {
+      ok.disabled = false;
+      toast(e.message);
+    }
+  });
+  document.body.append(overlay);
+  input.focus();
+}
+
 async function renderVmcores(server, refresh = false) {
   const body = $("#tab-body");
   if (!state.vmcores[server.name] || refresh) {
@@ -372,7 +418,7 @@ async function renderVmcores(server, refresh = false) {
   for (const path of [...selected]) if (!items.some(v => v.path === path)) selected.delete(path);
 
   const wrap = h(`<div>
-    <div class="viewer-head"><span class="muted">${esc(server.crash_dir)} · ${items.length}개</span>
+    <div class="viewer-head"><span class="muted">${esc(server.crash_dir)} · ${items.length}개 · 합계 ${fmtSize(items.reduce((s, v) => s + v.size, 0))}<span id="vm-disk"></span></span>
       <button class="btn small" id="vm-refresh">새로고침</button></div>
     <div class="batch-bar" id="batch-bar"></div>
   </div>`);
@@ -397,7 +443,17 @@ async function renderVmcores(server, refresh = false) {
         <td style="white-space:nowrap;text-align:right">
           <button class="btn small" data-kind="report" title="crash 리포트만 만듭니다">리포트</button>
           <button class="btn small primary" data-kind="llm" title="crash 리포트를 만든 뒤 LLM으로 분석합니다">+ LLM</button>
+          <button class="btn small ghost" data-act="download" title="덤프를 노트북의 데이터 폴더(dumps/${esc(server.name)}/)로 받습니다">받기</button>
+          <button class="btn small ghost danger" data-act="delete" title="서버에서 덤프를 지웁니다(되돌릴 수 없음)">삭제</button>
         </td></tr>`);
+      row.querySelector('[data-act="download"]').addEventListener("click", () => {
+        if (!confirm(`${v.path} (${fmtSize(v.size)})를 노트북으로 받을까요?
+
+저장 위치: 웹 UI 데이터 폴더의 dumps/${server.name}/
+받는 동안 같은 서버의 다른 작업은 기다립니다. 작업 카드에서 취소할 수 있습니다.`)) return;
+        startJob({ kind: "download", server: server.name, vmcore: v.path });
+      });
+      row.querySelector('[data-act="delete"]').addEventListener("click", () => deleteDump(server, v, rec));
       row.querySelector(".vm-check").addEventListener("change", e => {
         if (e.target.checked) selected.add(v.path); else selected.delete(v.path);
         row.classList.toggle("selected", e.target.checked);
@@ -416,6 +472,7 @@ async function renderVmcores(server, refresh = false) {
   body2.innerHTML = "";
   body2.append(wrap);
   $("#vm-refresh").addEventListener("click", () => renderVmcores(server, true));
+  loadDumpDisk(server);
   const all = $("#vm-all");
   if (all) all.addEventListener("change", e => {
     items.forEach(v => e.target.checked ? selected.add(v.path) : selected.delete(v.path));
@@ -1408,6 +1465,11 @@ function onJobFinished(job) {
     loadState().then(() => loadServerVersion(job.server)).catch(() => loadServerVersion(job.server));
     return;
   }
+  if (job.kind === "download") {
+    toast(job.status === "done" ? `덤프를 받았습니다: ${job.saved}` : `${job.server}: 덤프를 받지 못했습니다.`);
+    if (job.status === "done") scheduleJobClose(job.id, 20000);
+    return;
+  }
   if (job.kind === "uninstall") {
     toast(job.status === "done" ? `${job.server}: 분석 도구를 지웠습니다.` : `${job.server}: 삭제하지 못했습니다.`);
     delete state.health[job.server];
@@ -1473,14 +1535,16 @@ function renderJobs() {
       ? `설치 위치 옮기기 (${NEW_PREFIX})`
       : job.kind === "uninstall"
       ? `분석 도구 삭제 (${(job.actions || [])[0] === "all" ? "전부" : "프로그램만"})`
+      : job.kind === "download"
+      ? "덤프를 노트북으로 받기"
       : { report: "리포트 생성", llm: "리포트 + LLM 분석", reanalyze: "LLM 분석" }[job.kind];
     let pct = null;
     if (job.status === "running" && job.progress && job.progress.total) {
       pct = Math.round(job.progress.current / job.progress.total * 100);
     }
     const detail = job.status === "running" && job.progress
-      ? `${job.progress.current}/${job.progress.total} ${job.progress.label || ""}`
-      : job.phase;
+      ? (job.kind === "download" ? job.progress.label : `${job.progress.current}/${job.progress.total} ${job.progress.label || ""}`)
+      : (job.saved ? `저장: ${job.saved}` : job.phase);
     const el = h(`<div class="job ${job.status}" data-id="${esc(job.id)}">
       <div class="job-head"><span>${esc(job.server)} · ${esc(label)}</span>
         <span>${job.status === "running" ? '<span class="spinner"></span>' : job.status === "queued" ? '<span class="muted">대기</span>' : (job.status === "done" ? "✓" : job.status === "cancelled" ? "—" : "✕")}</span></div>
@@ -1493,7 +1557,7 @@ function renderJobs() {
         <span>
           ${job.analysis ? '<button class="linkish" data-act="analysis">분석 보기</button>' : ""}
           ${job.report && !isActive(job) ? ' <button class="linkish" data-act="report">리포트 보기</button>' : ""}
-          ${job.status === "queued" ? ' <button class="linkish" data-act="cancel">취소</button>' : ""}
+          ${job.status === "queued" || (job.kind === "download" && job.status === "running") ? ' <button class="linkish" data-act="cancel">취소</button>' : ""}
           ${!isActive(job) ? ' <button class="linkish" data-act="close">닫기</button>' : ""}
         </span>
       </div>
