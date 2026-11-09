@@ -6,6 +6,7 @@
 """
 
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
@@ -71,6 +72,171 @@ class FitTest(unittest.TestCase):
         self.assertIn("crash> log line 3999", out)  # log는 뒤쪽을 남김
         for title in ("crash> sys", "crash> bt", "crash> log", "crash> ps"):
             self.assertIn("===== %s =====" % title, out)
+
+
+class ExportTest(unittest.TestCase):
+    """보고서로 내보내기: 리포트·요약·최근 LLM 분석을 모으고, 원하면 LLM 입력과 같은 규칙으로 가립니다."""
+
+    REPORT = ("kdump summary report\nvmcore:    /var/crash/10.0.0.11-2026-11-09/vmcore\nkernel:    5.14.0-687.el9\n"
+              "type:      hung task [hung_task]\n\n===== crash> sys =====\n      NODENAME: db01.example.com\n"
+              "   IP: 10.0.0.11\n===== crash> bt =====\nPID: 1 TASK: x\n")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = webui.Store(self.tmp.name)
+        folder = self.store.report_dir("db01")
+        self.report = "kdump-report-20261109-100000-1.txt"
+        with open(os.path.join(folder, self.report), "w", encoding="utf-8") as f:
+            f.write(self.REPORT)
+        with open(os.path.join(folder, "kdump-report-20261109-100000-1.json"), "w", encoding="utf-8") as f:
+            json.dump({"crash_type": {"type": "hung_task", "label": "hung task", "evidence": "db01 10.0.0.11 blocked"},
+                       "sys": {"NODENAME": "db01.example.com"}}, f)
+        self.folder = folder
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def add_analysis(self, name, body, mtime):
+        path = os.path.join(self.folder, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("kdump llm analysis\nsource_report: /x/%s\nprovider: codex\n\n%s\n" % (self.report, body))
+        os.utime(path, (mtime, mtime))
+
+    def test_report_with_latest_analysis_masked(self):
+        self.add_analysis("kdump-analysis-20261109-100000-1.txt", "판정: 예전 분석", 1_000)
+        self.add_analysis("kdump-analysis-20261109-100000-1-2.txt", "판정: db01 의 10.0.0.11 에서 hung", 2_000)
+        data = self.store.export_data("db01", self.report, mask=True)
+        self.assertEqual(data["analysis_name"], "kdump-analysis-20261109-100000-1-2.txt")   # 가장 최근 분석
+        for text in (data["report"], data["analysis"], json.dumps(data["summary"], ensure_ascii=False)):
+            self.assertNotIn("10.0.0.11", text)
+            self.assertNotIn("db01", text)
+        self.assertIn("<HOSTNAME>", data["analysis"])                      # 분석도 리포트의 호스트명으로 가림
+        self.assertTrue(data["masked"])
+
+    def test_unmasked_and_from_analysis(self):
+        self.add_analysis("kdump-analysis-20261109-100000-1.txt", "판정: hung", 1_000)
+        data = self.store.export_data("db01", "kdump-analysis-20261109-100000-1.txt", mask=False)
+        self.assertEqual(data["report_name"], self.report)                 # 분석에서 원본 리포트를 찾음
+        self.assertIn("10.0.0.11", data["report"])
+        self.assertFalse(data["masked"])
+
+    def test_report_without_analysis(self):
+        data = self.store.export_data("db01", self.report)
+        self.assertIsNone(data["analysis_name"])
+        self.assertEqual(data["analysis"], "")
+        with self.assertRaises(webui.ApiError):
+            self.store.export_data("db01", "../secrets/x.txt")
+
+
+class AutoWatcherTest(unittest.TestCase):
+    """새 덤프 자동 분석: 기준 기록, 새 덤프, 쓰는 중인 덤프, 덮어쓴 덤프, 끄기, 접속 실패, 확인 주기."""
+
+    class FakeJobs:
+        def __init__(self):
+            self.started, self.active = [], set()
+
+        def start_report(self, server, vmcore, kind, auto=False):
+            self.started.append((server, vmcore, kind, auto))
+
+        def active_vmcores(self, server):
+            return set(self.active)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = webui.Store(self.tmp.name)
+        self.store.save_server(dict(webui.DEFAULT_SERVER, name="db01", target="u@h", auto="report"))
+        self.store.save_server(dict(webui.DEFAULT_SERVER, name="db02", target="u@h2"))  # 자동 분석 끔
+        self.now = 1_000_000.0
+        self.dumps = {"db01": [{"path": "/var/crash/a/vmcore", "mtime": 900_000, "size": 1}]}
+        self.listed = []
+        self.jobs = self.FakeJobs()
+
+        def list_dumps(server):
+            self.listed.append(server["name"])
+            value = self.dumps.get(server["name"], [])
+            if isinstance(value, Exception):
+                raise value
+            return list(value)
+        self.w = webui.AutoWatcher(self.store, self.jobs, list_dumps=list_dumps, now=lambda: self.now)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_baseline_then_new_dump(self):
+        self.w.tick()
+        self.assertEqual(self.jobs.started, [])                  # 처음에는 기존 덤프를 기준으로만 기록
+        self.assertEqual(self.listed, ["db01"])                   # 자동 분석을 끈 서버는 확인하지 않음
+        self.assertEqual(self.w.snapshot()["db01"]["baseline"], 1)
+        self.dumps["db01"].append({"path": "/var/crash/b/vmcore", "mtime": self.now - 120, "size": 1})
+        self.now += 601
+        self.w.tick()
+        self.assertEqual(self.jobs.started, [("db01", "/var/crash/b/vmcore", "report", True)])
+        self.assertEqual(self.w.snapshot()["db01"]["found"], 1)
+        self.now += 601
+        self.w.tick()
+        self.assertEqual(len(self.jobs.started), 1)               # 같은 덤프는 다시 분석하지 않음
+
+    def test_recent_dump_waits_until_settled(self):
+        self.w.tick()
+        self.dumps["db01"].append({"path": "/var/crash/b/vmcore", "mtime": self.now + 590, "size": 1})
+        self.now += 600
+        self.w.tick()
+        self.assertEqual(self.jobs.started, [])                   # 10초 전에 쓰인 덤프는 미룸
+        self.now += 600
+        self.w.tick()
+        self.assertEqual(len(self.jobs.started), 1)
+
+    def test_overwritten_memory_dmp_is_new(self):
+        self.store.save_server(dict(webui.DEFAULT_SERVER, name="db01", target="u@h", auto="llm", os="windows",
+                                    tool=webui.WIN_TOOL, crash_dir="C:\\Windows", sudo=False), original="db01")
+        self.dumps["db01"] = [{"path": "C:\\Windows\\MEMORY.DMP", "mtime": 900_000, "size": 1}]
+        self.w.tick()
+        self.dumps["db01"] = [{"path": "C:\\Windows\\MEMORY.DMP", "mtime": self.now - 300, "size": 1}]
+        self.now += 601
+        self.w.tick()
+        self.assertEqual(self.jobs.started, [("db01", "C:\\Windows\\MEMORY.DMP", "llm", True)])
+
+    def test_interval_and_force(self):
+        self.store.save_settings({"auto_interval": 30})
+        self.w.tick()
+        self.now += 600
+        self.w.tick()
+        self.assertEqual(self.listed, ["db01"])                   # 30분이 안 지나 다시 확인하지 않음
+        self.w.tick(force=True)
+        self.assertEqual(self.listed, ["db01", "db01"])
+
+    def test_active_dump_is_not_started_twice(self):
+        self.w.tick()
+        self.dumps["db01"].append({"path": "/var/crash/b/vmcore", "mtime": self.now - 120, "size": 1})
+        self.jobs.active.add("/var/crash/b/vmcore")               # 이미 직접 분석 중
+        self.w.tick(force=True)
+        self.assertEqual(self.jobs.started, [])
+
+    def test_connection_error_is_reported_and_kept(self):
+        self.w.tick()
+        self.dumps["db01"] = webui.ApiError(502, "SSH 접속 실패")
+        self.w.tick(force=True)
+        self.assertIn("SSH 접속 실패", self.w.snapshot()["db01"]["error"])
+        # 접속이 돌아와도 기준은 그대로라 기존 덤프를 다시 분석하지 않습니다.
+        self.dumps["db01"] = [{"path": "/var/crash/a/vmcore", "mtime": 900_000, "size": 1}]
+        self.w.tick(force=True)
+        self.assertEqual(self.jobs.started, [])
+
+    def test_turning_off_drops_state_and_rebaselines(self):
+        self.w.tick()
+        self.store.save_server(dict(webui.DEFAULT_SERVER, name="db01", target="u@h", auto="off"), original="db01")
+        self.w.tick(force=True)
+        self.assertNotIn("db01", self.store._load("auto-seen.json", {}))
+        self.assertEqual(self.w.snapshot(), {})
+        # 꺼져 있는 동안 생긴 덤프는 다시 켤 때 기준에 들어가고 분석하지 않습니다.
+        self.dumps["db01"].append({"path": "/var/crash/b/vmcore", "mtime": self.now - 120, "size": 1})
+        self.store.save_server(dict(webui.DEFAULT_SERVER, name="db01", target="u@h", auto="report"), original="db01")
+        self.w.tick(force=True)
+        self.assertEqual(self.jobs.started, [])
+
+    def test_server_auto_value_validated(self):
+        with self.assertRaises(webui.ApiError):
+            self.store.save_server(dict(webui.DEFAULT_SERVER, name="db03", target="u@h", auto="always"))
 
 
 class SecretTest(unittest.TestCase):

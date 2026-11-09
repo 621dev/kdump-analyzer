@@ -9,6 +9,7 @@
       analyze-windump.ps1                          # 가장 최근 덤프(C:\Windows\MEMORY.DMP, Minidump)
       analyze-windump.ps1 -Dump C:\Windows\MEMORY.DMP
       analyze-windump.ps1 -Dump C:\Windows\Minidump
+      analyze-windump.ps1 -ProcessList                # 프로세스 목록(!process 0 0)도 넣기 (커널 덤프에서 1~2분 더 걸림)
       analyze-windump.ps1 -Version
 
     필요한 것: Debugging Tools for Windows(cdb.exe), 심볼 서버 접속(또는 -SymbolPath로 지정한 사내 심볼 저장소)
@@ -27,6 +28,7 @@ param(
     [string]$SymbolPath = "",
     [int]$TimeoutSec = 1800,
     [string[]]$Commands = @(),
+    [switch]$ProcessList,
     [switch]$NoJson,
     [switch]$Version
 )
@@ -205,9 +207,10 @@ function Get-ReportCommands([string[]]$extra) {
         "!running -it",
         "lm t n",
         "!vm",
-        "!locks",
-        "!process 0 0"
+        "!locks"
     )
+    # 프로세스 목록은 커널 메모리 덤프에서 1~2분이 걸려(실제 VM에서 분석 시간의 대부분) 기본에서 뺍니다.
+    if ($ProcessList) { $list += "!process 0 0" }
     foreach ($c in $extra) { if ($c -and ($list -notcontains $c)) { $list += $c } }
     return $list
 }
