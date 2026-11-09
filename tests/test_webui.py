@@ -6,6 +6,7 @@
 """
 
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
@@ -71,6 +72,60 @@ class FitTest(unittest.TestCase):
         self.assertIn("crash> log line 3999", out)  # log는 뒤쪽을 남김
         for title in ("crash> sys", "crash> bt", "crash> log", "crash> ps"):
             self.assertIn("===== %s =====" % title, out)
+
+
+class ExportTest(unittest.TestCase):
+    """보고서로 내보내기: 리포트·요약·최근 LLM 분석을 모으고, 원하면 LLM 입력과 같은 규칙으로 가립니다."""
+
+    REPORT = ("kdump summary report\nvmcore:    /var/crash/10.0.0.11-2026-11-09/vmcore\nkernel:    5.14.0-687.el9\n"
+              "type:      hung task [hung_task]\n\n===== crash> sys =====\n      NODENAME: db01.example.com\n"
+              "   IP: 10.0.0.11\n===== crash> bt =====\nPID: 1 TASK: x\n")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = webui.Store(self.tmp.name)
+        folder = self.store.report_dir("db01")
+        self.report = "kdump-report-20261109-100000-1.txt"
+        with open(os.path.join(folder, self.report), "w", encoding="utf-8") as f:
+            f.write(self.REPORT)
+        with open(os.path.join(folder, "kdump-report-20261109-100000-1.json"), "w", encoding="utf-8") as f:
+            json.dump({"crash_type": {"type": "hung_task", "label": "hung task", "evidence": "db01 10.0.0.11 blocked"},
+                       "sys": {"NODENAME": "db01.example.com"}}, f)
+        self.folder = folder
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def add_analysis(self, name, body, mtime):
+        path = os.path.join(self.folder, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("kdump llm analysis\nsource_report: /x/%s\nprovider: codex\n\n%s\n" % (self.report, body))
+        os.utime(path, (mtime, mtime))
+
+    def test_report_with_latest_analysis_masked(self):
+        self.add_analysis("kdump-analysis-20261109-100000-1.txt", "판정: 예전 분석", 1_000)
+        self.add_analysis("kdump-analysis-20261109-100000-1-2.txt", "판정: db01 의 10.0.0.11 에서 hung", 2_000)
+        data = self.store.export_data("db01", self.report, mask=True)
+        self.assertEqual(data["analysis_name"], "kdump-analysis-20261109-100000-1-2.txt")   # 가장 최근 분석
+        for text in (data["report"], data["analysis"], json.dumps(data["summary"], ensure_ascii=False)):
+            self.assertNotIn("10.0.0.11", text)
+            self.assertNotIn("db01", text)
+        self.assertIn("<HOSTNAME>", data["analysis"])                      # 분석도 리포트의 호스트명으로 가림
+        self.assertTrue(data["masked"])
+
+    def test_unmasked_and_from_analysis(self):
+        self.add_analysis("kdump-analysis-20261109-100000-1.txt", "판정: hung", 1_000)
+        data = self.store.export_data("db01", "kdump-analysis-20261109-100000-1.txt", mask=False)
+        self.assertEqual(data["report_name"], self.report)                 # 분석에서 원본 리포트를 찾음
+        self.assertIn("10.0.0.11", data["report"])
+        self.assertFalse(data["masked"])
+
+    def test_report_without_analysis(self):
+        data = self.store.export_data("db01", self.report)
+        self.assertIsNone(data["analysis_name"])
+        self.assertEqual(data["analysis"], "")
+        with self.assertRaises(webui.ApiError):
+            self.store.export_data("db01", "../secrets/x.txt")
 
 
 class AutoWatcherTest(unittest.TestCase):
