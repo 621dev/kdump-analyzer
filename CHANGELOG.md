@@ -4,6 +4,12 @@
 GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리스)으로 받을 수 있습니다.
 1.18.3까지는 프로젝트 이름이 `kdump-tools`였습니다. 아래 기록의 링크는 GitHub이 새 주소로 연결합니다.
 
+## [Unreleased]
+
+### 문서
+- README를 요약(소개, 5분 시작, 주요 기능, 문서 목록)으로 줄이고, 자세한 안내는 `docs/`의 가이드 문서로 나눴습니다: 설치와 업데이트, 사용법, 설정 파일과 LLM, 웹 UI, Windows 서버, 터미널 메뉴, 개발과 검증
+- 서버 설치(`install.sh`, 웹 UI의 노트북 버전 설치)에 `docs/`도 함께 복사해 폐쇄망 서버에서도 가이드를 볼 수 있게 했습니다. 웹 UI의 "프로그램만" 삭제는 `docs/`와 `tests/`도 지웁니다.
+
 ## [1.23.0] - 2026-11-09
 
 ### 추가
@@ -216,7 +222,8 @@ GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리�
 - 설치 스크립트(명령 등록)와 상황별 원격 분석 방식 (#3)
 - 분석 진행 표시와 메뉴의 이전 화면 이동 (#4)
 
-[1.23.0]: https://github.com/621dev/kdump-analyzer/compare/v1.22.0...main
+[Unreleased]: https://github.com/621dev/kdump-analyzer/compare/v1.23.0...main
+[1.23.0]: https://github.com/621dev/kdump-analyzer/compare/v1.22.0...v1.23.0
 [1.22.0]: https://github.com/621dev/kdump-analyzer/compare/v1.21.0...v1.22.0
 [1.21.0]: https://github.com/621dev/kdump-analyzer/compare/v1.20.0...v1.21.0
 [1.20.0]: https://github.com/621dev/kdump-analyzer/compare/v1.19.0...v1.20.0
