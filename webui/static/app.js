@@ -1,7 +1,7 @@
 "use strict";
 
 // 서버(kdump-webui.py)의 API_LEVEL과 같아야 합니다. 다르면 업데이트 뒤 서버를 다시 시작하지 않은 것입니다.
-const API_LEVEL = 8;
+const API_LEVEL = 9;
 
 // ---------------------------------------------------------------- 상태와 공통
 
@@ -1178,6 +1178,121 @@ function summaryBox(s) {
     <dl>${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl></div>`);
 }
 
+// ---------------------------------------------------------------- 보고서로 내보내기
+
+// 리포트 요약, LLM 분석, 원본 리포트를 HTML 파일 한 장으로 만듭니다(장애 보고서 첨부용, 브라우저에서 PDF로 인쇄 가능).
+function askExport() {
+  return new Promise(resolve => {
+    const overlay = h(`<div class="overlay"><div class="overlay-box" style="max-width:480px">
+      <b>보고서로 내보내기</b>
+      <div class="muted" style="font-size:13px">요약, LLM 분석(가장 최근), 원본 리포트를 HTML 파일 한 장으로 저장합니다. 브라우저에서 열어 PDF로 인쇄할 수 있습니다.</div>
+      <label class="check radio-choice"><input type="checkbox" id="ex-mask" checked>
+        <span><b>민감정보 가리기</b><br><span class="muted">호스트명, IPv4, MAC, 이메일을 LLM 분석 때와 같은 규칙으로 가립니다. IPv6, 사용자 이름, 파일 경로는 가리지 않습니다.</span></span></label>
+      <label class="check radio-choice"><input type="checkbox" id="ex-report" checked>
+        <span><b>원본 리포트 전문 포함</b><br><span class="muted">끄면 요약과 LLM 분석만 넣습니다.</span></span></label>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
+        <button class="btn small" id="ex-cancel">취소</button>
+        <button class="btn small primary" id="ex-ok">내보내기</button></div>
+    </div></div>`);
+    const done = v => { overlay.remove(); resolve(v); };
+    overlay.querySelector("#ex-cancel").addEventListener("click", () => done(null));
+    overlay.addEventListener("click", e => { if (e.target === overlay) done(null); });
+    overlay.querySelector("#ex-ok").addEventListener("click", () =>
+      done({ mask: overlay.querySelector("#ex-mask").checked, report: overlay.querySelector("#ex-report").checked }));
+    document.body.append(overlay);
+  });
+}
+
+// 내보낸 보고서는 인쇄·첨부용이라 항상 밝은 화면으로 둡니다. 스타일에서 어두운 화면 블록을 뺍니다.
+function lightOnlyCss(css) {
+  let out = "", i = 0;
+  const marker = "@media (prefers-color-scheme: dark)";
+  for (;;) {
+    const at = css.indexOf(marker, i);
+    if (at < 0) return out + css.slice(i);
+    out += css.slice(i, at);
+    let depth = 0, j = css.indexOf("{", at);
+    for (; j < css.length; j++) {
+      if (css[j] === "{") depth++;
+      else if (css[j] === "}" && --depth === 0) break;
+    }
+    i = j + 1;
+  }
+}
+
+async function exportReport(serverName, name) {
+  const opts = await askExport();
+  if (!opts) return;
+  let data, css = "";
+  try {
+    data = await api("GET", `/api/export?server=${encodeURIComponent(serverName)}&name=${encodeURIComponent(name)}&mask=${opts.mask ? 1 : 0}`);
+    css = lightOnlyCss(await fetch("style.css").then(r => r.text()).catch(() => ""));
+  } catch (e) {
+    toast(e.message);
+    return;
+  }
+  const head = (data.report.split(/^===== /m)[0] || "");
+  const field = key => ((head.match(new RegExp(`^${key}:\\s*(.+)$`, "m")) || [])[1] || "").trim();
+  const metaRows = [
+    ["서버", data.server],
+    ["덤프", field("vmcore")],
+    ["커널", field("kernel")],
+    ["리포트", data.report_name || "(없음)"],
+    ["LLM 분석", data.analysis_name || "(없음)"],
+    ["내보낸 시각", `${data.exported} · kdump-analyzer v${data.version}`],
+    ["민감정보", data.masked ? "가림 (호스트명, IPv4, MAC, 이메일)" : "가리지 않음"],
+  ].filter(([, v]) => v);
+  let analysisHtml = '<p class="muted">이 리포트의 LLM 분석이 없습니다.</p>';
+  if (data.analysis) {
+    const split = data.analysis.indexOf("\n\n");
+    const meta = split > 0 ? data.analysis.slice(0, split) : "";
+    const body = split > 0 ? data.analysis.slice(split + 2) : data.analysis;
+    const shortMeta = meta.split("\n").filter(l => !l.startsWith("source_report:") && !l.startsWith("kdump llm")).join(" · ");
+    analysisHtml = `<div class="analysis-meta">${esc(shortMeta)}</div><div class="markdown">${markdown(body)}</div>`;
+  }
+  let reportHtml = "";
+  if (opts.report && data.report) {
+    const parts = data.report.split(/^===== (.+?) =====$/m);
+    reportHtml = `<h2>원본 리포트</h2><pre class="path" style="white-space:pre-wrap">${esc(parts[0].trim())}</pre>`;
+    for (let i = 1; i < parts.length; i += 2) {
+      const body = (parts[i + 1] || "").replace(/^\n|\n+$/g, "");
+      reportHtml += `<details class="section" open><summary><span>${esc(parts[i])}</span><span class="count">${body.split("\n").length}줄</span></summary><pre>${esc(body)}</pre></details>`;
+    }
+  }
+  const summary = data.summary ? summaryBox(data.summary).outerHTML : "";
+  const title = `장애 분석 보고서 - ${data.server} - ${field("vmcore").split(/[\\/]/).pop() || data.report_name || ""}`;
+  const html = `<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(title)}</title>
+<style>${css}
+body { background: #fff; color: #111; padding: 24px; }
+main { max-width: 1000px; margin: 0 auto; }
+table.export-meta { border-collapse: collapse; margin: 8px 0 16px; font-size: 13.5px; }
+table.export-meta th { text-align: left; padding: 3px 14px 3px 0; color: #555; font-weight: 600; white-space: nowrap; }
+table.export-meta td { padding: 3px 0; word-break: break-all; }
+@media print { body { padding: 0; } details.section pre { white-space: pre-wrap; } }
+</style></head>
+<body><main>
+<h1 style="margin:0 0 4px">장애 분석 보고서</h1>
+<table class="export-meta">${metaRows.map(([k, v]) => `<tr><th>${esc(k)}</th><td>${esc(v)}</td></tr>`).join("")}</table>
+${summary}
+<h2>LLM 분석</h2>
+${analysisHtml}
+${reportHtml}
+</main></body></html>`;
+  const stamp = (data.exported || "").replace(/[-: ]/g, "").slice(0, 12);
+  const file = `kdump-report-${data.server}-${stamp}.html`;
+  const url = URL.createObjectURL(new Blob([html], { type: "text/html;charset=utf-8" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = file;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  toast(`내보냈습니다: ${file}`);
+}
+
 async function renderViewer(main, serverName) {
   const name = state.view.name;
   const card = h(`<div class="card"><p class="muted"><span class="spinner"></span> 불러오는 중...</p></div>`);
@@ -1205,6 +1320,9 @@ async function renderViewer(main, serverName) {
     renderMain();
   });
   const actions = head.querySelector(".actions");
+  const exportBtn = h('<button class="btn small" title="요약, LLM 분석, 원본 리포트를 HTML 파일 한 장으로 저장합니다">보고서로 내보내기</button>');
+  exportBtn.addEventListener("click", () => exportReport(serverName, name));
+  actions.append(exportBtn);
 
   if (isAnalysis) {
     const split = content.indexOf("\n\n");

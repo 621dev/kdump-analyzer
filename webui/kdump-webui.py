@@ -58,7 +58,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(APP_DIR)
 # 화면(app.js)과 서버가 주고받는 API의 판. API를 바꿀 때 app.js의 API_LEVEL과 함께 올립니다.
 # 업데이트 뒤 서버를 다시 시작하지 않으면 화면이 이 값의 차이로 알아채고 안내합니다.
-API_LEVEL = 8
+API_LEVEL = 9
 
 # 화면의 "다시 시작"은 감시 프로세스가 서버를 새 코드로 다시 띄우는 방식입니다.
 RESTART_EXIT = 75                     # 서버가 이 코드로 끝나면 감시 프로세스가 다시 띄웁니다
@@ -245,6 +245,46 @@ class Store:
                 records.append(self._record(srv, None, items))
         records.sort(key=lambda r: r["time"], reverse=True)
         return records
+
+    def export_data(self, server, name, mask=False):
+        """보고서로 내보낼 리포트, JSON 요약, LLM 분석(가장 최근)을 모읍니다. name은 리포트나 분석 파일.
+
+        mask면 LLM에 보낼 때와 같은 규칙(kdump_llm.mask_text)으로 호스트명, IPv4, MAC, 이메일을 가립니다.
+        호스트명은 리포트의 sys NODENAME에서 찾으므로, 분석과 요약도 리포트와 함께 가립니다.
+        """
+        path = self.result_path(server, name)
+        analysis_name = report_name = None
+        if "-analysis-" in name:
+            analysis_name = name
+            source = parse_result_head(path).get("source_report", "")
+            candidate = re.split(r"[\\/]", source)[-1] if source else ""
+            if candidate and FILE_RE.match(candidate) and os.path.exists(os.path.join(self.report_dir(server), candidate)):
+                report_name = candidate
+        else:
+            report_name = name
+            for rec in self.history(server):
+                if rec["report"] and rec["report"]["name"] == name and rec["analyses"]:
+                    analysis_name = rec["analyses"][0]["name"]
+                    break
+
+        def read(n):
+            if not n:
+                return ""
+            with open(self.result_path(server, n), encoding="utf-8", errors="replace") as f:
+                return f.read()
+
+        report, analysis = read(report_name), read(analysis_name)
+        summary = load_summary(self.result_path(server, report_name)) if report_name else None
+        if mask:
+            sep = "\n\x00KDUMP-EXPORT-SPLIT\x00\n"
+            joined = kdump_llm.mask_text(sep.join([report, analysis, json.dumps(summary, ensure_ascii=False)]))
+            parts = joined.split(sep)
+            if len(parts) == 3:
+                report, analysis = parts[0], parts[1]
+                summary = json.loads(parts[2])
+        return {"server": server, "report_name": report_name, "report": report,
+                "analysis_name": analysis_name, "analysis": analysis, "summary": summary, "masked": bool(mask),
+                "version": version_text(), "exported": time.strftime("%Y-%m-%d %H:%M:%S")}
 
     @staticmethod
     def _record(server, report, analyses):
@@ -2385,6 +2425,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 content = f.read()
             summary = None if "-analysis-" in path_ else load_summary(path_)
             return self._json(200, {"content": content, "summary": summary})
+        if parts == ["export"] and method == "GET":
+            return self._json(200, store.export_data(query.get("server", [""])[0], query.get("name", [""])[0],
+                                                     mask=query.get("mask", ["0"])[0] == "1"))
 
         if parts == ["settings"] and method == "POST":
             body = self._body()
