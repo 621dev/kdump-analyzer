@@ -63,3 +63,9 @@ jobs:
           python-version: "3.12"
       - name: 웹 UI·LLM 단위 테스트
         run: python -m unittest discover -s tests -v
+      - name: Windows 분석 스크립트 테스트 (Windows PowerShell 5.1)
+        shell: cmd
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/test-windump.ps1
+      - name: Windows 분석 스크립트 테스트 (PowerShell 7)
+        shell: cmd
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File tests/windows/test-windump.ps1

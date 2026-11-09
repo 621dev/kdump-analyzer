@@ -204,6 +204,8 @@ dialog h3 { margin: 4px 0 10px; font-size: 14px; color: var(--muted); }
 label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; font-weight: 600; }
 label input, label select { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); font-weight: 400; }
 label.check { flex-direction: row; align-items: center; gap: 8px; font-weight: 500; }
+/* display를 지정한 요소에도 hidden 속성이 먹도록 (예: Windows 서버의 sudo 항목) */
+[hidden] { display: none !important; }
 .hint { color: var(--muted); font-weight: 400; font-size: 12px; }
 .inline { display: flex; gap: 6px; }
 .inline input { flex: 1; min-width: 0; }
@@ -271,6 +273,7 @@ label.check { flex-direction: row; align-items: center; gap: 8px; font-weight: 5
 .summary-box dt { color: var(--muted); }
 .summary-box dd { margin: 0; overflow-wrap: anywhere; }
 .summary-box .panic { color: var(--err); }
+.os-tag { font-size: 10.5px; font-weight: 600; padding: 0 6px; border-radius: 999px; background: var(--accent-weak); color: var(--accent); vertical-align: 1px; }
 .record-llm { font-size: 12px; color: var(--muted); margin-top: 4px; }
 .record-more { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; }
 .record-actions { display: flex; gap: 6px; flex: none; flex-wrap: wrap; justify-content: flex-end; }
