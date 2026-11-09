@@ -192,11 +192,32 @@ class Store:
             self._save("servers.json", [s for s in self.servers() if s["name"] != name])
 
     def save_secret(self, filename, value):
+        """API 키·토큰을 저장합니다. Windows에서는 DPAPI로 암호화합니다(kdump_llm.protect_secret)."""
         path = os.path.join(self.dir, "secrets", filename)
+        stored = kdump_llm.protect_secret(value)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(value.strip() + "\n")
+            f.write(stored + "\n")
         return path
+
+    def protect_existing_secrets(self):
+        """예전 판이 평문으로 저장한 비밀을 이 PC의 방식(DPAPI)으로 다시 저장합니다. 바꾼 파일 이름 목록."""
+        if kdump_llm.secret_protection() != "dpapi":
+            return []
+        folder = os.path.join(self.dir, "secrets")
+        changed = []
+        for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+            path = os.path.join(folder, name)
+            if not os.path.isfile(path) or name.endswith(".tmp") or kdump_llm.is_protected(path):
+                continue
+            try:
+                value = kdump_llm.read_secret(path)
+                if value:
+                    self.save_secret(name, value)
+                    changed.append(name)
+            except (OSError, ValueError) as error:
+                print("비밀 파일을 암호화하지 못했습니다: %s (%s)" % (name, error), file=sys.stderr)
+        return changed
 
     def report_dir(self, server):
         path = os.path.join(self.dir, "reports", server)
@@ -2112,6 +2133,8 @@ class App:
         self.started_version = version_text()  # 이 서버 프로세스를 시작할 때의 버전
         self.latest = None
         threading.Thread(target=self.check_latest, daemon=True).start()
+        for name in store.protect_existing_secrets():
+            print("평문으로 저장돼 있던 비밀을 암호화했습니다: secrets/%s" % name)
 
     def check_latest(self):
         settings = self.store.settings()
@@ -2122,6 +2145,7 @@ class App:
         settings = self.store.settings()
         settings["api_key_saved"] = bool(settings.get("api_key_file") and os.path.exists(settings["api_key_file"]))
         settings["cli_token_saved"] = bool(settings.get("cli_token_file") and os.path.exists(settings["cli_token_file"]))
+        settings["secret_protection"] = kdump_llm.secret_protection()
         return settings
 
 
