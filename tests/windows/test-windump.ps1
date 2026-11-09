@@ -48,6 +48,10 @@ try {
     Set-Content -LiteralPath $old -Value "old" -Encoding ascii
     Set-Content -LiteralPath $new -Value "new" -Encoding ascii
     (Get-Item $old).LastWriteTime = (Get-Date).AddDays(-1)
+    # 재부팅 직후 Windows가 만들어 두는 0바이트 미니덤프: 가장 새 파일이지만 고르지 않아야 합니다.
+    $empty = Join-Path $dumps "110725-3-01.dmp"
+    New-Item -ItemType File -Path $empty | Out-Null
+    (Get-Item $empty).LastWriteTime = (Get-Date).AddMinutes(5)
     $out = Join-Path $tmp "logs"
     $common = @("-CdbPath", $fake, "-OutDir", $out, "-SymbolPath", "srv*$tmp\sym*https://example.invalid")
 
@@ -106,6 +110,8 @@ try {
     # 오류 경로
     $r = Run "d1" (@("-Dump", (Join-Path $tmp "none.dmp")) + $common)
     Check "덤프 없음: 종료 코드 1" ($r.Code -eq 1 -and $r.Out -match "덤프 파일을 찾을 수 없습니다")
+    $r = Run "d1" (@("-Dump", $empty) + $common)
+    Check "빈 덤프: 종료 코드 1과 안내" ($r.Code -eq 1 -and $r.Out -match "덤프 파일이 비어 있습니다")
     $r = Run "d1" @("-Dump", $new, "-CdbPath", (Join-Path $tmp "no-cdb.exe"), "-OutDir", $out)
     Check "cdb 없음: 종료 코드 1" ($r.Code -eq 1 -and $r.Out -match "cdb.exe를 찾을 수 없습니다")
 }

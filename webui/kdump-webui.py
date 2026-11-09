@@ -574,7 +574,7 @@ WIN_PRELUDE = "[Console]::OutputEncoding=[Text.Encoding]::UTF8;$ProgressPreferen
 # analyze-windump.ps1의 Find-Cdb와 같은 순서로 cdb.exe를 찾습니다.
 WIN_FIND_CDB = r"""function Find-Cdb{foreach($p in @(${env:ProgramFiles(x86)},$env:ProgramFiles)){if($p){$c=Join-Path $p 'Windows Kits\10\Debuggers\x64\cdb.exe';if(Test-Path -LiteralPath $c){return $c}}};$g=Get-Command cdb.exe -ErrorAction SilentlyContinue;if($g){return $g.Source};return $null};"""
 # 덤프 디렉터리(기본 C:\Windows)의 *.dmp(MEMORY.DMP)와 Minidump\*.dmp
-WIN_DUMPS = r"""function Get-Dumps($d){@(Get-ChildItem -LiteralPath $d -Filter *.dmp -File -ErrorAction SilentlyContinue)+@(Get-ChildItem -LiteralPath (Join-Path $d 'Minidump') -Filter *.dmp -File -ErrorAction SilentlyContinue)|Where-Object{$_}|Sort-Object FullName -Unique};"""
+WIN_DUMPS = r"""function Get-Dumps($d){@(Get-ChildItem -LiteralPath $d -Filter *.dmp -File -ErrorAction SilentlyContinue)+@(Get-ChildItem -LiteralPath (Join-Path $d 'Minidump') -Filter *.dmp -File -ErrorAction SilentlyContinue)|Where-Object{$_ -and $_.Length -gt 0}|Sort-Object FullName -Unique};"""
 
 
 def win_argv(script):
