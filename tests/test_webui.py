@@ -371,7 +371,7 @@ class WindowsServerTest(unittest.TestCase):
             code, out = run(argv)
             self.assertEqual(code, 0, out.decode("utf-8", "replace"))
             info = webui.win_server_version(server)
-            self.assertEqual((info["installed"], info["version"], info["prefix"]), (True, "1.22.0", os.path.join(d, "ka")))
+            self.assertEqual((info["installed"], info["version"], info["prefix"]), (True, webui.version_text(), os.path.join(d, "ka")))
             self.assertEqual(webui.probe_method(server), "installed")
 
             for method in ("installed", "upload"):
@@ -401,6 +401,96 @@ class WindowsServerTest(unittest.TestCase):
             # 설치·무설치 실행 모두 보낸 임시 스크립트를 남기지 않습니다.
             leftovers = [f for f in os.listdir(home) if f.startswith("kdump-analyzer-") and f.endswith(".ps1")]
             self.assertEqual(leftovers, [])
+
+            # 삭제: 프로그램만 -> bin·설치 정보만 지우고 logs는 남김
+            base = os.path.join(d, "ka")
+            code, out = run(webui.win_uninstall_command(server, "program"))
+            self.assertEqual(code, 0, out.decode("utf-8", "replace"))
+            self.assertFalse(os.path.exists(os.path.join(base, "bin")))
+            self.assertFalse(os.path.exists(os.path.join(base, ".install-info")))
+            self.assertTrue(os.path.isdir(os.path.join(base, "logs")))
+            self.assertFalse(webui.win_server_version(server)["installed"])
+            # 이미 지웠으면 실패(설치 정보도 스크립트도 없음)
+            self.assertNotEqual(run(webui.win_uninstall_command(server, "program"))[0], 0)
+            # 다시 설치한 뒤 전부 -> 설치 폴더 통째로
+            argv, name = webui.win_install_command(server, "1.22.0", "abc1234", "webui:test")
+            upload(name)
+            self.assertEqual(run(argv)[0], 0)
+            code, out = run(webui.win_uninstall_command(server, "all"))
+            self.assertEqual(code, 0, out.decode("utf-8", "replace"))
+            self.assertFalse(os.path.exists(base))
+
+    def test_uninstall_refuses_unsafe_locations(self):
+        # 드라이브 바로 아래(C:\bin\...)나 bin이 아닌 폴더는 지우지 않습니다.
+        for tool in (r"C:\bin\analyze-windump.ps1", r"C:\ProgramData\kdump-analyzer\tools\analyze-windump.ps1"):
+            script = self.decode(webui.win_uninstall_command(dict(self.SERVER, tool=tool), "all"))
+            self.assertIn("-ne 'bin'", script)
+            self.assertIn("$base.Length -le 3", script)
+            if shutil.which("powershell") and os.name == "nt":
+                r = subprocess.run(webui.win_uninstall_command(dict(self.SERVER, tool=tool), "all"),
+                                   capture_output=True, timeout=60)
+                self.assertEqual(r.returncode, 5, r.stdout.decode("utf-8", "replace"))
+
+    def test_prepare_actions_follow_server_os(self):
+        linux = dict(self.SERVER, os="linux")
+        self.assertTrue(webui.valid_prepare_actions(self.SERVER, ["cdb", "dumpconf", "pagefile", "tool"]))
+        self.assertFalse(webui.valid_prepare_actions(self.SERVER, ["kdump"]))
+        self.assertFalse(webui.valid_prepare_actions(linux, ["cdb"]))
+        self.assertTrue(webui.valid_prepare_actions(linux, ["kdump", "tool"]))
+        self.assertFalse(webui.valid_prepare_actions(linux, []))
+        self.assertFalse(webui.valid_prepare_actions(linux, "kdump"))
+
+    def test_prepare_scripts_fit_and_parse(self):
+        # cmd.exe 한 줄 제한(8191자) 안에 들어가고 PowerShell 문법 오류가 없어야 합니다.
+        for action, script in webui.WIN_PREPARE.items():
+            argv = webui.win_argv(script)
+            self.assertLess(len(" ".join(argv)), 8000, action)
+            self.assertIn(action, webui.WIN_PREPARE_ACTIONS)
+        self.assertIn("Get-AuthenticodeSignature", webui.WIN_PREPARE["cdb"])
+        self.assertIn("O=Microsoft Corporation", webui.WIN_PREPARE["cdb"])
+        self.assertIn(webui.WIN_SDK_URL, webui.WIN_PREPARE["cdb"])
+        argv = webui.win_uninstall_command(self.SERVER, "all")
+        self.assertLess(len(" ".join(argv)), 8000)
+        if not (shutil.which("powershell") and os.name == "nt"):
+            return
+        with tempfile.TemporaryDirectory() as d:
+            for name, script in list(webui.WIN_PREPARE.items()) + [("uninstall", self.decode(argv))]:
+                path = os.path.join(d, name + ".ps1")
+                with open(path, "w", encoding="utf-8-sig") as f:
+                    f.write(script)
+                check = ("$e=$null;[void][Management.Automation.Language.Parser]::ParseFile('%s',[ref]$null,[ref]$e);"
+                         "if($e){$e|ForEach-Object{$_.Message};exit 1}" % path)
+                r = subprocess.run(["powershell", "-NoProfile", "-Command", check], capture_output=True, timeout=60)
+                self.assertEqual(r.returncode, 0, "%s: %s" % (name, r.stdout.decode("utf-8", "replace")))
+
+    def test_fetch_win_script_from_github(self):
+        orig = (webui.fetch_latest, webui._http_get)
+        info = {"ok": True, "ref": "v1.22.0", "commit": "e3b332d7543993a98d080368a6308aa086e7d769", "version": "1.22.0"}
+        urls = []
+        with open(webui.WIN_SCRIPT, "rb") as f:
+            script = f.read()
+        try:
+            webui.fetch_latest = lambda repo, channel, branch, base="": dict(info)
+            webui._http_get = lambda url, accept=None, timeout=8: (urls.append(url), script)[1]
+            got, data = webui.fetch_win_script("621dev/kdump-analyzer", "release", "main")
+            self.assertEqual(got["ref"], "v1.22.0")
+            self.assertEqual(urls, ["https://raw.githubusercontent.com/621dev/kdump-analyzer/%s/winbin/analyze-windump.ps1" % info["commit"]])
+            # 1.22.0 전 릴리스에는 스크립트가 없습니다.
+            webui._http_get = lambda url, accept=None, timeout=8: (_ for _ in ()).throw(
+                urllib.error.HTTPError(url, 404, "Not Found", {}, None))
+            with self.assertRaises(webui.ApiError) as ctx:
+                webui.fetch_win_script("621dev/kdump-analyzer", "release", "main")
+            self.assertIn("1.22.0부터", ctx.exception.message)
+            # 엉뚱한 내용은 거부
+            webui._http_get = lambda url, accept=None, timeout=8: b"<html>not found</html>"
+            with self.assertRaises(webui.ApiError):
+                webui.fetch_win_script("621dev/kdump-analyzer", "release", "main")
+            # GitHub 버전 확인 실패
+            webui.fetch_latest = lambda repo, channel, branch, base="": {"ok": False, "error": "GitHub에 접속하지 못했습니다"}
+            with self.assertRaises(webui.ApiError):
+                webui.fetch_win_script("621dev/kdump-analyzer", "release", "main")
+        finally:
+            webui.fetch_latest, webui._http_get = orig
 
 
 def json_loads(data):
@@ -484,6 +574,67 @@ class ShellSnippetTest(unittest.TestCase):
         argv = webui.with_remote_timeout(["sh", "-c", "cat; exit 3"], 30)
         r = subprocess.run(argv, input=b"hello\n", capture_output=True)
         self.assertEqual((r.returncode, r.stdout), (3, b"hello\n"))
+
+    @unittest.skipIf(sys.platform == "win32", "심볼릭 링크와 readlink -f가 있는 Linux에서만 실행합니다")
+    def test_remote_uninstall(self):
+        # 가짜 id(root)로 임시 설치 위치를 지웁니다. 명령 등록 링크는 같은 설치를 가리키는 것만 지웁니다.
+        with tempfile.TemporaryDirectory() as d:
+            d = os.path.realpath(d)
+            fakebin = os.path.join(d, "fakebin")
+            os.makedirs(fakebin)
+            with open(os.path.join(fakebin, "id"), "w") as f:
+                f.write("#!/bin/sh\necho 0\n")
+            os.chmod(os.path.join(fakebin, "id"), 0o755)
+            env = dict(os.environ, PATH=fakebin + os.pathsep + os.environ["PATH"])
+
+            def install():
+                prefix, sbin = os.path.join(d, "ka"), os.path.join(d, "sbin")
+                os.makedirs(os.path.join(prefix, "bin"), exist_ok=True)
+                os.makedirs(os.path.join(prefix, "vmlinux"), exist_ok=True)
+                os.makedirs(os.path.join(prefix, "completion"), exist_ok=True)
+                os.makedirs(sbin, exist_ok=True)
+                for name in ("analyze-kdump", "analyze-kdump-ui"):
+                    path = os.path.join(prefix, "bin", name)
+                    with open(path, "w") as f:
+                        f.write("#!/bin/sh\n")
+                    os.chmod(path, 0o755)
+                    if not os.path.lexists(os.path.join(sbin, name)):
+                        os.symlink(path, os.path.join(sbin, name))
+                for name, text in (("install.sh", "#"), ("VERSION", "1.23.0\n"), ("analyze-kdump.conf", "KEEP=1\n"),
+                                   (".install-info", "VERSION=1.23.0\nBIN_DIR=%s\n" % sbin)):
+                    with open(os.path.join(prefix, name), "w") as f:
+                        f.write(text)
+                other = os.path.join(sbin, "other-tool")
+                if not os.path.lexists(other):
+                    os.symlink("/bin/true", other)
+                return prefix, sbin
+
+            def run(prefix, mode):
+                argv = ["sh", "-c", webui.REMOTE_UNINSTALL, "sh", os.path.join(prefix, "bin", "analyze-kdump"), mode] \
+                    + list(webui.PROGRAM_FILES)
+                return subprocess.run(argv, capture_output=True, text=True, env=env)
+
+            prefix, sbin = install()
+            r = run(prefix, "program")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(sorted(os.listdir(prefix)), ["analyze-kdump.conf", "vmlinux"])  # 설정·vmlinux는 남김
+            self.assertEqual(os.listdir(sbin), ["other-tool"])  # 다른 명령 링크는 그대로
+            self.assertIn("남긴 것", r.stdout)
+
+            prefix, sbin = install()
+            r = run(prefix, "all")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertFalse(os.path.exists(prefix))
+            self.assertEqual(os.listdir(sbin), ["other-tool"])
+
+            # 설치가 아닌 곳과 위험한 위치는 지우지 않습니다.
+            empty = os.path.join(d, "empty")
+            os.makedirs(os.path.join(empty, "bin"))
+            self.assertEqual(run(empty, "all").returncode, 5)
+            self.assertTrue(os.path.isdir(empty))
+            r = subprocess.run(["sh", "-c", webui.REMOTE_UNINSTALL, "sh", "/usr/bin/analyze-kdump", "all"],
+                               capture_output=True, text=True, env=env)
+            self.assertEqual(r.returncode, 5, r.stdout)
 
     @unittest.skipUnless(shutil.which("base64"), "base64가 필요합니다")
     def test_install_bundle_unpacks(self):

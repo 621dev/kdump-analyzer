@@ -23,6 +23,7 @@ import base64
 import contextlib
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -57,7 +58,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(APP_DIR)
 # 화면(app.js)과 서버가 주고받는 API의 판. API를 바꿀 때 app.js의 API_LEVEL과 함께 올립니다.
 # 업데이트 뒤 서버를 다시 시작하지 않으면 화면이 이 값의 차이로 알아채고 안내합니다.
-API_LEVEL = 7
+API_LEVEL = 8
 
 # 화면의 "다시 시작"은 감시 프로세스가 서버를 새 코드로 다시 띄우는 방식입니다.
 RESTART_EXIT = 75                     # 서버가 이 코드로 끝나면 감시 프로세스가 다시 띄웁니다
@@ -1004,10 +1005,21 @@ swap)
 esac
 """, 2)
 
-PREPARE_ACTIONS = ("kdump", "crashkernel", "crash", "debuginfo", "swap", "tool")
+PREPARE_ACTIONS = ("kdump", "crashkernel", "crash", "debuginfo", "swap",
+                   "dumpconf", "pagefile", "cdb", "tool")
+LINUX_PREPARE_ACTIONS = ("kdump", "crashkernel", "crash", "debuginfo", "swap", "tool")
+WIN_PREPARE_ACTIONS = ("dumpconf", "pagefile", "cdb", "tool")
 PREPARE_LABELS = {"kdump": "kdump 서비스 설치·활성화", "crashkernel": "crashkernel 메모리 예약 설정",
                   "crash": "crash 설치", "debuginfo": "디버그 커널(vmlinux) 설치",
-                  "swap": "swap 2GB 추가", "tool": "analyze-kdump 설치 (노트북 버전)"}
+                  "swap": "swap 2GB 추가", "tool": "analyze-kdump 설치 (노트북 버전)",
+                  "dumpconf": "덤프 설정 (커널 메모리 덤프)", "pagefile": "페이지 파일 (시스템 관리 크기)",
+                  "cdb": "디버거 설치 (Debugging Tools for Windows)"}
+
+
+def valid_prepare_actions(server, actions):
+    """서버 준비 요청의 항목이 그 서버 운영체제의 항목인지 확인합니다."""
+    allowed = WIN_PREPARE_ACTIONS if is_windows(server) else LINUX_PREPARE_ACTIONS
+    return isinstance(actions, list) and bool(actions) and all(a in allowed for a in actions)
 
 
 def vmlinux_base(server):
@@ -1111,6 +1123,26 @@ def scp_upload(server, local_path, remote_name, timeout=120):
         return 127, ("scp를 실행할 수 없습니다: %s" % error).encode()
 
 
+def fetch_win_script(repo, channel, branch):
+    """업데이트 설정(최신 릴리스 또는 브랜치)의 Windows 분석 스크립트를 GitHub에서 받습니다. (정보, 내용)"""
+    info = fetch_latest(repo, channel, branch)
+    if not info.get("ok"):
+        raise ApiError(502, info.get("error") or "GitHub에서 버전 정보를 읽지 못했습니다.")
+    url = "https://raw.githubusercontent.com/%s/%s/winbin/analyze-windump.ps1" % (repo, info["commit"])
+    try:
+        data = _http_get(url, timeout=30)
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            raise ApiError(400, "GitHub %s v%s에는 Windows 분석 스크립트가 없습니다 (1.22.0부터 들어 있습니다)."
+                           % (info["ref"], info.get("version", "?")))
+        raise ApiError(502, "Windows 분석 스크립트를 받지 못했습니다: %s" % error)
+    except Exception as error:  # noqa: BLE001 - 네트워크 오류는 화면에 그대로 보여줍니다.
+        raise ApiError(502, "Windows 분석 스크립트를 받지 못했습니다: %s" % error)
+    if b"analyze-windump" not in data[:4096] and b"$ScriptVersion" not in data:
+        raise ApiError(502, "받은 파일이 Windows 분석 스크립트가 아닙니다: %s" % url)
+    return info, data
+
+
 def win_report_command(server, vmcore, method, limit):
     """Windows 서버에서 리포트를 만드는 명령 (argv, 먼저 홈 폴더로 보낼 분석 스크립트 이름 또는 None)."""
     args = "-Dump %s -TimeoutSec %d" % (ps_quote(vmcore), limit)
@@ -1138,12 +1170,48 @@ def win_install_command(server, version, commit, label):
     return win_argv(script), name
 
 
+# Windows SDK 설치 관리자(winsdksetup.exe). learn.microsoft.com/windows/apps/windows-sdk/downloads 맨 위의 '설치 관리자' 링크.
+WIN_SDK_URL = "https://go.microsoft.com/fwlink/?linkid=2382519"
+
+# 서버 준비 탭의 Windows 설치 항목. 출력은 작업 로그에 그대로 남습니다.
+WIN_PREPARE = {
+    # 블루스크린 때 커널 메모리 덤프를 남기게 합니다. 이미 덤프를 만들게 설정돼 있으면 종류는 바꾸지 않습니다.
+    "dumpconf": r"""$k='HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl'
+$cur=(Get-ItemProperty -Path $k -ErrorAction SilentlyContinue).CrashDumpEnabled
+if($null -eq $cur -or $cur -eq 0){Set-ItemProperty -Path $k -Name CrashDumpEnabled -Value 2 -Type DWord;"CrashDumpEnabled: $(if($null -eq $cur){'없음'}else{$cur}) -> 2 (커널 메모리 덤프)"}else{"덤프 종류는 그대로 둡니다: CrashDumpEnabled=$cur"}
+Set-ItemProperty -Path $k -Name AutoReboot -Value 1 -Type DWord
+Set-ItemProperty -Path $k -Name Overwrite -Value 1 -Type DWord
+'AutoReboot=1 (덤프 뒤 자동 재시작), Overwrite=1 (MEMORY.DMP 덮어쓰기)'
+'재부팅한 뒤부터 적용됩니다.'""",
+    # 페이지 파일이 없으면 커널 덤프를 쓰지 못할 수 있어, 시스템이 크기를 관리하게 합니다.
+    "pagefile": r"""$cs=Get-CimInstance Win32_ComputerSystem
+if($cs.AutomaticManagedPagefile){'이미 시스템이 페이지 파일 크기를 관리합니다. 페이지 파일이 없다면 재부팅한 뒤 다시 점검해 주세요.'}
+else{Set-CimInstance -InputObject $cs -Property @{AutomaticManagedPagefile=$true};"페이지 파일을 '시스템이 관리하는 크기'로 바꿨습니다. 재부팅한 뒤 적용됩니다."}""",
+    # Windows SDK 설치 관리자를 받아 Microsoft 서명을 확인한 뒤 Debugging Tools for Windows만 설치합니다.
+    "cdb": WIN_FIND_CDB + r"""$ErrorActionPreference='Stop'
+$c=Find-Cdb;if($c){"이미 설치되어 있습니다: $c";exit 0}
+$d=Join-Path $env:TEMP ('kdump-analyzer-sdk-'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $d|Out-Null
+try{$f=Join-Path $d 'winsdksetup.exe';$log=Join-Path $d 'sdk.log'
+[Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+'[1/3] Windows SDK 설치 관리자 받는 중: '+%s
+Invoke-WebRequest -UseBasicParsing -Uri %s -OutFile $f
+$s=Get-AuthenticodeSignature -LiteralPath $f
+if($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation'){"[2/3] Microsoft 서명을 확인하지 못해 실행하지 않습니다: $($s.Status) $($s.SignerCertificate.Subject)";exit 3}
+'[2/3] 서명 확인: '+$s.SignerCertificate.Subject
+'[3/3] Debugging Tools for Windows 설치 중 (몇 분 걸립니다)'
+$p=Start-Process -FilePath $f -ArgumentList ('/features OptionId.WindowsDesktopDebuggers /quiet /norestart /log "'+$log+'"') -Wait -PassThru
+$c=Find-Cdb;if($c){"설치했습니다: $c";exit 0}
+"설치 관리자가 끝났지만 cdb.exe를 찾지 못했습니다 (종료 코드 $($p.ExitCode)). 설치 로그 끝부분:"
+if(Test-Path -LiteralPath $log){Get-Content -LiteralPath $log -Tail 15}
+exit 4}finally{Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue}""" % (ps_quote(WIN_SDK_URL), ps_quote(WIN_SDK_URL)),
+}
+
 WIN_DUMP_MODES = {"0": "만들지 않음", "1": "전체 메모리 덤프", "2": "커널 메모리 덤프", "3": "작은 메모리 덤프(Minidump)",
                   "7": "자동 메모리 덤프"}
 
 
 def win_prepare_check(server):
-    """Windows 서버의 덤프 분석 환경 점검. 1단계에서는 점검과 분석 스크립트 설치만 합니다."""
+    """Windows 서버의 덤프 분석 환경 점검. 서버에서 바꾸는 것은 없습니다(설치는 WIN_PREPARE 항목으로)."""
     script = WIN_FIND_CDB + r"""$c=Find-Cdb;"cdb=$c";if($c){"cdb_version=$((Get-Item -LiteralPath $c).VersionInfo.ProductVersion)"}
 $cc=Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl' -ErrorAction SilentlyContinue;"dump_mode=$($cc.CrashDumpEnabled)";"dump_file=$($cc.DumpFile)";"auto_reboot=$($cc.AutoReboot)"
 $pf=@(Get-CimInstance Win32_PageFileUsage -ErrorAction SilentlyContinue);"pagefile_mb=$(($pf|Measure-Object AllocatedBaseSize -Sum).Sum)"
@@ -1164,20 +1232,20 @@ $dr=Get-PSDrive ($env:SystemDrive.TrimEnd(':'));"disk_free=$($dr.Free)";"system_
     mode = i.get("dump_mode", "")
     if mode in ("", "0"):
         add("dumpconf", "덤프 설정", "missing", "블루스크린 때 덤프를 만들지 않음 (CrashDumpEnabled=%s)" % (mode or "없음"),
-            None, "시스템 속성 → 고급 → 시작 및 복구에서 '커널 메모리 덤프'를 고르거나 tests/vm/windows-vm-setup.md의 덤프 설정을 따르세요.")
+            "dumpconf", "커널 메모리 덤프로 설정합니다. 재부팅한 뒤부터 적용됩니다.")
     else:
         add("dumpconf", "덤프 설정", "ok", "%s · %s" % (WIN_DUMP_MODES.get(mode, "CrashDumpEnabled=" + mode), i.get("dump_file") or "MEMORY.DMP"))
     pagefile = _num(i.get("pagefile_mb"))
     if pagefile:
         add("pagefile", "페이지 파일", "ok", "%d MB" % pagefile)
     else:
-        add("pagefile", "페이지 파일", "missing", "없음 · 페이지 파일이 없으면 커널 덤프를 만들지 못할 수 있습니다", None,
-            "시스템 드라이브에 '시스템이 관리하는 크기'의 페이지 파일을 두세요.")
+        add("pagefile", "페이지 파일", "missing", "없음 · 페이지 파일이 없으면 커널 덤프를 만들지 못할 수 있습니다", "pagefile",
+            "'시스템이 관리하는 크기'로 설정합니다. 재부팅한 뒤 적용됩니다.")
     if i.get("cdb"):
         add("cdb", "디버거 (cdb)", "ok", "cdb %s · %s" % (i.get("cdb_version", ""), i["cdb"]))
     else:
-        add("cdb", "디버거 (cdb)", "missing", "Debugging Tools for Windows가 없음", None,
-            "Windows SDK 설치 파일로 'Debugging Tools for Windows'만 설치하세요 (winsdksetup.exe /features OptionId.WindowsDesktopDebuggers /quiet).")
+        add("cdb", "디버거 (cdb)", "missing", "Debugging Tools for Windows가 없음", "cdb",
+            "서버가 Microsoft에서 Windows SDK 설치 관리자를 받아(인터넷 필요) 서명을 확인한 뒤 디버거만 설치합니다.")
     free = _num(i.get("disk_free"))
     if free:
         add("disk", "저장 공간", "ok" if free > 5 * 1024 ** 3 else "warn",
@@ -1373,6 +1441,70 @@ status=$?
 [ "$status" -eq 2 ] && status=0
 exit $status
 """, 1)
+
+
+# 서버의 analyze-kdump를 지웁니다. 설치된 install.sh의 판에 기대지 않도록 여기서 직접 합니다.
+# $1 도구 경로, $2 program(프로그램 파일만, 설정·서버 목록·로그·vmlinux는 남김) | all(설치 디렉터리 통째로)
+UNINSTALL_MODES = ("program", "all")
+# install.sh가 설치 디렉터리에 복사하는 것(BUNDLE_FILES·BUNDLE_DIRS)과 설치 정보
+PROGRAM_FILES = BUNDLE_DIRS + BUNDLE_FILES + (".install-info",)
+REMOTE_UNINSTALL = with_install_fallback(r"""
+tool="$1"; mode="$2"; shift 2
+t=$(command -v "$tool" 2>/dev/null || true)
+if [ -n "$t" ]; then t=$(readlink -f "$t"); else t="$tool"; fi
+case "$t" in
+  /*/bin/analyze-kdump) prefix=${t%/bin/analyze-kdump} ;;
+  *) echo "설치 위치를 알 수 없습니다: $tool"; exit 3 ;;
+esac
+[ "$(id -u)" -eq 0 ] || { echo "root 권한이 필요합니다. 서버 설정에서 sudo를 켜 주세요(비밀번호 없는 sudo 필요)."; exit 4; }
+case "$prefix" in
+  ""|/|/bin|/sbin|/boot|/dev|/etc|/home|/lib|/lib64|/opt|/proc|/root|/run|/srv|/sys|/tmp|/usr|/var|/usr/*|/etc/*|/var/*)
+    echo "이 위치는 지우지 않습니다: $prefix"; exit 5 ;;
+esac
+if [ ! -f "$prefix/.install-info" ] && [ ! -x "$prefix/bin/analyze-kdump" ]; then
+  echo "analyze-kdump 설치가 아닙니다: $prefix"; exit 5
+fi
+bin_dir=$(sed -n 's/^BIN_DIR=//p' "$prefix/.install-info" 2>/dev/null | head -n 1)
+[ -n "$bin_dir" ] || bin_dir=/usr/sbin
+for link in "$bin_dir"/*; do
+  [ -L "$link" ] || continue
+  case "$(readlink -f "$link")" in
+    "$prefix"/bin/*) rm -f "$link" && echo "명령 해제: $link" ;;
+  esac
+done
+c=/etc/bash_completion.d/kdump-tools
+if [ -f "$c" ] && grep -q analyze-kdump "$c" 2>/dev/null; then rm -f "$c" && echo "자동완성 해제: $c"; fi
+if [ "$mode" = all ]; then
+  # 설치 위치를 옮긴 뒤 남긴 예전 경로 링크도 지웁니다.
+  for l in /opt/kdump-tools /opt/kdump-analyzer; do
+    if [ -L "$l" ] && [ "$(readlink -f "$l")" = "$prefix" ]; then rm -f "$l" && echo "링크 삭제: $l"; fi
+  done
+  rm -rf -- "$prefix" || exit 6
+  echo "설치 디렉터리를 지웠습니다: $prefix"
+else
+  for f in "$@"; do
+    if [ -e "$prefix/$f" ] || [ -L "$prefix/$f" ]; then rm -rf -- "${prefix:?}/$f" || exit 6; fi
+  done
+  echo "프로그램 파일을 지웠습니다: $prefix"
+  left=$(ls -A "$prefix" 2>/dev/null)
+  if [ -n "$left" ]; then echo "남긴 것 (설정·서버 목록·로그·vmlinux):"; echo "$left" | sed 's/^/  /'; else rmdir "$prefix" 2>/dev/null; fi
+fi
+""", 1)
+
+
+def win_uninstall_command(server, mode):
+    """Windows 서버의 분석 스크립트를 지우는 명령. program은 bin과 설치 정보만, all은 설치 폴더 통째로(로그·심볼 포함)."""
+    script = (r"""$t=%s;$mode=%s
+$bin=Split-Path -Parent $t;$base=Split-Path -Parent $bin
+if((Split-Path -Leaf $bin) -ne 'bin' -or -not $base -or $base.Length -le 3){"이 위치는 지우지 않습니다: $base";exit 5}
+if(-not (Test-Path -LiteralPath (Join-Path $base '.install-info')) -and -not (Test-Path -LiteralPath $t)){"설치되어 있지 않습니다: $t";exit 5}
+if($mode -eq 'all'){Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction Stop;"설치 폴더를 지웠습니다: $base"}
+else{foreach($p in @($bin,(Join-Path $base '.install-info'))){if(Test-Path -LiteralPath $p){Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop}}
+"프로그램 파일을 지웠습니다: $bin"
+$left=@(Get-ChildItem -LiteralPath $base -Force -ErrorAction SilentlyContinue|ForEach-Object{$_.Name})
+if($left.Count){'남긴 것 (로그·심볼): '+($left -join ', ')}else{Remove-Item -LiteralPath $base -Force -ErrorAction SilentlyContinue}}"""
+              % (ps_quote(server["tool"]), ps_quote(mode)))
+    return win_argv(script)
 
 
 # ---------------------------------------------------------------- 분석 작업
@@ -1740,8 +1872,11 @@ class Jobs:
                         job.log(error.message)
                         failed.append(action)
                     continue
-                code, _ = self._stream(job, server, ["sh", "-c", REMOTE_PREPARE, "sh", action, vmlinux_base(server)],
-                                       timeout=PREPARE_TIMEOUT)
+                if is_windows(server):
+                    argv = win_argv(WIN_PREPARE[action])
+                else:
+                    argv = ["sh", "-c", REMOTE_PREPARE, "sh", action, vmlinux_base(server)]
+                code, _ = self._stream(job, server, argv, timeout=PREPARE_TIMEOUT)
                 if code != 0:
                     job.log("실패 (종료 코드 %d)" % code)
                     failed.append(action)
@@ -1755,9 +1890,9 @@ class Jobs:
         with self.server_slot(server["name"]).hold(job):
             self._run_upgrade(job, server)
 
-    def _win_upload(self, job, server, name):
+    def _win_upload(self, job, server, name, local_path=WIN_SCRIPT):
         job.phase = "분석 스크립트 보내는 중"
-        code, out = scp_upload(server, WIN_SCRIPT, name)
+        code, out = scp_upload(server, local_path, name)
         if code != 0:
             text = out.decode("utf-8", "replace").strip()
             if text:
@@ -1765,13 +1900,32 @@ class Jobs:
             raise ApiError(502, "분석 스크립트를 서버로 보내지 못했습니다 (scp 종료 코드 %d)." % code)
 
     def _install_windows(self, job, server):
-        if job.source != "local":
-            raise ApiError(400, "Windows 서버는 '노트북 버전 설치'만 지원합니다.")
-        local = local_info()
-        label = "webui:%s" % (local["commit"][:7] or "v" + local["version"])
-        job.log("노트북 버전 v%s의 분석 스크립트를 설치합니다: %s" % (local["version"], server["tool"]))
-        argv, upload = win_install_command(server, local["version"], local["commit"], label)
-        self._win_upload(job, server, upload)
+        temp = None
+        if job.source == "github":
+            # 서버에 인터넷이 없어도 되도록 노트북이 GitHub에서 받아 scp로 보냅니다.
+            repo, channel, branch = update_source(self.store.settings())
+            job.phase = "GitHub에서 받는 중"
+            info, data = fetch_win_script(repo, channel, branch)
+            version, commit = info["version"], info["commit"]
+            label = "github:%s@%s" % (repo, info["ref"])
+            ref = info["ref"] if info["ref"] == "v" + version else "%s (v%s)" % (info["ref"], version)
+            job.log("GitHub %s %s의 분석 스크립트를 설치합니다 (커밋 %s): %s" % (repo, ref, commit[:7], server["tool"]))
+            fd, temp = tempfile.mkstemp(prefix="kdump-analyzer-", suffix=".ps1")
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            local_path = temp
+        else:
+            local = local_info()
+            version, commit = local["version"], local["commit"]
+            label = "webui:%s" % (commit[:7] or "v" + version)
+            job.log("노트북 버전 v%s의 분석 스크립트를 설치합니다: %s" % (version, server["tool"]))
+            local_path = WIN_SCRIPT
+        try:
+            argv, upload = win_install_command(server, version, commit, label)
+            self._win_upload(job, server, upload, local_path)
+        finally:
+            if temp:
+                os.remove(temp)
         job.phase = "설치 중"
         code, _ = self._stream(job, server, argv, timeout=300)
         if code != 0:
@@ -1814,6 +1968,36 @@ class Jobs:
         info = server_version(server)
         job.version = info.get("version")
         job.log("설치된 버전: %s" % (info.get("version") or "확인 실패"))
+
+    def run_uninstall(self, job):
+        server = self.store.server(job.server)
+        with self.server_slot(server["name"]).hold(job):
+            self._run_uninstall(job, server)
+
+    def _run_uninstall(self, job, server):
+        mode = job.actions[0] if job.actions else "program"
+        job.phase = "설치 확인 중"
+        before = server_version(server)
+        if not before.get("ok"):
+            raise ApiError(502, "서버에 접속하지 못했습니다: %s" % before.get("error", ""))
+        if not before.get("installed"):
+            raise ApiError(400, "이 서버에는 설치된 분석 도구가 없습니다.")
+        job.log("%s v%s (%s)를 지웁니다: %s" % ("분석 스크립트" if is_windows(server) else "analyze-kdump",
+                                          before.get("version", "?"), before.get("prefix") or server["tool"],
+                                          "설치 폴더 통째로" if mode == "all" else "프로그램 파일만"))
+        job.phase = "삭제 중"
+        if is_windows(server):
+            argv = win_uninstall_command(server, mode)
+        else:
+            argv = ["sh", "-c", REMOTE_UNINSTALL, "sh", server["tool"], mode] + list(PROGRAM_FILES)
+        code, _ = self._stream(job, server, argv, timeout=600)
+        if code != 0:
+            raise ApiError(502, "삭제하지 못했습니다 (종료 코드 %d). 로그를 확인해 주세요." % code)
+        job.phase = "삭제 확인 중"
+        after = server_version(server)
+        if after.get("installed"):
+            raise ApiError(502, "삭제한 뒤에도 설치가 남아 있습니다 (v%s). 로그를 확인해 주세요." % after.get("version", "?"))
+        job.log("삭제를 마쳤습니다. 이 서버는 이제 무설치 실행으로 분석합니다.")
 
     def run_move(self, job):
         server = self.store.server(job.server)
@@ -2095,7 +2279,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                app.jobs.server_slot(server["name"]))
             elif kind == "prepare":
                 actions = body.get("actions")
-                if not isinstance(actions, list) or not actions or any(a not in PREPARE_ACTIONS for a in actions):
+                if not valid_prepare_actions(server, actions):
                     raise ApiError(400, "준비 항목을 골라 주세요.")
                 job = Job(kind, server["name"])
                 job.actions = [a for a in PREPARE_ACTIONS if a in actions]  # 정해진 순서로 실행
@@ -2111,6 +2295,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 job = Job(kind, server["name"])
                 job.source = "local"
                 app.jobs.start(job, app.jobs.run_move, app.jobs.server_slot(server["name"]))
+            elif kind == "uninstall":
+                mode = body.get("mode")
+                if mode not in UNINSTALL_MODES:
+                    raise ApiError(400, "삭제 범위는 program 또는 all이어야 합니다.")
+                job = Job(kind, server["name"])
+                job.actions = [mode]
+                app.jobs.start(job, app.jobs.run_uninstall, app.jobs.server_slot(server["name"]))
             elif kind == "reanalyze":
                 store.result_path(server["name"], body.get("report", ""))
                 job = Job(kind, server["name"], report=body["report"])

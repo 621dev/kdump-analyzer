@@ -4,6 +4,17 @@
 GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리스)으로 받을 수 있습니다.
 1.18.3까지는 프로젝트 이름이 `kdump-tools`였습니다. 아래 기록의 링크는 GitHub이 새 주소로 연결합니다.
 
+## [1.23.0] - 2026-11-09
+
+### 추가
+- 웹 UI에서 서버의 분석 도구 **삭제** (Linux·Windows, 버전·업데이트 화면)
+  - **프로그램만**(명령 등록·자동완성·프로그램 파일과 설치 정보. 설정·서버 목록·로그·vmlinux, Windows는 로그·심볼은 남김) 또는 **전부**(설치 디렉터리 통째로) 중에서 고르고, 서버 이름을 입력해 확인합니다.
+  - 설치 정보나 분석 도구가 있는 디렉터리만 지우고, 시스템 디렉터리(`/usr`, `/etc`, 드라이브 바로 아래 등)는 지우지 않습니다. 설치된 install.sh의 판에 기대지 않고 웹 UI가 보내는 명령으로 지웁니다.
+- Windows 2단계
+  - 서버 준비 탭에서 **덤프 설정**(커널 메모리 덤프, 자동 재시작, 덮어쓰기), **페이지 파일**(시스템 관리 크기), **디버거 설치**를 실행합니다. 디버거는 서버가 Microsoft에서 Windows SDK 설치 관리자를 받아 Microsoft 서명을 확인한 뒤 Debugging Tools for Windows만 설치합니다.
+  - Windows 서버도 **GitHub 릴리스(또는 최신) 설치/업그레이드**. 노트북이 GitHub에서 분석 스크립트를 받아 scp로 보내므로 서버에 인터넷이 없어도 됩니다.
+- 웹 UI API 판 8
+
 ## [1.22.0] - 2026-11-09
 
 ### 추가
@@ -205,7 +216,8 @@ GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리�
 - 설치 스크립트(명령 등록)와 상황별 원격 분석 방식 (#3)
 - 분석 진행 표시와 메뉴의 이전 화면 이동 (#4)
 
-[1.22.0]: https://github.com/621dev/kdump-analyzer/compare/v1.21.0...main
+[1.23.0]: https://github.com/621dev/kdump-analyzer/compare/v1.22.0...main
+[1.22.0]: https://github.com/621dev/kdump-analyzer/compare/v1.21.0...v1.22.0
 [1.21.0]: https://github.com/621dev/kdump-analyzer/compare/v1.20.0...v1.21.0
 [1.20.0]: https://github.com/621dev/kdump-analyzer/compare/v1.19.0...v1.20.0
 [1.19.0]: https://github.com/621dev/kdump-analyzer/compare/v1.18.3...v1.19.0

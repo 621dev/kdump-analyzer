@@ -1,7 +1,7 @@
 "use strict";
 
 // 서버(kdump-webui.py)의 API_LEVEL과 같아야 합니다. 다르면 업데이트 뒤 서버를 다시 시작하지 않은 것입니다.
-const API_LEVEL = 7;
+const API_LEVEL = 8;
 
 // ---------------------------------------------------------------- 상태와 공통
 
@@ -519,7 +519,11 @@ const PREPARE_WARN = {
   crash: "crash 패키지를 설치합니다.",
   swap: "2GB swap 파일(/swapfile-kdump)을 만들고 /etc/fstab에 등록합니다.",
   tool: "노트북의 analyze-kdump를 서버에 설치합니다.",
+  dumpconf: "블루스크린 때 커널 메모리 덤프를 남기도록 설정합니다(이미 덤프 종류가 정해져 있으면 그대로 둡니다). 재부팅해야 적용됩니다.",
+  pagefile: "페이지 파일을 '시스템이 관리하는 크기'로 바꿉니다. 재부팅해야 적용됩니다.",
+  cdb: "서버가 Microsoft에서 Windows SDK 설치 관리자를 받아(인터넷 필요) Microsoft 서명을 확인한 뒤 Debugging Tools for Windows만 설치합니다. 몇 분 걸립니다.",
 };
+const WIN_TOOL_WARN = "노트북의 Windows 분석 스크립트를 서버에 설치합니다.";
 
 async function renderPrepare(server, refresh = false) {
   const body = $("#tab-body");
@@ -537,7 +541,9 @@ async function renderPrepare(server, refresh = false) {
   const running = [...state.jobs.values()].some(j => j.kind === "prepare" && j.server === server.name && isActive(j));
   const wrap = h(`<div>
     <div class="viewer-head">
-      <span class="muted">${esc(r.os)} · ${esc(r.family)} · 커널 ${esc(r.kernel || "?")}${r.root ? "" : ' · <span class="warn-text">root 권한 없음(서버 설정의 sudo를 켜야 설치 가능)</span>'}</span>
+      <span class="muted">${esc(r.os)} · ${esc(r.family)} · ${isWindows(server) ? "버전" : "커널"} ${esc(r.kernel || "?")}${r.root ? "" : (isWindows(server)
+        ? ' · <span class="warn-text">관리자 계정이 아님(관리자 계정으로 접속해야 설치 가능)</span>'
+        : ' · <span class="warn-text">root 권한 없음(서버 설정의 sudo를 켜야 설치 가능)</span>')}</span>
       <button class="btn small" id="pr-refresh">다시 점검</button>
     </div>
     <table class="list prepare"><thead><tr><th style="width:28px"></th><th>항목</th><th>상태</th><th>내용</th></tr></thead><tbody></tbody></table>
@@ -564,7 +570,9 @@ async function renderPrepare(server, refresh = false) {
     const picked = [...wrap.querySelectorAll(".pr-check:checked")].map(c => c.dataset.action);
     bar.innerHTML = "";
     if (!wrap.querySelector(".pr-check")) {
-      bar.append(h('<span class="muted">설치할 항목이 없습니다. kdump로 vmcore를 저장하고 이 서버에서 분석할 준비가 되어 있습니다.</span>'));
+      bar.append(h(isWindows(server)
+        ? '<span class="muted">설치할 항목이 없습니다. 블루스크린 때 메모리 덤프를 남기고 이 서버에서 분석할 준비가 되어 있습니다.</span>'
+        : '<span class="muted">설치할 항목이 없습니다. kdump로 vmcore를 저장하고 이 서버에서 분석할 준비가 되어 있습니다.</span>'));
       return;
     }
     const el = h(`<div class="batch-inner"><b>${picked.length}개 선택</b>
@@ -578,9 +586,11 @@ async function renderPrepare(server, refresh = false) {
 }
 
 async function runPrepare(server, actions) {
-  const lines = actions.map(a => `• ${PREPARE_WARN[a] || a}`).join("\n");
+  const lines = actions.map(a => `• ${(a === "tool" && isWindows(server) ? WIN_TOOL_WARN : PREPARE_WARN[a]) || a}`).join("\n");
   const reboot = actions.includes("crashkernel") || actions.includes("kdump")
-    ? "\n\n설치 뒤 서버를 재부팅해야 kdump가 동작합니다. 운영 서버라면 점검 시간에 진행하세요." : "";
+    ? "\n\n설치 뒤 서버를 재부팅해야 kdump가 동작합니다. 운영 서버라면 점검 시간에 진행하세요."
+    : actions.includes("dumpconf") || actions.includes("pagefile")
+    ? "\n\n설정 뒤 서버를 재부팅해야 적용됩니다. 재부팅은 직접 하셔야 합니다." : "";
   if (!confirm(`${server.name}에서 다음을 실행할까요?\n\n${lines}${reboot}`)) return;
   const job = await startJob({ kind: "prepare", server: server.name, actions });
   if (job) renderPrepare(server);
@@ -956,7 +966,7 @@ function drawServerVersions() {
   for (const s of state.servers) {
     const info = state.serverVersions[s.name];
     const st = serverStatus(info);
-    const running = [...state.jobs.values()].some(j => (j.kind === "upgrade" || j.kind === "move") && j.server === s.name && isActive(j));
+    const running = [...state.jobs.values()].some(j => ["upgrade", "move", "uninstall"].includes(j.kind) && j.server === s.name && isActive(j));
     // 1.19.0까지의 기본 위치(/opt/kdump-tools)에 설치된 서버는 새 기본 위치로 옮길 수 있습니다.
     const movable = info && info.ok && info.installed && info.prefix === LEGACY_PREFIX;
     const installed = info && info.ok && info.installed;
@@ -972,12 +982,21 @@ function drawServerVersions() {
         <button class="btn small" data-act="check">확인</button>
         <button class="btn small ${st.cls === "up" ? "primary" : ""}" data-act="local" ${running || !(info && info.ok) ? "disabled" : ""}
           title="노트북의 v${esc(local.version)}를 SSH로 보내 설치합니다. 서버에 인터넷이 없어도 됩니다.">노트북 버전 ${verb}</button>
-        <button class="btn small" data-act="github" ${running || !(info && info.ok) || isWindows(s) ? "disabled" : ""}
-          title="서버가 GitHub에서 직접 받아 설치합니다(${esc(latestTarget(latest) || "최신")}). 서버에 인터넷이 필요합니다.">GitHub ${latest && latest.ok && latest.channel === "release" ? esc(latest.tag) : "최신"} ${verb}</button>
+        <button class="btn small" data-act="github" ${running || !(info && info.ok) ? "disabled" : ""}
+          title="${isWindows(s)
+            ? `노트북이 GitHub에서 분석 스크립트를 받아(${esc(latestTarget(latest) || "최신")}) 서버로 보냅니다. 서버에 인터넷이 없어도 됩니다.`
+            : `서버가 GitHub에서 직접 받아 설치합니다(${esc(latestTarget(latest) || "최신")}). 서버에 인터넷이 필요합니다.`}">GitHub ${latest && latest.ok && latest.channel === "release" ? esc(latest.tag) : "최신"} ${verb}</button>
         ${movable ? `<button class="btn small" data-act="move" ${running ? "disabled" : ""}
           title="설정·서버 목록·vmlinux·로그를 포함해 ${esc(NEW_PREFIX)}로 옮깁니다. 예전 경로에는 링크를 남깁니다.">새 위치로 옮기기</button>` : ""}
+        ${installed ? `<button class="btn small danger" data-act="uninstall" ${running ? "disabled" : ""}
+          title="서버에서 분석 도구를 지웁니다. 지운 뒤에도 무설치 실행으로 분석할 수 있습니다.">삭제</button>` : ""}
       </div></td></tr>`);
     row.querySelector('[data-act="check"]').addEventListener("click", () => loadServerVersion(s.name));
+    const delBtn = row.querySelector('[data-act="uninstall"]');
+    if (delBtn) delBtn.addEventListener("click", async () => {
+      const mode = await askUninstall(s, info);
+      if (mode) startJob({ kind: "uninstall", server: s.name, mode }).then(() => drawServerVersions());
+    });
     const moveBtn = row.querySelector('[data-act="move"]');
     if (moveBtn) moveBtn.addEventListener("click", () => {
       if (!confirm(`${s.name}의 설치를 새 기본 위치로 옮길까요?\n\n${LEGACY_PREFIX} -> ${NEW_PREFIX}\n\n`
@@ -999,6 +1018,37 @@ function drawServerVersions() {
     table.tBodies[0].append(row);
   }
   holder.append(table);
+}
+
+// 서버의 분석 도구 삭제: 범위(프로그램만 / 전부)를 고르고 서버 이름을 입력해 확인합니다. 고른 범위나 null.
+function askUninstall(s, info) {
+  const win = isWindows(s);
+  const keep = win ? "로그(리포트)·심볼 캐시" : "설정·서버 목록·API 키·로그·vmlinux";
+  return new Promise(resolve => {
+    const overlay = h(`<div class="overlay"><div class="overlay-box" style="max-width:520px">
+      <b>${esc(s.name)}에서 분석 도구 삭제</b>
+      <div class="muted" style="font-size:13px">v${esc(info.version || "?")} · ${esc(info.prefix || s.tool)}</div>
+      <label class="check radio-choice" style="margin-top:6px"><input type="radio" name="un-mode" value="program" checked>
+        <span><b>프로그램만</b><br><span class="muted">${win ? "분석 스크립트(bin)와 설치 정보" : "명령 등록·자동완성과 프로그램 파일"}을 지웁니다. ${esc(keep)}는 남깁니다.</span></span></label>
+      <label class="check radio-choice"><input type="radio" name="un-mode" value="all">
+        <span><b>전부</b><br><span class="muted">설치 폴더를 통째로 지웁니다. ${esc(keep)}도 함께 지워지고 되돌릴 수 없습니다.</span></span></label>
+      <div class="muted" style="font-size:13px">지운 뒤에도 이 서버는 무설치 실행으로 분석할 수 있습니다. 노트북의 분석 결과는 지워지지 않습니다.</div>
+      <label><span>확인을 위해 서버 이름 <b>${esc(s.name)}</b>을(를) 입력하세요</span>
+        <input type="text" id="un-confirm" autocomplete="off"></label>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
+        <button class="btn small" id="un-cancel">취소</button>
+        <button class="btn small danger" id="un-ok" disabled>삭제</button></div>
+    </div></div>`);
+    const done = mode => { overlay.remove(); resolve(mode); };
+    const input = overlay.querySelector("#un-confirm");
+    const ok = overlay.querySelector("#un-ok");
+    input.addEventListener("input", () => { ok.disabled = input.value.trim() !== s.name; });
+    overlay.querySelector("#un-cancel").addEventListener("click", () => done(null));
+    overlay.addEventListener("click", e => { if (e.target === overlay) done(null); });
+    ok.addEventListener("click", () => done(overlay.querySelector('input[name="un-mode"]:checked').value));
+    document.body.append(overlay);
+    input.focus();
+  });
 }
 
 async function selfUpdate(btn) {
@@ -1358,6 +1408,14 @@ function onJobFinished(job) {
     loadState().then(() => loadServerVersion(job.server)).catch(() => loadServerVersion(job.server));
     return;
   }
+  if (job.kind === "uninstall") {
+    toast(job.status === "done" ? `${job.server}: 분석 도구를 지웠습니다.` : `${job.server}: 삭제하지 못했습니다.`);
+    delete state.health[job.server];
+    delete state.prepare[job.server];
+    if (job.status === "done") scheduleJobClose(job.id);
+    loadServerVersion(job.server);
+    return;
+  }
   if (job.kind === "upgrade") {
     toast(job.status === "done" ? `${job.server}: v${job.version || "?"} 설치를 마쳤습니다.` : `${job.server}: 설치에 실패했습니다.`);
     delete state.health[job.server];
@@ -1413,6 +1471,8 @@ function renderJobs() {
       ? `analyze-kdump 설치 (${job.source === "github" ? "GitHub" : "노트북 버전"})`
       : job.kind === "move"
       ? `설치 위치 옮기기 (${NEW_PREFIX})`
+      : job.kind === "uninstall"
+      ? `분석 도구 삭제 (${(job.actions || [])[0] === "all" ? "전부" : "프로그램만"})`
       : { report: "리포트 생성", llm: "리포트 + LLM 분석", reanalyze: "LLM 분석" }[job.kind];
     let pct = null;
     if (job.status === "running" && job.progress && job.progress.total) {
