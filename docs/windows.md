@@ -19,6 +19,13 @@ C:\ProgramData\kdump-analyzer\bin\analyze-windump.ps1 -Dump C:\Windows\MEMORY.DM
 
 - `cdb`로 `!analyze -v`, `.bugcheck`, `vertarget`, `!thread`, `kv`, `!running -it`, `lm t n`, `!vm`, `!locks`, `!process 0 0`을 실행해 명령별 섹션으로 나눈 리포트(`kdump-report-*.txt`)와 JSON 요약을 `C:\ProgramData\kdump-analyzer\logs`에 만듭니다.
 - 버그체크 코드로 장애 유형을 판정하고, `!analyze -v`가 지목한 원인 후보 드라이버(`IMAGE_NAME`)를 근거로 남깁니다. NMI·수동 덤프는 일부러 낸 것이라 지목된 드라이버(예: `GenuineIntel.sys`)를 원인 후보가 아닌 '처리 드라이버'로만 표시합니다.
+- 실제 덤프로 확인한 결과 (Windows Server 2025 평가판 VM)
+
+  | 덤프 | 판정 | 근거 줄 | LLM 분석 (Codex) |
+  |---|---|---|---|
+  | NMI 주입 (`Debug-VM -InjectNonMaskableInterrupt`) | NMI `[nmi]` | `NMI_HARDWARE_FAILURE 0x80, 처리 드라이버: GenuineIntel.sys (NMI·수동 덤프라 원인이 아님)` | 외부 NMI로 판정, `GenuineIntel.sys`는 원인이 아니라고 설명 |
+  | 드라이버 오류 (Sysinternals NotMyFault `crash 0x01`) | 커널 예외 `[oops]` | `DRIVER_IRQL_NOT_LESS_OR_EQUAL 0xd1, 원인 후보: myfault.sys (myfault!nmf_fault_irql+35)` | `myfault.sys`가 IRQL 2에서 페이지 가능 메모리를 읽은 것으로 판정 |
+
 - 분석 시간(Windows Server 2025 VM, 커널 메모리 덤프 510MB 기준): 처음에는 심볼을 받느라 2분 남짓, 그다음부터 약 1.5분(대부분 `!process 0 0`)입니다. 미니덤프는 약 20초입니다.
 
 | 유형 | 버그체크 코드 |
@@ -35,7 +42,7 @@ C:\ProgramData\kdump-analyzer\bin\analyze-windump.ps1 -Dump C:\Windows\MEMORY.DM
 - 종료 코드: 0 정상, 1 사용법·환경 오류(덤프나 cdb 없음), 2 cdb 실패·시간 초과·버그체크를 읽지 못함(리포트는 남김).
 
 **웹 UI에서**
-- 덤프 목록은 서버 설정의 덤프 디렉터리(기본 `C:\Windows`)의 `*.dmp`와 `Minidump\*.dmp`입니다.
+- 덤프 목록은 서버 설정의 덤프 디렉터리(기본 `C:\Windows`)의 `*.dmp`와 `Minidump\*.dmp`입니다. 블루스크린 뒤 재부팅 직후에는 Windows가 미니덤프를 0바이트로 만들어 두고 채우므로, 빈 파일은 목록과 분석 대상에서 뺍니다.
 - 분석 방식은 Linux와 같습니다: 원격 설치본 실행(`C:\ProgramData\kdump-analyzer\bin\analyze-windump.ps1`), 무설치 실행(스크립트를 보내 임시로 실행하고 지움), 자동 선택.
 - 버전·업데이트 화면에서 분석 스크립트를 설치·업그레이드·삭제합니다.
   - **노트북 버전:** 노트북의 `winbin/analyze-windump.ps1`을 보냅니다.

@@ -294,6 +294,22 @@ class WindowsServerTest(unittest.TestCase):
         self.assertEqual([i["path"] for i in items], ["C:\\Windows\\MEMORY.DMP", "C:\\Windows\\Minidump\\110625-1-01.dmp"])
         self.assertIn("'C:\\Windows'", self.sent[0])
 
+    @unittest.skipUnless(os.name == "nt" and shutil.which("powershell"), "Windows PowerShell이 필요합니다")
+    def test_list_vmcores_skips_empty_dumps_locally(self):
+        # 재부팅 직후 Windows가 0바이트로 만들어 두는 미니덤프는 목록에 넣지 않습니다(실제 VM에서 확인).
+        def run(server, argv, timeout=60):
+            r = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
+            return r.returncode, r.stdout.decode("utf-8", "replace")
+        webui.ssh_text = run
+        with tempfile.TemporaryDirectory() as d:
+            d = os.path.realpath(d)
+            os.makedirs(os.path.join(d, "Minidump"))
+            with open(os.path.join(d, "MEMORY.DMP"), "wb") as f:
+                f.write(b"x" * 10)
+            open(os.path.join(d, "Minidump", "110826-3000-01.dmp"), "wb").close()
+            items = webui.list_vmcores(dict(self.SERVER, crash_dir=d))
+        self.assertEqual([i["path"] for i in items], [os.path.join(d, "MEMORY.DMP")])
+
     def test_fetch_remote_file_decodes_base64(self):
         import base64
         payload = "리포트\n".encode("utf-8")
@@ -340,8 +356,9 @@ class WindowsServerTest(unittest.TestCase):
         webui.ssh_text = lambda server, argv, timeout=60: run(argv)
         with tempfile.TemporaryDirectory() as d:
             os.makedirs(os.path.join(d, "Minidump"))
-            open(os.path.join(d, "Minidump", "1.dmp"), "wb").close()
-            open(os.path.join(d, "MEMORY.DMP"), "wb").close()
+            for rel in ("Minidump/1.dmp", "MEMORY.DMP"):
+                with open(os.path.join(d, rel), "wb") as f:
+                    f.write(b"PAGEDU64")  # 빈 파일은 목록에서 빠집니다
             server = dict(self.SERVER, crash_dir=d, tool=os.path.join(d, "bin", "analyze-windump.ps1"))
             self.assertEqual(sorted(os.path.basename(i["path"]) for i in webui.list_vmcores(server)), ["1.dmp", "MEMORY.DMP"])
             info = webui.win_test_server(server)
@@ -370,7 +387,8 @@ class WindowsServerTest(unittest.TestCase):
             dumps = os.path.join(d, "Windows")
             os.makedirs(os.path.join(dumps, "Minidump"))
             dump = os.path.join(dumps, "MEMORY.DMP")
-            open(dump, "wb").close()
+            with open(dump, "wb") as f:
+                f.write(b"PAGEDU64")  # 빈 파일은 분석 대상에서 빠집니다
             server = dict(self.SERVER, crash_dir=dumps, tool=os.path.join(d, "ka", "bin", "analyze-windump.ps1"))
             env = dict(os.environ, KDUMP_CDB=fake_cdb, FAKE_CDB_CASE="d1", REPORT_DIR=os.path.join(d, "upload-logs"))
 

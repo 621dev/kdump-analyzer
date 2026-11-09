@@ -69,7 +69,8 @@ function Get-DumpCandidates([string]$path) {
     } else {
         $items += Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
     }
-    return @($items | Where-Object { $_ } | Sort-Object LastWriteTime -Descending)
+    # 블루스크린 뒤 재부팅 직후에는 Windows가 미니덤프를 0바이트로 만들어 두고 채웁니다. 빈 파일은 고르지 않습니다.
+    return @($items | Where-Object { $_ -and $_.Length -gt 0 } | Sort-Object LastWriteTime -Descending)
 }
 
 # ---------------------------------------------------------------- cdb 찾기
@@ -363,7 +364,10 @@ if ($Version) {
 
 $dumps = Get-DumpCandidates $Dump
 if (-not $dumps -or $dumps.Count -eq 0) {
-    if ($Dump) { Write-Output "덤프 파일을 찾을 수 없습니다: $Dump" }
+    if ($Dump -and (Test-Path -LiteralPath $Dump -PathType Leaf)) {
+        Write-Output "덤프 파일이 비어 있습니다: $Dump (재부팅 직후라면 Windows가 아직 쓰는 중일 수 있으니 잠시 뒤 다시 실행하세요)"
+    }
+    elseif ($Dump) { Write-Output "덤프 파일을 찾을 수 없습니다: $Dump" }
     else { Write-Output "덤프 파일을 찾을 수 없습니다 (C:\Windows\MEMORY.DMP, C:\Windows\Minidump\*.dmp)." }
     exit 1
 }
