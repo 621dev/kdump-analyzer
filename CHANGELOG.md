@@ -4,12 +4,13 @@
 GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리스)으로 받을 수 있습니다.
 1.18.3까지는 프로젝트 이름이 `kdump-tools`였습니다. 아래 기록의 링크는 GitHub이 새 주소로 연결합니다.
 
-## [Unreleased]
+## [1.23.1] - 2026-11-09
 
 ### 고침
 - Windows: 블루스크린 뒤 재부팅 직후 Windows가 0바이트로 만들어 두는 미니덤프를 덤프 목록과 분석 대상에서 뺍니다. 빈 덤프를 직접 지정하면 "아직 쓰는 중일 수 있다"고 안내합니다(실제 VM에서 발견).
 
 ### 문서
+- README에 지원 환경을 정리했습니다: 역할별(Linux RHEL 계열, Debian 계열, Windows 서버, 웹 UI 실행 PC) 지원 대상과 실제 VM에서 검증한 버전
 - Windows 가이드에 실제 덤프 검증 결과를 추가했습니다: NMI 주입과 드라이버 오류(NotMyFault 0xD1) 덤프의 판정, 근거, LLM 분석
 - README를 요약(소개, 5분 시작, 주요 기능, 문서 목록)으로 줄이고, 자세한 안내는 `docs/`의 가이드 문서로 나눴습니다: 설치와 업데이트, 사용법, 설정 파일과 LLM, 웹 UI, Windows 서버, 터미널 메뉴, 개발과 검증
 - 서버 설치(`install.sh`, 웹 UI의 노트북 버전 설치)에 `docs/`도 함께 복사해 폐쇄망 서버에서도 가이드를 볼 수 있게 했습니다. 웹 UI의 "프로그램만" 삭제는 `docs/`와 `tests/`도 지웁니다.
@@ -226,7 +227,7 @@ GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리�
 - 설치 스크립트(명령 등록)와 상황별 원격 분석 방식 (#3)
 - 분석 진행 표시와 메뉴의 이전 화면 이동 (#4)
 
-[Unreleased]: https://github.com/621dev/kdump-analyzer/compare/v1.23.0...main
+[1.23.1]: https://github.com/621dev/kdump-analyzer/compare/v1.23.0...main
 [1.23.0]: https://github.com/621dev/kdump-analyzer/compare/v1.22.0...v1.23.0
 [1.22.0]: https://github.com/621dev/kdump-analyzer/compare/v1.21.0...v1.22.0
 [1.21.0]: https://github.com/621dev/kdump-analyzer/compare/v1.20.0...v1.21.0

@@ -35,7 +35,7 @@ $ErrorActionPreference = "Stop"
 # 출력은 UTF-8로 내보냅니다(원격에서 SSH로 읽을 때 한글이 깨지지 않게).
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 
-$ScriptVersion = "1.23.0"
+$ScriptVersion = "1.23.1"
 $Marker = "=====KDA====="
 
 # ---------------------------------------------------------------- 기본 위치
