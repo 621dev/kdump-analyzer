@@ -437,16 +437,16 @@ async function renderVmcores(server, refresh = false) {
           : '<button class="tag linkish-tag" data-open="report" title="최근 리포트 열기">리포트만</button>';
       const row = h(`<tr class="${selected.has(v.path) ? "selected" : ""}">
         <td><input type="checkbox" class="vm-check" ${selected.has(v.path) ? "checked" : ""}></td>
-        <td style="white-space:nowrap">${fmtTime(v.mtime)}</td>
-        <td>${fmtSize(v.size)}</td>
+        <td class="vm-time">${fmtTime(v.mtime).split(" ").map(s => `<span class="nowrap">${esc(s)}</span>`).join(" ")}</td>
+        <td style="white-space:nowrap">${fmtSize(v.size)}</td>
         <td class="path vm-path" title="${esc(v.path)}">${esc(v.path.startsWith(server.crash_dir.replace(/\/+$/, "") + "/") ? v.path.slice(server.crash_dir.replace(/\/+$/, "").length + 1) : v.path)}</td>
         <td style="white-space:nowrap">${badge}</td>
-        <td style="white-space:nowrap;text-align:right">
+        <td class="vm-actions"><div class="row-actions">
           <button class="btn small" data-kind="report" title="crash 리포트만 만듭니다">리포트</button>
           <button class="btn small primary" data-kind="llm" title="crash 리포트를 만든 뒤 LLM으로 분석합니다">+ LLM</button>
           <button class="btn small ghost" data-act="download" title="덤프를 노트북의 데이터 폴더(dumps/${esc(server.name)}/)로 받습니다">받기</button>
           <button class="btn small ghost danger" data-act="delete" title="서버에서 덤프를 지웁니다(되돌릴 수 없음)">삭제</button>
-        </td></tr>`);
+        </div></td></tr>`);
       row.querySelector('[data-act="download"]').addEventListener("click", () => {
         if (!confirm(`${v.path} (${fmtSize(v.size)})를 노트북으로 받을까요?
 
@@ -467,7 +467,10 @@ async function renderVmcores(server, refresh = false) {
         openFile(server.name, open.dataset.open === "analysis" ? rec.latestAnalysis : rec.latestReport));
       table.tBodies[0].append(row);
     }
-    wrap.append(table);
+    // 아주 좁은 화면에서는 페이지 대신 표만 옆으로 스크롤합니다.
+    const scroller = h('<div class="table-scroll"></div>');
+    scroller.append(table);
+    wrap.append(scroller);
   }
   const body2 = $("#tab-body");
   body2.innerHTML = "";
