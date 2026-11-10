@@ -293,7 +293,7 @@ class SecretTest(unittest.TestCase):
 
 
 class DumpManagementTest(unittest.TestCase):
-    """덤프 보관 관리: 경로 확인, 삭제(덤프 디렉터리 안만), 노트북으로 받기."""
+    """덤프 보관 관리: 경로 확인, 삭제(덤프 디렉터리 안만), 웹 UI로 받기."""
     LINUX = dict(webui.DEFAULT_SERVER, name="db01", target="u@h", crash_dir="/var/crash")
     WIN = dict(webui.DEFAULT_SERVER, name="win01", target="Administrator@h", os="windows", sudo=False,
                tool=webui.WIN_TOOL, crash_dir="C:\\Windows")
@@ -786,7 +786,7 @@ class WindowsServerTest(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt" and shutil.which("powershell"), "Windows PowerShell이 필요합니다")
     def test_install_and_report_end_to_end_locally(self):
-        # SSH 대신 이 PC에서 그대로 실행: 노트북 버전 설치 -> 설치본 실행, 무설치 실행 -> 리포트 가져오기
+        # SSH 대신 이 PC에서 그대로 실행: 웹 UI 버전 설치 -> 설치본 실행, 무설치 실행 -> 리포트 가져오기
         fake_cdb = os.path.join(ROOT, "tests", "windows", "fake-cdb.ps1")
 
         def run(argv, stdin=None, env=None):

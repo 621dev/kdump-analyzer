@@ -75,9 +75,9 @@ Restart-Computer
 (Get-NetIPAddress -AddressFamily IPv4 | Where-Object InterfaceAlias -notlike "*Loopback*").IPAddress
 ```
 
-IP 주소와 계정 이름(Administrator)을 알려 주시면, 노트북에서 SSH 접속부터 확인합니다.
+IP 주소와 계정 이름(Administrator)을 알려 주시면, 웹 UI를 실행하는 컴퓨터에서 SSH 접속부터 확인합니다.
 
-Hyper-V 기본 스위치(Default Switch)는 VM을 다시 켜거나 노트북을 재부팅하면 IP를 새로 줍니다. 웹 UI의 접속 대상은 IP 대신 `Administrator@<컴퓨터 이름>.mshome.net`(예: `Administrator@WIN-AIEOPDLV85N.mshome.net`)으로 넣으면 IP가 바뀌어도 그대로 접속됩니다. 컴퓨터 이름은 VM에서 `hostname`으로 확인합니다.
+Hyper-V 기본 스위치(Default Switch)는 VM을 다시 켜거나 Hyper-V 호스트를 재부팅하면 IP를 새로 줍니다. 웹 UI의 접속 대상은 IP 대신 `Administrator@<컴퓨터 이름>.mshome.net`(예: `Administrator@WIN-AIEOPDLV85N.mshome.net`)으로 넣으면 IP가 바뀌어도 그대로 접속됩니다. 컴퓨터 이름은 VM에서 `hostname`으로 확인합니다.
 
 ## 6. 블루스크린 내기 (분석 시험 때, 호스트 관리자 PowerShell)
 

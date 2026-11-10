@@ -66,7 +66,7 @@ sudo analyze-kdump -r /var/crash
   - `analyze-kdump.conf` 안의 예전 경로를 새 위치로 고치고, 원래 내용은 `analyze-kdump.conf.before-move`로 남깁니다. `servers.conf`의 경로는 다른 서버의 경로라 고치지 않습니다.
   - 예전 경로(`/opt/kdump-tools`)에는 새 위치를 가리키는 링크를 남겨, 다른 곳에 저장된 예전 경로(웹 UI의 서버 설정, 스크립트 등)도 계속 동작하게 합니다. 링크가 필요 없으면 `--no-link`를 붙입니다.
   - 명령(`/usr/sbin`), 자동완성, 설치 정보를 새 위치로 다시 등록합니다.
-  - 웹 UI에서 옮기면 먼저 노트북 버전으로 업그레이드하고(옮기기 기능이 필요), 끝나면 그 서버 설정의 원격 analyze-kdump 경로도 새 위치로 바꿉니다.
+  - 웹 UI에서 옮기면 먼저 웹 UI 버전으로 업그레이드하고(옮기기 기능이 필요), 끝나면 그 서버 설정의 원격 analyze-kdump 경로도 새 위치로 바꿉니다.
 - **설치 정보:** 설치한 버전, 커밋, 시각, 원본, 등록 위치를 `/opt/kdump-analyzer/.install-info`에 기록하고, `install.sh` 자신도 `/opt/kdump-analyzer`에 복사합니다. 저장소 폴더를 지워도 업데이트와 해제를 할 수 있습니다.
 
 등록을 해제하려면 다음을 실행합니다. 등록한 명령과 자동완성만 지우고, `/opt/kdump-analyzer`(설정, 서버 목록, 로그, vmlinux)는 남깁니다.
@@ -135,7 +135,7 @@ cd kdump-analyzer && git checkout main && git pull && sudo ./install.sh
 │   └── analyze-kdump-ui
 ├── winbin/
 │   └── analyze-windump.ps1    # Windows 서버용 분석 스크립트 (웹 UI가 Windows 서버에 보냄)
-├── webui/                     # 노트북에서 실행하는 웹 UI (서버에는 필요 없음)
+├── webui/                     # 웹 UI (분석할 서버에는 필요 없음)
 │   ├── kdump-webui.py
 │   ├── kdump_llm.py           # LLM 분석 (Python, Windows에서도 동작)
 │   └── static/
