@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """kdump-analyzer 웹 UI
 
-노트북(Windows·macOS·Linux)에서 실행하는 로컬 웹 앱입니다. 브라우저로 조작하고,
+PC(Windows·macOS·Linux)나 서버에서 실행하는 로컬 웹 앱입니다. 브라우저로 조작하고,
 분석할 서버에는 SSH로 접속해 analyze-kdump로 crash 리포트를 만든 뒤, 리포트를 가져와
 LLM 분석은 이 컴퓨터에서 합니다(API 키·구독 로그인은 이 컴퓨터에만 있으면 됨).
 
@@ -603,7 +603,7 @@ def ssh_extra_options():
 
 def valid_ssh_target(target):
     """ssh 접속 대상: 비어 있거나 공백이 있거나 '-'로 시작하면 안 됩니다.
-    '-'로 시작하면 ssh가 옵션(-oProxyCommand=... 등)으로 읽어 노트북에서 명령이 실행될 수 있습니다."""
+    '-'로 시작하면 ssh가 옵션(-oProxyCommand=... 등)으로 읽어 웹 UI를 실행한 컴퓨터에서 명령이 실행될 수 있습니다."""
     return bool(target) and not target.startswith("-") and not re.search(r"\s", target)
 
 
@@ -858,7 +858,7 @@ def list_vmcores(server):
 
 
 # ---------------------------------------------------------------- 덤프 보관 관리
-# 덤프 디렉터리의 남은 공간, 덤프 삭제, 덤프를 노트북으로 받기.
+# 덤프 디렉터리의 남은 공간, 덤프 삭제, 덤프를 웹 UI로 받기.
 # 삭제와 받기는 덤프 디렉터리 안의 파일만 다룹니다. 화면에서 고른 경로라도 서버에서 실제 경로(심볼릭 링크 해석)로
 # 다시 확인합니다.
 
@@ -887,7 +887,7 @@ else
 fi
 """
 
-# $1 덤프 디렉터리, $2 덤프 파일 -> 파일 내용(표준 출력). 노트북으로 받을 때 씁니다(sudo로 읽기 위해 scp 대신).
+# $1 덤프 디렉터리, $2 덤프 파일 -> 파일 내용(표준 출력). 웹 UI로 받을 때 씁니다(sudo로 읽기 위해 scp 대신).
 REMOTE_DUMP_CAT = r"""
 d=$(readlink -f "$1" 2>/dev/null); f=$(readlink -f "$2" 2>/dev/null)
 if [ -z "$d" ] || [ "$d" = / ] || [ -z "$f" ] || [ ! -f "$f" ]; then echo "덤프가 없습니다: $2" >&2; exit 3; fi
@@ -939,7 +939,7 @@ def delete_dump(server, path):
 
 
 def local_dump_name(server, path):
-    """노트북에 저장할 파일 이름: <서버>/<상위 디렉터리>-<파일> (예: db01/10.0.0.11-2026-11-09-vmcore)."""
+    """웹 UI 데이터 폴더에 저장할 파일 이름: <서버>/<상위 디렉터리>-<파일> (예: db01/10.0.0.11-2026-11-09-vmcore)."""
     parts = [p for p in re.split(r"[\\/]", path) if p]
     name = "-".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
     return re.sub(r"[^A-Za-z0-9._-]", "_", name)
@@ -978,7 +978,7 @@ def git(*args, timeout=30):
 
 
 def local_info():
-    """노트북에서 실행 중인 kdump-analyzer(웹 UI와 무설치 실행에 쓰는 스크립트)의 버전."""
+    """웹 UI로 실행 중인 kdump-analyzer(웹 UI와 무설치 실행에 쓰는 스크립트)의 버전."""
     info = {"version": version_text(), "commit": "", "branch": "", "git": False, "dirty": False}
     code, out = git("rev-parse", "HEAD")
     if code == 0 and re.fullmatch(r"[0-9a-f]{40}", out):
@@ -1055,7 +1055,7 @@ def fetch_latest(repo, channel, branch, base=""):
 
 
 def self_update(settings):
-    """노트북의 저장소를 갱신합니다. 릴리스 채널은 최신 릴리스 태그로, 브랜치 채널은 git pull로 fast-forward합니다."""
+    """웹 UI의 저장소를 갱신합니다. 릴리스 채널은 최신 릴리스 태그로, 브랜치 채널은 git pull로 fast-forward합니다."""
     repo, channel, branch = update_source(settings)
     info = local_info()
     if not info["git"]:
@@ -1285,7 +1285,7 @@ LINUX_PREPARE_ACTIONS = ("kdump", "crashkernel", "crash", "debuginfo", "swap", "
 WIN_PREPARE_ACTIONS = ("dumpconf", "pagefile", "cdb", "tool")
 PREPARE_LABELS = {"kdump": "kdump 서비스 설치·활성화", "crashkernel": "crashkernel 메모리 예약 설정",
                   "crash": "crash 설치", "debuginfo": "디버그 커널(vmlinux) 설치",
-                  "swap": "swap 2GB 추가", "tool": "analyze-kdump 설치 (노트북 버전)",
+                  "swap": "swap 2GB 추가", "tool": "analyze-kdump 설치 (웹 UI 버전)",
                   "dumpconf": "덤프 설정 (커널 메모리 덤프)", "pagefile": "페이지 파일 (시스템 관리 크기)",
                   "cdb": "디버거 설치 (Debugging Tools for Windows)"}
 
@@ -1670,7 +1670,7 @@ tmp=$(mktemp -d /tmp/kdump-tools-update.XXXXXX) || exit 5
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/src"
 if [ "$mode" = local ]; then
-  echo "[1/2] 노트북에서 보낸 파일 푸는 중"
+  echo "[1/2] 웹 UI가 보낸 파일 푸는 중"
   command -v base64 >/dev/null 2>&1 || { echo "서버에 base64(coreutils)가 없습니다."; exit 6; }
   sh -s -- "$tmp/src" || { echo "파일을 풀지 못했습니다."; exit 6; }
 else
@@ -1681,7 +1681,7 @@ else
   elif command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
     curl -fsSL "https://codeload.github.com/$repo/tar.gz/refs/$kind/$branch" | tar xz -C "$tmp/src" --strip-components=1 || exit 7
   else
-    echo "서버에 git이 없고 curl·tar도 없어 GitHub에서 받을 수 없습니다. '노트북 버전 설치'를 사용해 주세요."; exit 7
+    echo "서버에 git이 없고 curl·tar도 없어 GitHub에서 받을 수 없습니다. '웹 UI 버전 설치'를 사용해 주세요."; exit 7
   fi
 fi
 [ -f "$tmp/src/install.sh" ] || { echo "install.sh가 없습니다."; exit 8; }
@@ -1701,7 +1701,7 @@ exit $status
 """, 1)
 
 
-# 원격 설치를 새 기본 위치로 옮깁니다. 먼저 노트북 버전으로 업그레이드해 install.sh --move-to가 있게 한 뒤 실행합니다.
+# 원격 설치를 새 기본 위치로 옮깁니다. 먼저 웹 UI 버전으로 업그레이드해 install.sh --move-to가 있게 한 뒤 실행합니다.
 # $1 도구 경로, $2 옮길 위치
 MOVE_TARGET = "/opt/kdump-analyzer"
 LEGACY_PREFIX = "/opt/kdump-tools"
@@ -1858,7 +1858,7 @@ class Job:
         self.actions = []           # prepare: 실행할 준비 동작
         self.step_label = ""        # prepare: 지금 실행 중인 동작 이름
         self.version = None         # upgrade: 설치 후 서버 버전
-        self.saved = None           # download: 노트북에 저장한 파일 경로
+        self.saved = None           # download: 웹 UI 데이터 폴더에 저장한 파일 경로
         self.auto = False           # 새 덤프 자동 분석이 시작한 작업
         self.started = time.time()
         self.finished = None
@@ -2216,7 +2216,7 @@ class Jobs:
     def _install_windows(self, job, server):
         temp = None
         if job.source == "github":
-            # 서버에 인터넷이 없어도 되도록 노트북이 GitHub에서 받아 scp로 보냅니다.
+            # 서버에 인터넷이 없어도 되도록 웹 UI가 GitHub에서 받아 scp로 보냅니다.
             repo, channel, branch = update_source(self.store.settings())
             job.phase = "GitHub에서 받는 중"
             info, data = fetch_win_script(repo, channel, branch)
@@ -2232,7 +2232,7 @@ class Jobs:
             local = local_info()
             version, commit = local["version"], local["commit"]
             label = "webui:%s" % (commit[:7] or "v" + version)
-            job.log("노트북 버전 v%s의 분석 스크립트를 설치합니다: %s" % (version, server["tool"]))
+            job.log("웹 UI 버전 v%s의 분석 스크립트를 설치합니다: %s" % (version, server["tool"]))
             local_path = WIN_SCRIPT
         try:
             argv, upload = win_install_command(server, version, commit, label)
@@ -2262,7 +2262,7 @@ class Jobs:
             label = "webui:%s" % (commit[:7] or "v" + local["version"])
             job.phase = "설치 파일 만드는 중 (v%s)" % local["version"]
             stdin = build_bundle()
-            job.log("노트북 버전 v%s%s 를 보냅니다 (%d KB)" % (
+            job.log("웹 UI 버전 v%s%s 를 보냅니다 (%d KB)" % (
                 local["version"], " (%s)" % commit[:7] if commit else "", max(1, len(stdin) // 1024)))
         else:
             if channel == "release":
@@ -2319,7 +2319,7 @@ class Jobs:
             self._run_download(job, server)
 
     def _run_download(self, job, server):
-        """덤프를 노트북의 데이터 폴더(dumps/<서버>/)로 받습니다. Linux는 sudo로 읽어 SSH로, Windows는 scp로 받습니다."""
+        """덤프를 웹 UI 데이터 폴더(dumps/<서버>/)로 받습니다. Linux는 sudo로 읽어 SSH로, Windows는 scp로 받습니다."""
         if not dump_in_dir(server, job.vmcore or ""):
             raise ApiError(400, "덤프 디렉터리(%s) 안의 덤프만 받을 수 있습니다." % server["crash_dir"])
         job.phase = "덤프 크기 확인 중"
@@ -2331,7 +2331,7 @@ class Jobs:
         os.makedirs(folder, exist_ok=True)
         free = shutil.disk_usage(folder).free
         if free < size + 1024 ** 3:
-            raise ApiError(507, "노트북의 남은 공간이 모자랍니다: 필요 %s, 남은 공간 %s (여유 1GB 포함)"
+            raise ApiError(507, "웹 UI를 실행하는 컴퓨터의 남은 공간이 모자랍니다: 필요 %s, 남은 공간 %s (여유 1GB 포함)"
                            % (human_size(size + 1024 ** 3), human_size(free)))
         base = local_dump_name(server, job.vmcore)
         dest, n = os.path.join(folder, base), 2
@@ -2397,8 +2397,8 @@ class Jobs:
             raise ApiError(400, "예전 기본 위치(%s)에 설치된 서버만 옮길 수 있습니다. 지금 위치: %s" % (LEGACY_PREFIX, prefix or "알 수 없음"))
         job.log("지금 위치: %s (v%s) -> 옮길 위치: %s" % (prefix, before.get("version", "?"), MOVE_TARGET))
 
-        # 1) 옮기기 기능이 있는 install.sh가 필요하므로 노트북 버전으로 먼저 업그레이드합니다.
-        job.log("===== 1/2 노트북 버전으로 업그레이드 =====")
+        # 1) 옮기기 기능이 있는 install.sh가 필요하므로 웹 UI 버전으로 먼저 업그레이드합니다.
+        job.log("===== 1/2 웹 UI 버전으로 업그레이드 =====")
         job.source = "local"
         self._run_upgrade(job, server)
 

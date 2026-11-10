@@ -45,14 +45,14 @@ C:\ProgramData\kdump-analyzer\bin\analyze-windump.ps1 -Dump C:\Windows\MEMORY.DM
 - 덤프 목록은 서버 설정의 덤프 디렉터리(기본 `C:\Windows`)의 `*.dmp`와 `Minidump\*.dmp`입니다. 블루스크린 뒤 재부팅 직후에는 Windows가 미니덤프를 0바이트로 만들어 두고 채우므로, 빈 파일은 목록과 분석 대상에서 뺍니다.
 - 분석 방식은 Linux와 같습니다: 원격 설치본 실행(`C:\ProgramData\kdump-analyzer\bin\analyze-windump.ps1`), 무설치 실행(스크립트를 보내 임시로 실행하고 지움), 자동 선택.
 - 버전·업데이트 화면에서 분석 스크립트를 설치·업그레이드·삭제합니다.
-  - **노트북 버전:** 노트북의 `winbin/analyze-windump.ps1`을 보냅니다.
-  - **GitHub 릴리스(또는 최신):** 노트북이 GitHub에서 업데이트 기준에 맞는 버전의 분석 스크립트를 받아 서버로 보냅니다. Linux와 달리 서버에 인터넷이 없어도 됩니다. 1.22.0 전 릴리스에는 Windows 스크립트가 없어 설치하지 않습니다.
+  - **웹 UI 버전:** 웹 UI 저장소의 `winbin/analyze-windump.ps1`을 보냅니다.
+  - **GitHub 릴리스(또는 최신):** 웹 UI가 GitHub에서 업데이트 기준에 맞는 버전의 분석 스크립트를 받아 서버로 보냅니다. Linux와 달리 서버에 인터넷이 없어도 됩니다. 1.22.0 전 릴리스에는 Windows 스크립트가 없어 설치하지 않습니다.
   - **삭제:** **프로그램만**은 `bin`과 설치 정보를 지우고 로그(리포트)와 심볼 캐시는 남깁니다. **전부**는 `C:\ProgramData\kdump-analyzer`를 통째로 지웁니다.
 - 서버 준비 탭은 점검(덤프 설정, 페이지 파일, cdb, 저장 공간, 관리자 권한)과 설치를 합니다. 빠진 항목을 골라 실행합니다.
   - **덤프 설정:** 덤프를 만들지 않게 돼 있으면 커널 메모리 덤프(`CrashDumpEnabled=2`)로 바꾸고, `AutoReboot=1`, `Overwrite=1`로 둡니다. 이미 덤프 종류가 정해져 있으면 그대로 둡니다. 재부팅해야 적용됩니다.
   - **페이지 파일:** '시스템이 관리하는 크기'로 바꿉니다. 재부팅해야 적용됩니다.
   - **디버거:** 서버가 Microsoft에서 Windows SDK 설치 관리자(`winsdksetup.exe`)를 받아 **Microsoft 서명을 확인한 뒤에만** 실행하고, Debugging Tools for Windows만 설치합니다. 서버에 인터넷이 필요하고 몇 분 걸립니다. 인터넷이 막힌 서버는 [tests/vm/windows-vm-setup.md](../tests/vm/windows-vm-setup.md)의 4단계처럼 설치 파일을 따로 옮겨 설치합니다.
-  - **분석 스크립트:** 노트북 버전을 설치합니다.
+  - **분석 스크립트:** 웹 UI 버전을 설치합니다.
 - LLM 분석은 Windows용 지시문(버그체크, 원인 드라이버, Driver Verifier 등)을 씁니다.
 - 원격 명령은 `powershell -EncodedCommand`로 보내 Windows `cmd.exe`의 인용 문제를 피합니다. 분석 스크립트는 `scp`로 접속 계정의 홈 폴더에 보낸 뒤 옮기거나 실행하고 지웁니다(Windows OpenSSH를 거친 PowerShell은 큰 표준 입력에서 멈출 수 있어서입니다). 리포트는 base64로 가져와 인코딩이 깨지지 않게 합니다.
 

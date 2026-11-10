@@ -10,7 +10,7 @@ const state = {
   settings: {},
   servers: [],
   page: "server",       // server | history | versions
-  versions: null,       // { local, latest } 노트북 버전과 GitHub 최신
+  versions: null,       // { local, latest } 웹 UI 버전과 GitHub 최신
   serverVersions: {},   // 서버 이름 -> 설치된 analyze-kdump 버전
   selected: null,       // 서버 이름
   tab: "vmcores",       // vmcores | results
@@ -369,7 +369,7 @@ function deleteDump(server, v, rec) {
     <div class="path" style="word-break:break-all">${esc(v.path)}</div>
     <div class="muted" style="font-size:13px">${fmtSize(v.size)} · ${fmtTime(v.mtime)} · ${esc(analyzed)}</div>
     <div style="font-size:13px">${linux ? "덤프와 같은 디렉터리에 함께 저장된 파일(vmcore-dmesg.txt 등)도 지웁니다." : "덤프 파일을 지웁니다."}
-      <b>되돌릴 수 없습니다.</b> 노트북에 저장된 리포트와 분석은 지우지 않습니다.${rec ? "" : ' <span class="warn-text">아직 분석하지 않은 덤프입니다.</span>'}</div>
+      <b>되돌릴 수 없습니다.</b> 웹 UI에 저장된 리포트와 분석은 지우지 않습니다.${rec ? "" : ' <span class="warn-text">아직 분석하지 않은 덤프입니다.</span>'}</div>
     <label><span>확인을 위해 서버 이름 <b>${esc(server.name)}</b>을(를) 입력하세요</span><input type="text" id="dd-confirm" autocomplete="off"></label>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
       <button class="btn small" id="dd-cancel">취소</button>
@@ -444,11 +444,11 @@ async function renderVmcores(server, refresh = false) {
         <td class="vm-actions"><div class="row-actions">
           <button class="btn small" data-kind="report" title="crash 리포트만 만듭니다">리포트</button>
           <button class="btn small primary" data-kind="llm" title="crash 리포트를 만든 뒤 LLM으로 분석합니다">+ LLM</button>
-          <button class="btn small ghost" data-act="download" title="덤프를 노트북의 데이터 폴더(dumps/${esc(server.name)}/)로 받습니다">받기</button>
+          <button class="btn small ghost" data-act="download" title="덤프를 웹 UI 데이터 폴더(dumps/${esc(server.name)}/)로 받습니다">받기</button>
           <button class="btn small ghost danger" data-act="delete" title="서버에서 덤프를 지웁니다(되돌릴 수 없음)">삭제</button>
         </div></td></tr>`);
       row.querySelector('[data-act="download"]').addEventListener("click", () => {
-        if (!confirm(`${v.path} (${fmtSize(v.size)})를 노트북으로 받을까요?
+        if (!confirm(`${v.path} (${fmtSize(v.size)})를 웹 UI로 받을까요?
 
 저장 위치: 웹 UI 데이터 폴더의 dumps/${server.name}/
 받는 동안 같은 서버의 다른 작업은 기다립니다. 작업 카드에서 취소할 수 있습니다.`)) return;
@@ -579,12 +579,12 @@ const PREPARE_WARN = {
   kdump: "kdump 패키지를 설치하고 부팅 때 켜지도록 설정합니다.",
   crash: "crash 패키지를 설치합니다.",
   swap: "2GB swap 파일(/swapfile-kdump)을 만들고 /etc/fstab에 등록합니다.",
-  tool: "노트북의 analyze-kdump를 서버에 설치합니다.",
+  tool: "웹 UI 버전의 analyze-kdump를 서버에 설치합니다.",
   dumpconf: "블루스크린 때 커널 메모리 덤프를 남기도록 설정합니다(이미 덤프 종류가 정해져 있으면 그대로 둡니다). 재부팅해야 적용됩니다.",
   pagefile: "페이지 파일을 '시스템이 관리하는 크기'로 바꿉니다. 재부팅해야 적용됩니다.",
   cdb: "서버가 Microsoft에서 Windows SDK 설치 관리자를 받아(인터넷 필요) Microsoft 서명을 확인한 뒤 Debugging Tools for Windows만 설치합니다. 몇 분 걸립니다.",
 };
-const WIN_TOOL_WARN = "노트북의 Windows 분석 스크립트를 서버에 설치합니다.";
+const WIN_TOOL_WARN = "웹 UI 버전의 Windows 분석 스크립트를 서버에 설치합니다.";
 
 async function renderPrepare(server, refresh = false) {
   const body = $("#tab-body");
@@ -742,7 +742,7 @@ function recordList(records, showServer) {
 async function renderHistory(main) {
   const card = h(`<div class="card">
     <div class="card-head">
-      <div><h2>분석 기록</h2><div class="meta">이 노트북에 저장된 리포트와 LLM 분석입니다. 리포트별로 묶어 최신 순으로 보여줍니다.</div></div>
+      <div><h2>분석 기록</h2><div class="meta">웹 UI에 저장된 리포트와 LLM 분석입니다. 리포트별로 묶어 최신 순으로 보여줍니다.</div></div>
     </div>
     <div class="history-tools">
       <select id="h-server"><option value="">모든 서버</option></select>
@@ -871,7 +871,7 @@ function serverStatus(info) {
   const latest = v.latest && v.latest.ok ? v.latest : null;
   const local = v.local || {};
   if (info.commit && latest && latest.commit.startsWith(info.commit)) return { cls: "ok", text: "최신 버전" };
-  if (info.commit && local.commit && local.commit.startsWith(info.commit)) return { cls: "ok", text: "노트북과 같은 버전" };
+  if (info.commit && local.commit && local.commit.startsWith(info.commit)) return { cls: "ok", text: "웹 UI와 같은 버전" };
   const newest = [latest && latest.version, local.version].filter(Boolean).sort(cmpVersion).pop();
   if (newest && cmpVersion(newest, info.version) > 0) return { cls: "up", text: `업데이트 가능 → v${newest}` };
   if (info.commit && latest) return { cls: "up", text: "다른 커밋 · 다시 설치 가능" };
@@ -920,8 +920,8 @@ function renderVersions(main) {
   const card = h(`<div class="card">
     <div class="card-head">
       <div>
-        <h2>이 노트북의 kdump-analyzer</h2>
-        <div class="meta">웹 UI와, 서버에 '무설치 실행'·'노트북 버전 설치'로 보내는 스크립트의 버전입니다.</div>
+        <h2>웹 UI의 kdump-analyzer</h2>
+        <div class="meta">웹 UI와, 서버에 '무설치 실행'·'웹 UI 버전 설치'로 보내는 스크립트의 버전입니다.</div>
       </div>
       <div class="actions" id="ver-actions"><button class="btn small" id="ver-check">최신 버전 확인</button></div>
     </div>
@@ -955,7 +955,7 @@ function renderVersions(main) {
         <button class="btn small" id="ver-save" style="align-self:flex-end">저장</button>
       </div>
       <p class="muted" style="margin:6px 0 0">최신 릴리스는 검증을 마친 버전만 받습니다. 브랜치 최신 커밋은 릴리스 전 변경까지 바로 받습니다.
-        노트북 저장소는 어느 쪽이든 브랜치(${esc(branch)})에서 fast-forward로만 갱신합니다.</p>
+        웹 UI 저장소는 어느 쪽이든 브랜치(${esc(branch)})에서 fast-forward로만 갱신합니다.</p>
     </details>
   </div>`);
   main.append(card);
@@ -1023,7 +1023,7 @@ function drawServerVersions() {
   }
   const local = (state.versions && state.versions.local) || { version: state.version };
   const latest = state.versions && state.versions.latest;
-  const table = h(`<table class="list"><thead><tr><th>서버</th><th>설치 버전</th><th>설치 정보</th><th>상태</th><th></th></tr></thead><tbody></tbody></table>`);
+  const table = h(`<table class="list srv-ver-table"><thead><tr><th>서버</th><th>설치 버전</th><th>설치 정보</th><th>상태</th><th></th></tr></thead><tbody></tbody></table>`);
   for (const s of state.servers) {
     const info = state.serverVersions[s.name];
     const st = serverStatus(info);
@@ -1042,10 +1042,10 @@ function drawServerVersions() {
       <td><div class="row-actions">
         <button class="btn small" data-act="check">확인</button>
         <button class="btn small ${st.cls === "up" ? "primary" : ""}" data-act="local" ${running || !(info && info.ok) ? "disabled" : ""}
-          title="노트북의 v${esc(local.version)}를 SSH로 보내 설치합니다. 서버에 인터넷이 없어도 됩니다.">노트북 버전 ${verb}</button>
+          title="웹 UI의 v${esc(local.version)}를 SSH로 보내 설치합니다. 서버에 인터넷이 없어도 됩니다.">웹 UI 버전 ${verb}</button>
         <button class="btn small" data-act="github" ${running || !(info && info.ok) ? "disabled" : ""}
           title="${isWindows(s)
-            ? `노트북이 GitHub에서 분석 스크립트를 받아(${esc(latestTarget(latest) || "최신")}) 서버로 보냅니다. 서버에 인터넷이 없어도 됩니다.`
+            ? `웹 UI가 GitHub에서 분석 스크립트를 받아(${esc(latestTarget(latest) || "최신")}) 서버로 보냅니다. 서버에 인터넷이 없어도 됩니다.`
             : `서버가 GitHub에서 직접 받아 설치합니다(${esc(latestTarget(latest) || "최신")}). 서버에 인터넷이 필요합니다.`}">GitHub ${latest && latest.ok && latest.channel === "release" ? esc(latest.tag) : "최신"} ${verb}</button>
         ${movable ? `<button class="btn small" data-act="move" ${running ? "disabled" : ""}
           title="설정·서버 목록·vmlinux·로그를 포함해 ${esc(NEW_PREFIX)}로 옮깁니다. 예전 경로에는 링크를 남깁니다.">새 위치로 옮기기</button>` : ""}
@@ -1061,7 +1061,7 @@ function drawServerVersions() {
     const moveBtn = row.querySelector('[data-act="move"]');
     if (moveBtn) moveBtn.addEventListener("click", () => {
       if (!confirm(`${s.name}의 설치를 새 기본 위치로 옮길까요?\n\n${LEGACY_PREFIX} -> ${NEW_PREFIX}\n\n`
-        + `1. 노트북 버전 v${local.version}로 먼저 업그레이드합니다(옮기기 기능이 필요).\n`
+        + `1. 웹 UI 버전 v${local.version}로 먼저 업그레이드합니다(옮기기 기능이 필요).\n`
         + `2. 설정, 서버 목록, API 키, vmlinux, 리포트를 통째로 옮기고 설정 파일 안의 경로를 고칩니다.\n`
         + `3. 예전 경로에는 새 위치를 가리키는 링크를 남겨 다른 곳에 저장된 예전 경로도 계속 동작하게 합니다.\n\n`
         + `같은 파일 시스템이면 바로 끝나고, 다르면 복사하므로 공간을 먼저 확인합니다.`)) return;
@@ -1070,7 +1070,7 @@ function drawServerVersions() {
     row.querySelectorAll('[data-act="local"],[data-act="github"]').forEach(b => b.addEventListener("click", () => {
       const source = b.dataset.act;
       const what = source === "local"
-        ? `노트북의 v${local.version}${local.commit ? " (" + short(local.commit) + ")" : ""}`
+        ? `웹 UI의 v${local.version}${local.commit ? " (" + short(local.commit) + ")" : ""}`
         : `GitHub ${latest && latest.ok ? latestTarget(latest) + " v" + latest.version + " (" + short(latest.commit) + ")" : "최신"}`;
       const now = installed ? `현재 v${info.version}${info.commit ? " (" + info.commit + ")" : ""}` : "현재 미설치";
       if (!confirm(`${s.name}에 ${what}을(를) ${verb}할까요?\n\n${now}\n설치 위치: ${(info && info.prefix) || s.tool}\n\n설정·서버 목록·로그·vmlinux는 유지됩니다.`)) return;
@@ -1093,7 +1093,7 @@ function askUninstall(s, info) {
         <span><b>프로그램만</b><br><span class="muted">${win ? "분석 스크립트(bin)와 설치 정보" : "명령 등록·자동완성과 프로그램 파일"}을 지웁니다. ${esc(keep)}는 남깁니다.</span></span></label>
       <label class="check radio-choice"><input type="radio" name="un-mode" value="all">
         <span><b>전부</b><br><span class="muted">설치 폴더를 통째로 지웁니다. ${esc(keep)}도 함께 지워지고 되돌릴 수 없습니다.</span></span></label>
-      <div class="muted" style="font-size:13px">지운 뒤에도 이 서버는 무설치 실행으로 분석할 수 있습니다. 노트북의 분석 결과는 지워지지 않습니다.</div>
+      <div class="muted" style="font-size:13px">지운 뒤에도 이 서버는 무설치 실행으로 분석할 수 있습니다. 웹 UI의 분석 결과는 지워지지 않습니다.</div>
       <label><span>확인을 위해 서버 이름 <b>${esc(s.name)}</b>을(를) 입력하세요</span>
         <input type="text" id="un-confirm" autocomplete="off"></label>
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
@@ -1655,13 +1655,13 @@ function renderJobs() {
   for (const job of shown.reverse()) {
     const label = job.kind === "prepare" ? `서버 준비 (${(job.actions || []).length}개 항목)`
       : job.kind === "upgrade"
-      ? `analyze-kdump 설치 (${job.source === "github" ? "GitHub" : "노트북 버전"})`
+      ? `analyze-kdump 설치 (${job.source === "github" ? "GitHub" : "웹 UI 버전"})`
       : job.kind === "move"
       ? `설치 위치 옮기기 (${NEW_PREFIX})`
       : job.kind === "uninstall"
       ? `분석 도구 삭제 (${(job.actions || [])[0] === "all" ? "전부" : "프로그램만"})`
       : job.kind === "download"
-      ? "덤프를 노트북으로 받기"
+      ? "덤프를 웹 UI로 받기"
       : (job.auto ? "자동 · " : "") + { report: "리포트 생성", llm: "리포트 + LLM 분석", reanalyze: "LLM 분석" }[job.kind];
     let pct = null;
     if (job.status === "running" && job.progress && job.progress.total) {

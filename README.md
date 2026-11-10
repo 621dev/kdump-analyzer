@@ -10,7 +10,7 @@ Linux 커널 패닉 덤프(`vmcore`)와 Windows 블루스크린 메모리 덤프
 |---|---|---|
 | **`analyze-kdump`** | 분석 서버 | 리포트 생성과 LLM 분석 명령 |
 | **`analyze-kdump-ui`** | 분석 서버 터미널 | 장애 현장에서 SSH로 쓰는 메뉴 화면 |
-| **웹 UI** (`webui/kdump-webui.py`) | 노트북 브라우저 | 여러 서버를 SSH로 관리하고 분석 |
+| **웹 UI** (`webui/kdump-webui.py`) | PC나 서버에서 실행, 브라우저로 접속 | 여러 서버를 SSH로 관리하고 분석 |
 | **Windows 분석 스크립트** (`winbin/analyze-windump.ps1`) | Windows 서버 | 블루스크린 덤프를 `cdb`로 분석 (웹 UI에서 사용) |
 
 예전 이름은 `kdump-tools`였고, Debian·Ubuntu의 `kdump-tools` 패키지(덤프를 만드는 쪽)와 헷갈리지 않도록 v1.19.0에서 바꿨습니다.
@@ -46,16 +46,16 @@ sudo analyze-kdump -r /var/crash        # 가장 최근 덤프로 리포트 만�
 - 끝나면 `report:` 줄에 리포트 경로가 나옵니다. 리포트 맨 위의 `type:`·`evidence:` 줄에서 장애 유형과 근거를 먼저 봅니다.
 - 메뉴로 하려면 `sudo analyze-kdump-ui`, LLM 분석까지 하려면 [LLM 설정](docs/configuration.md) 뒤 `-llm`을 붙입니다.
 
-### B. 노트북에서 웹 UI로 분석하기
+### B. 웹 UI로 분석하기
 
-서버에 설치하지 않아도 노트북에서 스크립트를 보내 분석합니다(무설치 실행).
+분석할 서버에 설치하지 않아도 웹 UI가 스크립트를 보내 분석합니다(무설치 실행). 웹 UI는 노트북, 데스크톱, 관리용 서버 등 SSH로 서버에 접속할 수 있는 컴퓨터 어디서나 실행합니다.
 
 ```bash
 git clone https://github.com/621dev/kdump-analyzer.git
 python kdump-analyzer/webui/kdump-webui.py
 ```
 
-1. 노트북에 Python 3.8 이상과 `ssh`, 서버에는 SSH 키로 접속하는 계정과 비밀번호 없는 sudo가 필요합니다.
+1. 웹 UI를 실행할 컴퓨터에 Python 3.8 이상과 `ssh`, 서버에는 SSH 키로 접속하는 계정과 비밀번호 없는 sudo가 필요합니다.
 2. 브라우저가 열리면 **+ 추가**로 서버(`user@host`, SSH 키 파일)를 넣고 **연결 테스트**를 누릅니다. Windows 서버는 **운영체제**를 Windows로 고릅니다.
 3. **서버 준비** 탭에서 빠진 항목(crash, 디버그 커널, kdump 설정, Windows는 디버거와 덤프 설정)을 설치합니다.
 4. 덤프 목록에서 **리포트** 또는 **리포트 + LLM 분석**을 누릅니다. LLM은 **설정**에서 API 키나 Claude Code·Codex 구독을 연결합니다.
