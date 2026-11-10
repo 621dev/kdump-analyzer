@@ -409,6 +409,84 @@ class DumpManagementTest(unittest.TestCase):
         self.assertEqual(files, [])                                        # 받다 만 .part 파일은 지움
 
 
+@unittest.skipUnless(shutil.which(webui.ssh_tool("ssh-keygen")) or os.path.isfile(webui.ssh_tool("ssh-keygen")),
+                     "ssh-keygen이 필요합니다")
+class PassphraseHintTest(unittest.TestCase):
+    """암호를 건 SSH 키가 ssh-agent에 없을 때 'Permission denied' 대신 해결 방법을 알려 줍니다."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.plain = os.path.join(cls.tmp.name, "plain")
+        cls.locked = os.path.join(cls.tmp.name, "locked")
+        for path, phrase in ((cls.plain, ""), (cls.locked, "s3cret-phrase")):
+            subprocess.run([webui.ssh_tool("ssh-keygen"), "-q", "-t", "ed25519", "-N", phrase, "-C", "t", "-f", path],
+                           stdin=subprocess.DEVNULL, capture_output=True, check=True, timeout=30)
+        r = subprocess.run([webui.ssh_tool("ssh-keygen"), "-l", "-f", cls.locked + ".pub"], capture_output=True, text=True)
+        cls.fp = r.stdout.split()[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        webui._KEY_HINTS.clear()
+        self.orig = webui.agent_fingerprints
+
+    def tearDown(self):
+        webui.agent_fingerprints = self.orig
+        webui._KEY_HINTS.clear()
+
+    def server(self, key):
+        return dict(webui.DEFAULT_SERVER, name="db01", target="u@h", key_file=key)
+
+    def test_detects_passphrase(self):
+        self.assertTrue(webui.key_has_passphrase(self.locked))
+        self.assertFalse(webui.key_has_passphrase(self.plain))
+        self.assertEqual(webui.key_fingerprint(self.locked), self.fp)
+
+    def test_hint_by_agent_state(self):
+        webui.agent_fingerprints = lambda: None                  # ssh-agent 꺼짐
+        self.assertIn("ssh-agent에 접속할 수 없습니다", webui.passphrase_hint(self.server(self.locked)))
+        webui._KEY_HINTS.clear()
+        webui.agent_fingerprints = lambda: {"SHA256:other"}      # 다른 키만 등록
+        hint = webui.passphrase_hint(self.server(self.locked))
+        self.assertIn("등록돼 있지 않습니다", hint)
+        self.assertIn("ssh-add", hint)
+        webui._KEY_HINTS.clear()
+        webui.agent_fingerprints = lambda: {self.fp}             # 등록됨
+        self.assertEqual(webui.passphrase_hint(self.server(self.locked)), "")
+        webui._KEY_HINTS.clear()
+        self.assertEqual(webui.passphrase_hint(self.server(self.plain)), "")   # 암호 없는 키
+        self.assertEqual(webui.passphrase_hint(self.server("")), "")           # 키 지정 안 함
+
+    def test_hint_is_cached(self):
+        calls = []
+        webui.agent_fingerprints = lambda: calls.append(1) or None
+        server = self.server(self.locked)
+        webui.passphrase_hint(server, now=1000)
+        webui.passphrase_hint(server, now=1030)
+        self.assertEqual(len(calls), 1)                          # 60초 안에는 다시 확인하지 않음
+        webui.passphrase_hint(server, now=1100)
+        self.assertEqual(len(calls), 2)
+
+    def test_hint_only_on_permission_denied(self):
+        webui.agent_fingerprints = lambda: set()
+        server = self.server(self.locked)
+        out = webui.with_ssh_hint(server, 255, b"u@h: Permission denied (publickey).\r\n")
+        self.assertIn("ssh-add".encode(), out)
+        self.assertEqual(webui.with_ssh_hint(server, 255, b"Connection timed out"), b"Connection timed out")
+        self.assertEqual(webui.with_ssh_hint(server, 0, b"Permission denied (publickey)"), b"Permission denied (publickey)")
+
+    def test_windows_prefers_windows_openssh(self):
+        path = webui.ssh_tool("ssh")
+        if os.name == "nt" and os.path.isfile(os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "OpenSSH", "ssh.exe")):
+            self.assertTrue(path.lower().endswith(os.path.join("system32", "openssh", "ssh.exe")), path)
+            self.assertEqual(webui.ssh_args(self.server(""))[0], path)
+        else:
+            self.assertEqual(path, "ssh")
+
+
 class SettingsTest(unittest.TestCase):
     def test_update_source_defaults(self):
         self.assertEqual(webui.update_source({}), ("621dev/kdump-analyzer", "release", "main"))
@@ -612,7 +690,7 @@ class WindowsServerTest(unittest.TestCase):
         finally:
             webui.subprocess.run = orig
         argv = calls[-1]
-        self.assertEqual(argv[:2], ["scp", "-q"])
+        self.assertEqual(argv[:2], [webui.ssh_tool("scp"), "-q"])
         self.assertEqual(argv[argv.index("-P") + 1], "2222")
         self.assertNotIn("-p", argv)
         self.assertEqual(argv[argv.index("-i") + 1], "C:/k/id")
