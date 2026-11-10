@@ -130,6 +130,18 @@ ui_msg() {
 }
 
 # 오래 걸리는 확인 작업 동안 띄워 두는 안내 화면입니다(입력을 기다리지 않음).
+# Python 3.6 이상: python3, 없으면 RHEL 8 최소 설치의 /usr/libexec/platform-python
+find_python() {
+    local p
+    for p in "$(command -v python3 2>/dev/null)" /usr/libexec/platform-python; do
+        if [ -n "$p" ] && [ -x "$p" ] && "$p" -c 'import sys; sys.exit(sys.version_info < (3, 6))' 2>/dev/null; then
+            printf '%s' "$p"
+            return 0
+        fi
+    done
+    return 1
+}
+
 ui_info() {
     ui_size
     "$WHIPTAIL" --title "$TITLE" --infobox "$1" 8 "$UI_W"
@@ -1084,8 +1096,8 @@ fetch_models() {
     local provider="$1" out="$2" key base url cfg response err status
 
     MODEL_ERR=""
-    if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
-        MODEL_ERR="curl과 python3가 필요합니다."
+    if ! command -v curl >/dev/null 2>&1 || ! find_python >/dev/null; then
+        MODEL_ERR="curl과 Python 3.6 이상(python3 또는 /usr/libexec/platform-python)이 필요합니다."
         return 1
     fi
     key=$(api_key_for_lookup)
@@ -1136,7 +1148,7 @@ fetch_models() {
     fi
 
     # 공식 OpenAI API는 이미지·음성·임베딩 모델도 함께 주므로 대화용 모델만 남깁니다.
-    PYTHONIOENCODING=utf-8 python3 - "$provider" "$base" "$response" > "$out" 2> "$err" <<'PY'
+    PYTHONIOENCODING=utf-8 "$(find_python)" - "$provider" "$base" "$response" > "$out" 2> "$err" <<'PY'
 import json, re, sys
 
 provider, base, path = sys.argv[1:4]
@@ -1806,9 +1818,10 @@ check_latest() {
 write_changes() {
     local base="$1" head="$2" out="$3"
 
-    command -v python3 >/dev/null 2>&1 || return 1
+    local py
+    py=$(find_python) || return 1
     curl -fsSL --max-time 10 "https://api.github.com/repos/$(update_repo)/compare/$base...$head" 2>/dev/null \
-        | PYTHONIOENCODING=utf-8 python3 -c '
+        | PYTHONIOENCODING=utf-8 "$py" -c '
 import json, sys
 try:
     data = json.load(sys.stdin)

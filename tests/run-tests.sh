@@ -173,6 +173,23 @@ check "hung task: 유형별 명령(ps -m | grep UN)" has "$R" "===== crash> ps -
 check "hung task: 기본 섹션(bt -a)" has "$R" "===== crash> bt -a ====="
 check "hung task: 가짜 crash 출력이 섹션에 들어감" has "$R" "fake output: sys"
 check "hung task: taint 모듈 태스크만 추림" has "$R" 'COMMAND: "kf_worker"'
+
+# 서버의 LLM 분석(--llm-report): 가짜 Claude Code CLI가 받은 입력을 확인하고 분석을 돌려줍니다.
+# 1.18.3~1.24.3에서는 python3 인자에 공백이 빠져(python3 -"<리포트>") 이 경로가 항상 실패했습니다.
+cat > "$T/fakebin/claude" <<'EOF'
+#!/bin/bash
+input=$(cat)
+case "$input" in
+    *"NODENAME"*|*"hung_task"*|*"fake output"*) echo "판정: 가짜 LLM 분석 (입력 ${#input}자)" ;;
+    *) echo "입력이 비어 있음"; exit 3 ;;
+esac
+EOF
+chmod +x "$T/fakebin/claude"
+run_ak llm LLM_PROVIDER=claude-code LLM_CLI_PATH="$T/fakebin/claude" LLM_TIMEOUT=30 -- --llm-report "$R"
+A=$(sed -n 's/^analysis: //p' "$T/llm.out" | tail -n 1)
+check "LLM 분석(--llm-report): 종료 코드 0" [ "$(rc_of llm)" = 0 ]
+check "LLM 분석: 분석 파일에 CLI 응답" has "${A:-/nonexistent}" "판정: 가짜 LLM 분석"
+check "LLM 분석: 건너뜀 안내 없음" lacks "${A:-/nonexistent}" "LLM 분석을 건너뜁니다"
 check "hung task: taint와 무관한 태스크는 뺌" lacks "$R" 'COMMAND: "systemd"'
 check "hung task: 모듈 심볼 섹션" has "$R" "===== 모듈 심볼 ====="
 J="${R%.txt}.json"
@@ -235,6 +252,53 @@ mkdir -p "$T/crash/unknown"
 make_elf "$T/crash/unknown/vmcore" "$X86"
 run_ak unknown -- -r "$T/crash/unknown"
 check "로그 없음: 판단 불가로 계속 진행" has "$(report_of unknown)" "판단 불가 (커널 로그를 찾지 못함)"
+
+# 오래된 커널(RHEL 7의 3.10 등) 로그 형식
+# old_case <이름> <기대 유형>: 표준 입력의 로그로 덤프를 만들어 분석하고 유형을 확인
+old_case() {
+    mkdir -p "$T/old/$1"
+    make_elf "$T/old/$1/vmcore" "$X86"
+    cat > "$T/old/$1/vmcore-dmesg.txt"
+    run_ak "old-$1" -- -r "$T/old/$1"
+    check "오래된 커널 $1: 유형 판정" has "$(report_of "old-$1")" "[$2]"
+}
+old_case sysrq sysrq <<'EOF'
+[  300.000000] SysRq : Trigger a crash
+[  300.000100] BUG: unable to handle kernel NULL pointer dereference at           (null)
+[  300.000200] IP: [<ffffffff813f3b06>] sysrq_handle_crash+0x16/0x20
+[  300.000300] RIP: 0010:[<ffffffff813f3b06>]  [<ffffffff813f3b06>] sysrq_handle_crash+0x16/0x20
+[  300.000400] Kernel panic - not syncing: Fatal exception
+EOF
+old_case oops oops <<'EOF'
+[  200.000000] BUG: unable to handle kernel NULL pointer dereference at 0000000000000008
+[  200.000100] IP: [<ffffffffc05a1015>] kf_null_fn+0x15/0x30 [kdump_fault]
+[  200.000200] RIP: 0010:[<ffffffffc05a1015>]  [<ffffffffc05a1015>] kf_null_fn+0x15/0x30 [kdump_fault]
+[  200.000300] Kernel panic - not syncing: Fatal exception
+EOF
+check "오래된 커널 oops: 첫 오류 줄을 근거로" has "$(report_of old-oops)" "evidence:  BUG: unable to handle kernel NULL pointer dereference"
+check "오래된 커널 oops: RIP 형식에서 디스어셈블 위치" has "$(report_of old-oops)" "===== crash> dis -rl kf_null_fn+0x15 ====="
+old_case softlockup soft_lockup <<'EOF'
+[  400.000000] BUG: soft lockup - CPU#1 stuck for 22s! [kf_spin:1234]
+[  400.000100] Kernel panic - not syncing: softlockup: hung tasks
+EOF
+old_case hardlockup hard_lockup <<'EOF'
+[  500.000000] NMI watchdog: Watchdog detected hard LOCKUP on cpu 2
+[  500.000100] Kernel panic - not syncing: Hard LOCKUP
+EOF
+old_case hung hung_task <<'EOF'
+[  600.000000] INFO: task kf_lock_waiter:2082 blocked for more than 120 seconds.
+[  600.000100] "echo 0 > /proc/sys/kernel/hung_task_timeout_secs" disables this message.
+[  720.000000] Kernel panic - not syncing: hung_task: blocked tasks
+EOF
+old_case oom oom <<'EOF'
+[  700.000000] java invoked oom-killer: gfp_mask=0x280da, order=0, oom_score_adj=0
+[  700.000100] Kernel panic - not syncing: Out of memory: system-wide panic_on_oom is enabled
+EOF
+
+# 벤더 커널(Oracle UEK): vmlinux가 없으면 kernel-uek debuginfo 설치를 안내
+run_ak uek FAKE_KVER=5.15.0-200.131.27.el8uek.x86_64 VMLINUX_BASE="$T/none" -- -r "$T/old/oops"
+check "UEK: vmlinux 없음 종료 코드 1" [ "$(rc_of uek)" = 1 ]
+check "UEK: kernel-uek debuginfo 안내" has "$T/uek.out" "kernel-uek-5.15.0-200.131.27.el8uek.x86_64"
 
 # 기능 끄기
 run_ak off REPORT_TYPE_COMMANDS=0 REPORT_JSON=0 REPORT_MODULE_SYMBOLS=off -- -r "$D"

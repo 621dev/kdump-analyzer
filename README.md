@@ -21,14 +21,14 @@ Linux 커널 패닉 덤프(`vmcore`)와 Windows 블루스크린 메모리 덤프
 
 | 역할 | 지원 대상 | 검증한 버전 |
 |---|---|---|
-| Linux 분석 서버 (RHEL 계열) | RHEL·Rocky·Alma·Oracle Linux 8 이상 (`dnf`) | Rocky Linux 9.8 (커널 5.14.0-687, crash 9.0.1) |
+| Linux 분석 서버 (RHEL 계열) | RHEL·Rocky·Alma·Oracle Linux 8 이상 (`dnf`), Oracle UEK·`kernel-rt` 커널. RHEL·CentOS 7(`yum`)의 커널 로그 형식과 debuginfo 안내 | Rocky Linux 9.8 (커널 5.14.0-687, crash 9.0.1) |
 | Linux 분석 서버 (Debian 계열) | Ubuntu·Debian (`apt-get`, dbgsym 저장소) | Ubuntu 26.04.1 LTS (커널 7.0.0-42, crash 9.0.1) |
 | Windows 서버 (웹 UI에서 분석) | Windows Server 2019 이상: OpenSSH 서버, Windows PowerShell 5.1, Debugging Tools for Windows(x64) | Windows Server 2025 Standard 평가판 (Windows SDK 10.0.28000 디버거, NMI·드라이버 오류 덤프) |
 | 웹 UI 실행 PC | Windows 10/11, Linux, macOS: Python 3.8 이상과 `ssh` | Windows 11 (Python 3.12), CI에서 Python 3.8·3.12·3.13 |
 
 - **아키텍처:** Linux는 x86_64와 aarch64 덤프를 알아보고, 덤프·vmlinux·분석 서버의 아키텍처가 다르면 실행 전에 알려 줍니다. 실제 검증은 x86_64에서 했습니다. Windows는 x64만 지원합니다.
 - **덤프 형식:** RHEL 계열 `vmcore`, Ubuntu·Debian `dump.<시각>`, SSH로 받은 flattened 덤프(`vmcore.flat`), Windows `MEMORY.DMP`·미니덤프를 분석합니다. SUSE의 덤프 위치도 알아보지만, 서버 준비(패키지 설치)는 `dnf`·`yum`·`apt-get`만 지원합니다.
-- **분석 서버에 필요한 것:** `bash`, `crash`, 덤프 커널에 맞는 `vmlinux`. LLM 분석과 JSON 요약에는 `python3`와 `curl`, 메뉴 화면에는 `whiptail`이 필요합니다. 자세한 내용은 [요구 사항](docs/install.md#요구-사항)과 [Windows 서버](docs/windows.md)를 봅니다.
+- **분석 서버에 필요한 것:** `bash`, `crash`, 덤프 커널에 맞는 `vmlinux`. LLM 분석과 JSON 요약에는 Python 3.6 이상(`python3`, 없으면 RHEL 8의 `/usr/libexec/platform-python`)과 `curl`, 메뉴 화면에는 `whiptail`이 필요합니다. 자세한 내용은 [요구 사항](docs/install.md#요구-사항)과 [Windows 서버](docs/windows.md)를 봅니다.
 
 ## 5분 시작 가이드
 

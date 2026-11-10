@@ -1255,8 +1255,41 @@ debuginfo)
     # 내려받은 디버그 패키지(최대 2GB)가 apt 캐시에 남아 덤프 저장 공간을 차지하므로 지웁니다.
     rm -f /var/cache/apt/archives/*-dbgsym_*.ddeb /var/cache/apt/archives/*-dbg_*.deb
   else
-    $pm -y install dnf-plugins-core >/dev/null 2>&1 || true
-    $pm -y debuginfo-install "kernel-$k" || exit 1
+    # 커널 종류에 맞는 디버그 패키지: Oracle UEK는 kernel-uek, 실시간 커널은 kernel-rt
+    case "$k" in
+      *uek*) kpkg=kernel-uek ;;
+      *.rt*|*+rt*) kpkg=kernel-rt ;;
+      *) kpkg=kernel ;;
+    esac
+    major=$(printf '%s' "${VERSION_ID:-}" | cut -d. -f1)
+    case "${ID:-}" in
+    ol)
+      # Oracle Linux: debuginfo는 oss.oracle.com의 별도 저장소에 있어 기본 설정으로는 찾지 못합니다.
+      if ! grep -qs "oss.oracle.com/ol$major/debuginfo" /etc/yum.repos.d/*.repo; then
+        printf '[ol%s_debuginfo]\nname=Oracle Linux %s debuginfo\nbaseurl=https://oss.oracle.com/ol%s/debuginfo/\ngpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-oracle\ngpgcheck=1\nenabled=1\n' \
+          "$major" "$major" "$major" > /etc/yum.repos.d/oracle-debuginfo.repo
+        echo "Oracle Linux debuginfo 저장소를 추가했습니다: /etc/yum.repos.d/oracle-debuginfo.repo"
+      fi
+      ;;
+    rhel)
+      # RHEL: 구독의 debug 저장소를 켭니다. 켜지 못하면 안내만 하고 계속합니다(이미 켜져 있을 수 있음).
+      if command -v subscription-manager >/dev/null 2>&1; then
+        arch=$(uname -m)
+        if ! subscription-manager repos --enable "rhel-$major-for-$arch-baseos-debug-rpms" >/dev/null 2>&1 &&
+           ! subscription-manager repos --enable "rhel-$major-server-debug-rpms" >/dev/null 2>&1; then
+          echo "RHEL debug 저장소를 켜지 못했습니다. 구독 상태를 확인하거나 subscription-manager repos --enable rhel-$major-for-$arch-baseos-debug-rpms 를 실행해 주세요."
+        fi
+      fi
+      ;;
+    esac
+    if [ "$pm" = yum ]; then
+      # RHEL·CentOS 7: debuginfo-install은 yum의 하위 명령이 아니라 yum-utils의 별도 명령입니다.
+      yum -y install yum-utils >/dev/null 2>&1 || true
+      debuginfo-install -y "$kpkg-$k" || exit 1
+    else
+      dnf -y install dnf-plugins-core >/dev/null 2>&1 || true
+      dnf -y debuginfo-install "$kpkg-$k" || exit 1
+    fi
   fi
   for p in "/usr/lib/debug/lib/modules/$k/vmlinux" "/usr/lib/debug/boot/vmlinux-$k"; do
     [ -f "$p" ] && { echo "vmlinux: $p"; exit 0; }
@@ -1536,6 +1569,20 @@ $dr=Get-PSDrive ($env:SystemDrive.TrimEnd(':'));"disk_free=$($dr.Free)";"system_
             "root": i.get("admin") == "True", "items": items}
 
 
+def debuginfo_note(os_id, debian, kernel):
+    """서버 준비의 디버그 커널 설치 안내(배포판·커널 종류별)."""
+    if os_id == "ubuntu":
+        return "dbgsym 저장소(ddebs.ubuntu.com)를 추가합니다."
+    if debian:
+        return "debug 저장소를 추가합니다."
+    pkg = "kernel-uek" if "uek" in kernel else ("kernel-rt" if ".rt" in kernel or "+rt" in kernel else "kernel")
+    if os_id == "ol":
+        return "Oracle Linux debuginfo 저장소(oss.oracle.com)가 없으면 추가하고 %s-debuginfo를 설치합니다." % pkg
+    if os_id == "rhel":
+        return "구독의 debug 저장소(rhel-<버전>-…-debug-rpms)를 켜고 %s-debuginfo를 설치합니다. 구독이 없으면 실패합니다." % pkg
+    return "debuginfo 저장소에서 %s-debuginfo를 설치합니다." % pkg
+
+
 def prepare_check(server):
     """서버의 kdump 분석 환경을 점검해 항목 목록으로 돌려줍니다. 서버에서 바꾸는 것은 없습니다."""
     if is_windows(server):
@@ -1592,8 +1639,7 @@ def prepare_check(server):
         add("debuginfo", "디버그 커널 (실행 중인 커널)", "ok", i["vmlinux"])
     else:
         add("debuginfo", "디버그 커널 (실행 중인 커널)", "missing", "%s 용 vmlinux 없음" % i.get("kernel", "?"), "debuginfo",
-            "수백 MB~1GB를 받습니다. %s" % ("dbgsym 저장소(ddebs.ubuntu.com)를 추가합니다." if i.get("os_id") == "ubuntu"
-                                         else "debug 저장소를 추가합니다." if debian else "debuginfo 저장소를 사용합니다."))
+            "수백 MB~1GB를 받습니다. %s" % debuginfo_note(i.get("os_id"), debian, i.get("kernel", "")))
 
     if mem_kb and mem_kb < 3 * 1048576 and swap_kb < 1536 * 1024:
         add("swap", "메모리·swap", "warn", "메모리 %.1f GB, swap %.1f GB: crash 실행 중 OOM 위험" % (mem_kb / 1048576, swap_kb / 1048576),

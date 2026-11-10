@@ -151,6 +151,12 @@ KVER="<kernel-version>"
 dnf debuginfo-install -y "kernel-$KVER"
 ```
 
+- **RHEL:** 구독의 debug 저장소를 먼저 켭니다: `subscription-manager repos --enable rhel-<major>-for-$(uname -m)-baseos-debug-rpms` (RHEL 7은 `rhel-7-server-debug-rpms`).
+- **Oracle Linux:** debuginfo는 `https://oss.oracle.com/ol<major>/debuginfo/` 저장소에 있습니다. UEK 커널(`*.el8uek.*`)은 `kernel-uek-$KVER`를 설치합니다.
+- **RHEL·CentOS 7 (`yum`):** `yum install -y yum-utils && debuginfo-install -y "kernel-$KVER"`.
+
+vmlinux가 없으면 `analyze-kdump`가 커널 이름과 배포판에 맞는 명령을 안내하고, 웹 UI의 서버 준비는 위 저장소 설정까지 해서 설치합니다.
+
 Debian/Ubuntu (dbgsym 저장소 설정 필요):
 
 ```bash
