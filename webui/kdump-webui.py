@@ -14,6 +14,7 @@ Python 3.8 이상, 표준 라이브러리만 사용합니다.
 import argparse
 import http.server
 import json
+import locale
 import os
 import re
 import secrets
@@ -657,8 +658,43 @@ def passphrase_hint(server, now=None):
     return hint
 
 
+# ssh·scp가 직접 출력하는 메시지의 머리. 이 줄들만 아래 복원을 합니다(원격 명령의 출력은 그대로 둠).
+SSH_MESSAGE_PREFIXES = ("ssh: ", "scp: ", "sftp: ", "banner exchange: ", "kex_exchange_identification: ")
+# ASCII가 아닌 바이트(0x80 이상)를 OpenSSH가 바꿔 쓴 8진수 표기(\276\313...)가 이어진 부분
+SSH_OCTAL_RE = re.compile(r"(?:\\[23][0-7]{2})+")
+
+
+def _ssh_octal_text(match):
+    raw = bytes(int(code, 8) for code in re.findall(r"[0-7]{3}", match.group()))
+    for encoding in ("utf-8", locale.getpreferredencoding(False)):
+        try:
+            return raw.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return match.group()
+
+
+def ssh_readable(text):
+    """ssh 자체 오류 메시지의 8진수 표기를 글자로 되돌립니다.
+
+    OpenSSH는 운영체제가 준 오류 문장(예: 한국어 Windows의 '알려진 호스트가 없습니다.', CP949)의
+    ASCII가 아닌 바이트를 '\\276\\313...'처럼 바꿔 출력합니다. UTF-8로 읽어 보고, 안 되면 이 컴퓨터의
+    기본 인코딩(한국어 Windows는 CP949)으로 읽습니다. 둘 다 안 되면 그대로 둡니다.
+    """
+    if "\\" not in text:
+        return text
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith(SSH_MESSAGE_PREFIXES):
+            lines[i] = SSH_OCTAL_RE.sub(_ssh_octal_text, line)
+    return "\n".join(lines)
+
+
 def with_ssh_hint(server, code, out):
-    """접속이 거부된 출력(bytes)에 암호 키 안내를 덧붙입니다(ssh는 종료 코드 255, scp는 1)."""
+    """실패한 출력(bytes)의 ssh 오류 메시지를 읽을 수 있게 고치고, 접속이 거부됐으면 암호 키 안내를 덧붙입니다
+    (ssh는 종료 코드 255, scp는 1)."""
+    if code != 0 and b"\\" in out:
+        out = ssh_readable(out.decode("utf-8", "replace")).encode("utf-8")
     if code != 0 and b"Permission denied (publickey" in out:
         hint = passphrase_hint(server)
         if hint:
@@ -2142,9 +2178,11 @@ class Jobs:
                     job.progress = {"current": int(progress.group(1)), "total": int(progress.group(2)),
                                     "label": progress.group(3), "elapsed": int(progress.group(4))}
                 if sep == "\n":
+                    segment = ssh_readable(segment)
                     job.log(segment)
                     text_all.append(segment)
         if buffer:
+            buffer = ssh_readable(buffer)
             job.log(buffer)
             text_all.append(buffer)
         proc.wait()
