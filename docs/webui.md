@@ -53,6 +53,22 @@ python webui/kdump-webui.py
 
 원격 서버 분석 방식은 **원격 설치본 실행**과 **무설치 실행**(스크립트를 원격 임시 디렉터리로 보내 실행한 뒤 지움), 그리고 둘 중 하나를 고르는 **자동 선택**을 지원합니다. SSH 키 인증으로 비밀번호 없이 접속할 수 있어야 하고, sudo를 쓰면 원격 서버에 비밀번호 없는 sudo(NOPASSWD)가 필요합니다. 처음 접속하는 서버의 호스트 키는 자동으로 등록합니다(`StrictHostKeyChecking=accept-new`).
 
+**암호(passphrase)를 건 SSH 키:** 웹 UI는 SSH를 `BatchMode`로 실행해 암호를 묻지 않으므로, 암호를 건 키는 ssh-agent에 등록해 두어야 합니다. 운영 서버에 쓰는 키라면 암호를 걸고 ssh-agent를 쓰는 것을 권합니다.
+
+```powershell
+# Windows: 관리자 PowerShell에서 ssh-agent 서비스를 켜고 부팅 때 자동 시작
+Set-Service ssh-agent -StartupType Automatic
+Start-Service ssh-agent
+# 일반 PowerShell: 키에 암호를 걸고(이미 걸었으면 생략) ssh-agent에 등록. 이때 한 번만 암호를 입력합니다.
+ssh-keygen -p -f C:\Users\me\.ssh\id_ed25519
+ssh-add C:\Users\me\.ssh\id_ed25519
+```
+
+- 등록하면 서버 설정은 그대로 두어도 됩니다. Windows의 ssh-agent는 등록한 키를 Windows 계정으로 보호해 보관하므로 재부팅 뒤에도 다시 등록할 필요가 없고, 새 덤프 자동 분석처럼 사람이 없을 때 도는 작업도 그대로 동작합니다.
+- Windows에서는 Windows OpenSSH(`C:\Windows\System32\OpenSSH`)의 `ssh`·`scp`를 먼저 씁니다. Git Bash에서 웹 UI를 실행해도 Git의 ssh(Windows ssh-agent를 보지 못함) 대신 이것을 씁니다.
+- 접속이 `Permission denied (publickey)`로 거부되면, 서버 설정의 키에 암호가 걸려 있는지와 ssh-agent에 등록돼 있는지 확인해 해결 방법(`ssh-add` 명령, ssh-agent 서비스 켜기)을 오류 메시지와 작업 로그에 덧붙입니다. 키의 공개 키 파일(`<키>.pub`)이 같은 폴더에 있으면 ssh-agent에 등록된 키와 지문으로 맞춰 봅니다.
+- macOS·Linux 노트북은 웹 UI를 실행할 셸에서 `eval "$(ssh-agent)"`와 `ssh-add <키>`를 먼저 실행합니다(macOS는 키체인에 저장하면 로그인할 때마다 자동으로 등록할 수 있음).
+
 노트북의 Hyper-V 기본 스위치(Default Switch)로 띄운 테스트 VM은 다시 켤 때마다 IP가 바뀔 수 있습니다. 접속 대상을 `tester@<VM 호스트 이름>.mshome.net`처럼 이름으로 넣으면 IP가 바뀌어도 그대로 접속됩니다.
 
 **API 키와 토큰 저장:** 설정에서 입력한 API 키와 Claude Code 장기 토큰은 데이터 폴더의 `secrets/`에 저장합니다.

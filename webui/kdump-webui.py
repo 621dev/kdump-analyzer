@@ -486,6 +486,102 @@ class ApiError(Exception):
 _SSH_EXTRA = None
 
 
+def ssh_tool(name):
+    """ssh·scp·ssh-keygen·ssh-add 실행 파일.
+
+    Windows에서는 Windows OpenSSH(System32\\OpenSSH)를 먼저 씁니다. Git Bash 등에서 웹 UI를 실행하면 PATH에서
+    Git의 ssh가 먼저 잡히는데, 그 ssh는 Windows의 ssh-agent 서비스를 보지 못해 암호를 건 키로 접속하지 못합니다.
+    """
+    if os.name == "nt":
+        root = os.environ.get("SystemRoot") or r"C:\Windows"
+        path = os.path.join(root, "System32", "OpenSSH", name + ".exe")
+        if os.path.isfile(path):
+            return path
+    return name
+
+
+# ---- 암호(passphrase)를 건 SSH 키 안내
+# 웹 UI는 ssh를 BatchMode로 실행해 암호를 묻지 않습니다. 암호를 건 키는 ssh-agent에 등록돼 있어야 쓸 수 있는데,
+# 등록하지 않으면 "Permission denied (publickey)"만 보여 원인을 알기 어렵습니다. 접속이 거부되면 키를 확인해 안내합니다.
+
+_KEY_HINTS = {}          # 키 경로 -> (확인한 시각, 안내 문구)
+KEY_HINT_TTL = 60
+
+
+def key_has_passphrase(key):
+    """키 파일에 암호가 걸려 있는지. 빈 암호로 공개 키를 꺼내 보고 '암호가 틀림'으로 실패하는지 봅니다."""
+    try:
+        r = subprocess.run([ssh_tool("ssh-keygen"), "-y", "-P", "", "-f", key], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode != 0 and b"passphrase" in r.stdout.lower()
+
+
+def agent_fingerprints():
+    """ssh-agent에 등록된 키의 지문 집합. ssh-agent에 접속할 수 없으면 None."""
+    try:
+        r = subprocess.run([ssh_tool("ssh-add"), "-l"], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode == 2:
+        return None          # ssh-agent가 꺼져 있거나 접속할 수 없음
+    return {line.split()[1] for line in r.stdout.decode("utf-8", "replace").splitlines()
+            if len(line.split()) >= 2 and line.split()[1].startswith(("SHA256:", "MD5:"))}
+
+
+def key_fingerprint(key):
+    """키의 지문(SHA256:...). 같은 이름의 .pub 파일에서 읽고, 없으면 None."""
+    pub = key + ".pub"
+    if not os.path.isfile(pub):
+        return None
+    try:
+        r = subprocess.run([ssh_tool("ssh-keygen"), "-l", "-f", pub], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    parts = r.stdout.decode("utf-8", "replace").split()
+    return parts[1] if r.returncode == 0 and len(parts) >= 2 else None
+
+
+def passphrase_hint(server, now=None):
+    """접속이 거부됐을 때 붙일 안내. 암호를 건 키가 ssh-agent에 없으면 해결 방법을, 아니면 빈 문자열."""
+    key = server.get("key_file") or ""
+    if not key or not os.path.isfile(key):
+        return ""
+    now = time.time() if now is None else now
+    cached = _KEY_HINTS.get(key)
+    if cached and now - cached[0] < KEY_HINT_TTL:
+        return cached[1]
+    hint = ""
+    if key_has_passphrase(key):
+        agent = agent_fingerprints()
+        fingerprint = key_fingerprint(key)
+        if os.name == "nt":
+            start = ("ssh-agent 서비스가 꺼져 있으면 관리자 PowerShell에서 "
+                     "Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent 를 먼저 실행하세요. ")
+            add = "PowerShell에서 ssh-add \"%s\" 를 한 번 실행해 암호를 입력하면, 재부팅 뒤에도 다시 등록할 필요가 없습니다." % key
+        else:
+            start = "ssh-agent가 없으면 웹 UI를 실행하는 셸에서 eval \"$(ssh-agent)\" 로 먼저 띄우세요. "
+            add = "ssh-add \"%s\" 로 등록한 뒤 같은 셸에서 웹 UI를 실행하세요." % key
+        if agent is None:
+            hint = "SSH 키(%s)에 암호(passphrase)가 걸려 있는데 ssh-agent에 접속할 수 없습니다. %s%s" % (key, start, add)
+        elif (fingerprint and fingerprint not in agent) or (not fingerprint and not agent):
+            hint = "SSH 키(%s)에 암호(passphrase)가 걸려 있는데 ssh-agent에 등록돼 있지 않습니다. %s" % (key, add)
+    _KEY_HINTS[key] = (now, hint)
+    return hint
+
+
+def with_ssh_hint(server, code, out):
+    """접속이 거부된 출력(bytes)에 암호 키 안내를 덧붙입니다(ssh는 종료 코드 255, scp는 1)."""
+    if code != 0 and b"Permission denied (publickey" in out:
+        hint = passphrase_hint(server)
+        if hint:
+            out = out.rstrip(b"\r\n") + b"\n" + hint.encode("utf-8")
+    return out
+
+
 def ssh_extra_options():
     """로컬 ssh가 지원하는 경우에만 붙이는 옵션입니다.
 
@@ -496,7 +592,7 @@ def ssh_extra_options():
     global _SSH_EXTRA
     if _SSH_EXTRA is None:
         try:
-            ok = subprocess.run(["ssh", "-G", "-o", "WarnWeakCrypto=no", "kdump-tools-probe"],
+            ok = subprocess.run([ssh_tool("ssh"), "-G", "-o", "WarnWeakCrypto=no", "kdump-tools-probe"],
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, timeout=10).returncode == 0
         except (OSError, subprocess.SubprocessError):
@@ -514,7 +610,7 @@ def valid_ssh_target(target):
 def ssh_args(server):
     if not valid_ssh_target(server.get("target") or ""):
         raise ApiError(400, "서버 '%s'의 접속 대상이 올바르지 않습니다. 서버 설정을 확인해 주세요." % server.get("name", ""))
-    args = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+    args = [ssh_tool("ssh"), "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
             "-o", "StrictHostKeyChecking=accept-new"] + ssh_extra_options() + ["-p", str(server.get("port") or 22)]
     if server.get("key_file"):
         args += ["-i", server["key_file"]]
@@ -679,8 +775,8 @@ def ssh_run(server, argv, stdin=None, timeout=60, data=False):
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE if data else subprocess.STDOUT, timeout=timeout)
         if data and result.returncode != 0:
-            return result.returncode, result.stdout + result.stderr
-        return result.returncode, result.stdout
+            return result.returncode, with_ssh_hint(server, result.returncode, result.stdout + result.stderr)
+        return result.returncode, with_ssh_hint(server, result.returncode, result.stdout)
     except subprocess.TimeoutExpired:
         return 124, b"SSH timeout"
     except OSError as error:
@@ -864,7 +960,7 @@ def scp_download_args(server, remote_path, local_path):
     if ":" in host:
         host = "[%s]" % host
     remote = "/" + remote_path.replace("\\", "/")
-    return ["scp", "-q"] + options + ["%s%s:%s" % (user + "@" if user else "", host, remote), local_path]
+    return [ssh_tool("scp"), "-q"] + options + ["%s%s:%s" % (user + "@" if user else "", host, remote), local_path]
 
 
 # ---------------------------------------------------------------- 버전과 업그레이드
@@ -1292,7 +1388,7 @@ def scp_upload(server, local_path, remote_name, timeout=120):
         host = "[%s]" % host
     dest = "%s%s:%s" % (user + "@" if user else "", host, remote_name)
     try:
-        result = subprocess.run(["scp", "-q"] + options + [local_path, dest], stdin=subprocess.DEVNULL,
+        result = subprocess.run([ssh_tool("scp"), "-q"] + options + [local_path, dest], stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
         return result.returncode, result.stdout
     except subprocess.TimeoutExpired:
@@ -1917,6 +2013,11 @@ class Jobs:
         if watchdog:
             watchdog.cancel()
         code = proc.returncode
+        if code != 0 and any("Permission denied (publickey" in line for line in text_all[-10:]):
+            hint = passphrase_hint(server)
+            if hint:
+                job.log(hint)
+                text_all.append(hint)
         # 원격 timeout은 124(TERM) 또는 137(KILL)로 끝납니다. 다른 코드여도 제한 시간을 다 썼다면 시간 초과로 봅니다.
         if timeout and (expired.is_set() or code in (124, 137) or (code != 0 and time.time() - started >= timeout)):
             code = 124
@@ -2107,7 +2208,7 @@ class Jobs:
         job.phase = "분석 스크립트 보내는 중"
         code, out = scp_upload(server, local_path, name)
         if code != 0:
-            text = out.decode("utf-8", "replace").strip()
+            text = with_ssh_hint(server, code, out).decode("utf-8", "replace").strip()
             if text:
                 job.log(text)
             raise ApiError(502, "분석 스크립트를 서버로 보내지 못했습니다 (scp 종료 코드 %d)." % code)
@@ -2259,7 +2360,7 @@ class Jobs:
                                     "label": "%s / %s" % (human_size(got), human_size(size)),
                                     "elapsed": int(time.time() - started)}
                     time.sleep(1)
-                err = proc.communicate()[1].decode("utf-8", "replace").strip()
+                err = with_ssh_hint(server, proc.returncode or 1, proc.communicate()[1]).decode("utf-8", "replace").strip()
             got = os.path.getsize(part) if os.path.exists(part) else 0
             if job.cancelled:
                 raise JobCancelled()
