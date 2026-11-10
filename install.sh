@@ -177,6 +177,9 @@ check_dependencies() {
     while IFS='|' read -r cmd purpose; do
         if command -v "$cmd" >/dev/null 2>&1; then
             printf '  [OK]   %-9s %s\n' "$cmd" "$purpose"
+        elif [ "$cmd" = python3 ] && [ -x /usr/libexec/platform-python ]; then
+            # RHEL 8 최소 설치: python3 명령은 없지만 analyze-kdump가 platform-python을 대신 씁니다.
+            printf '  [OK]   %-9s %s (platform-python 사용)\n' "$cmd" "$purpose"
         else
             printf '  [없음] %-9s %s\n' "$cmd" "$purpose"
         fi
@@ -184,7 +187,7 @@ check_dependencies() {
 crash|vmcore 분석 (필수)
 whiptail|터미널 메뉴 UI (analyze-kdump-ui)
 less|메뉴에서 리포트 보기
-python3|LLM 분석
+python3|LLM 분석, JSON 요약
 curl|LLM API 호출
 ssh|원격 서버 분석
 EOF

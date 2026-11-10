@@ -10,7 +10,7 @@
 - `crash`
 - 분석 대상 `vmcore`
 - `vmcore`의 커널 버전과 일치하는 `vmlinux`
-- LLM 분석을 쓸 경우 `curl`, `python3`
+- LLM 분석과 JSON 요약을 쓸 경우 `curl`과 Python 3.6 이상. `python3`가 없으면 RHEL 8 최소 설치에도 있는 `/usr/libexec/platform-python`을 씁니다.
 - 분석 서버 메모리: `crash`가 커널 디버그 정보를 읽을 때 RHEL 9 커널 기준 약 1.5GB를 사용합니다. 메모리가 2GB 이하인 서버나 VM에서는 swap을 추가합니다. 메모리가 부족하면 `crash`가 OOM으로 강제 종료되고 종료 코드 `2`가 반환됩니다.
 
 RHEL 계열 시스템에서는 보통 `crash`와 `debuginfo-install`을 사용할 수 있어야 합니다.

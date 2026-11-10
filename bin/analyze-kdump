@@ -297,18 +297,47 @@ print_vmlinux_install_hint() {
     local package="kernel"
 
     echo "설치 예:"
-    if command -v apt-get >/dev/null 2>&1; then
-        echo "  # dbgsym(ddebs) 저장소가 설정되어 있어야 합니다."
-        echo "  apt-get install -y linux-image-$KVER-dbgsym   # 또는 linux-image-unsigned-$KVER-dbgsym"
-        echo "  # 설치 후 /usr/lib/debug/boot/vmlinux-$KVER 를 자동으로 사용합니다."
-        return
-    fi
+    # 커널 이름이 RHEL 계열(el8, el8uek 등)이면 apt가 있어도 RPM debuginfo를 안내합니다.
+    case "$KVER" in
+        *.el[0-9]*|*uek*) ;;
+        *)
+            if command -v apt-get >/dev/null 2>&1; then
+                echo "  # dbgsym(ddebs) 저장소가 설정되어 있어야 합니다."
+                echo "  apt-get install -y linux-image-$KVER-dbgsym   # 또는 linux-image-unsigned-$KVER-dbgsym"
+                echo "  # 설치 후 /usr/lib/debug/boot/vmlinux-$KVER 를 자동으로 사용합니다."
+                return
+            fi ;;
+    esac
 
     case "$KVER" in
         *uek*) package="kernel-uek" ;;
-        *.rt*) package="kernel-rt" ;;
+        *.rt*|*+rt*) package="kernel-rt" ;;
     esac
-    echo "  dnf debuginfo-install -y $package-$KVER"
+    local id="" major=""
+    if [ -r /etc/os-release ]; then
+        id=$(sed -n 's/^ID=//p' /etc/os-release | tr -d '"')
+        major=$(sed -n 's/^VERSION_ID=//p' /etc/os-release | tr -d '"' | cut -d. -f1)
+    fi
+    case "$id" in
+        rhel)
+            echo "  # RHEL: 구독의 debug 저장소를 먼저 켭니다."
+            echo "  subscription-manager repos --enable rhel-$major-for-$(uname -m)-baseos-debug-rpms   # RHEL 7은 rhel-7-server-debug-rpms"
+            ;;
+        ol)
+            echo "  # Oracle Linux: debuginfo는 oss.oracle.com의 별도 저장소에 있습니다. 다음 내용으로 /etc/yum.repos.d/oracle-debuginfo.repo를 만듭니다."
+            echo "  #   [ol${major}_debuginfo]"
+            echo "  #   baseurl=https://oss.oracle.com/ol${major}/debuginfo/"
+            echo "  #   gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-oracle"
+            echo "  #   gpgcheck=1"
+            echo "  #   enabled=1"
+            ;;
+    esac
+    if command -v dnf >/dev/null 2>&1; then
+        echo "  dnf debuginfo-install -y $package-$KVER"
+    else
+        echo "  # RHEL·CentOS 7: debuginfo-install은 yum-utils에 들어 있습니다."
+        echo "  yum install -y yum-utils && debuginfo-install -y $package-$KVER"
+    fi
     echo "  # 설치 후 /usr/lib/debug/lib/modules/$KVER/vmlinux 를 자동으로 사용합니다."
     echo "  # 별도로 보관하려면:"
     echo "  mkdir -p $VMLINUX_BASE/$KVER"
@@ -515,7 +544,13 @@ classify_crash() {
         *NMI*)
             set_crash_type nmi "NMI" 'NMI' ;;
         *"Fatal exception"*)
-            set_crash_type oops "커널 oops (BUG/잘못된 메모리 접근)" "$OOPS_RE" first ;;
+            # 오래된 커널(RHEL 7의 3.10 등)은 SysRq-c를 NULL 역참조 oops로 일으켜 'Fatal exception'으로 패닉합니다.
+            # 직전에 SysRq 트리거 로그(또는 sysrq_handle_crash)가 있으면 수동 덤프로 봅니다.
+            if grep -qE 'sysrq: Trigger a crash|SysRq : Trigger a crash|sysrq_handle_crash' "$DMESG_FILE"; then
+                set_crash_type sysrq "수동 덤프 (sysrq-trigger)" 'sysrq: Trigger a crash|SysRq : Trigger a crash'
+            else
+                set_crash_type oops "커널 oops (BUG/잘못된 메모리 접근)" "$OOPS_RE" first
+            fi ;;
         "")
             # 패닉 메시지가 없는 로그(잘린 로그 등)는 대표 문구로 판단합니다.
             if grep -qE 'sysrq: Trigger a crash|SysRq : Trigger a crash' "$DMESG_FILE"; then
@@ -539,6 +574,11 @@ classify_crash() {
     if [ "$CRASH_TYPE" = oops ]; then
         CRASH_RIP=$(grep -m1 -oE 'RIP: [0-9a-f]{4}:[A-Za-z_][A-Za-z0-9_.]*\+0x[0-9a-f]+' "$DMESG_FILE" \
             | sed 's/^RIP: [0-9a-f]*://' || true)
+        if [ -z "$CRASH_RIP" ]; then
+            # 오래된 커널(RHEL 7 등) 형식: "RIP: [<ffffffff81234567>]  func+0x16/0x20"
+            CRASH_RIP=$(grep -m1 -E '(^|[] ])R?IP: +([0-9a-f]{4}:)?\[<' "$DMESG_FILE" \
+                | grep -oE '\] +[A-Za-z_][A-Za-z0-9_.]*\+0x[0-9a-f]+' | tail -n 1 | sed 's/^\] *//' || true)
+        fi
         case "$CRASH_RIP" in
             *[!A-Za-z0-9_.+x]*) CRASH_RIP="" ;;
         esac
@@ -653,8 +693,8 @@ write_report_json() {
     local json="${REPORT_FILE%.txt}.json"
 
     is_enabled "${REPORT_JSON:-1}" || return 0
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo "python3가 없어 JSON 요약은 만들지 않았습니다." >&2
+    if [ -z "$PYTHON" ]; then
+        echo "Python 3.6 이상(python3 또는 /usr/libexec/platform-python)이 없어 JSON 요약은 만들지 않았습니다." >&2
         return 0
     fi
     REPORT_FILE="$REPORT_FILE" JSON_FILE="$json" CRASH_STATUS="$CRASH_STATUS" \
@@ -662,7 +702,7 @@ write_report_json() {
     J_ARCH_VMCORE="${VMCORE_ARCH:-}" J_ARCH_VMLINUX="${VMLINUX_ARCH:-}" J_ARCH_HOST="${HOST_ARCH:-}" \
     J_TYPE="${CRASH_TYPE:-unknown}" J_TYPE_LABEL="${CRASH_TYPE_LABEL:-}" J_EVIDENCE="${CRASH_EVIDENCE:-}" \
     J_DMESG="$(dmesg_source_path)" J_MODULES="$(loaded_module_names)" \
-    python3 - <<'PY' || echo "JSON 요약을 만들지 못했습니다." >&2
+    "$PYTHON" - <<'PY' || echo "JSON 요약을 만들지 못했습니다." >&2
 import json
 import os
 import re
@@ -793,6 +833,19 @@ run_crash_report() {
     } >> "$REPORT_FILE"
 
     return "$status"
+}
+
+# Python 3.6 이상을 찾습니다. RHEL 8 최소 설치에는 python3 명령이 없고 /usr/libexec/platform-python(3.6)만
+# 있어서 함께 찾습니다. 찾지 못하면 빈 문자열(JSON 요약·LLM 분석은 건너뜀).
+find_python() {
+    local p
+    for p in "$(command -v python3 2>/dev/null)" /usr/libexec/platform-python; do
+        if [ -n "$p" ] && [ -x "$p" ] && "$p" -c 'import sys; sys.exit(sys.version_info < (3, 6))' 2>/dev/null; then
+            printf '%s' "$p"
+            return 0
+        fi
+    done
+    return 1
 }
 
 is_enabled() {
@@ -1106,7 +1159,7 @@ curl_config_escape() {
 write_llm_payload() {
     # "$1"은 .system·.input 파일 이름을 만드는 데만 쓰고 읽지 않습니다.
     # shellcheck disable=SC2094
-    python3 -"$REPORT_FILE" "$LLM_PROVIDER" "$LLM_MODEL" "$LLM_MAX_REPORT_CHARS" "$LLM_MAX_TOKENS" "${LLM_PROMPT_FILE:-}" "$LLM_TEMPERATURE" "$(resolve_openai_token_param)" "$LLM_MASK_SENSITIVE" "$1" > "$1" <<'PY'
+    "$PYTHON" - "$REPORT_FILE" "$LLM_PROVIDER" "$LLM_MODEL" "$LLM_MAX_REPORT_CHARS" "$LLM_MAX_TOKENS" "${LLM_PROMPT_FILE:-}" "$LLM_TEMPERATURE" "$(resolve_openai_token_param)" "$LLM_MASK_SENSITIVE" "$1" > "$1" <<'PY'
 import io
 import json
 import re
@@ -1315,7 +1368,7 @@ PY
 }
 
 extract_llm_content() {
-    python3 - "$LLM_PROVIDER" "$1" <<'PY'
+    "$PYTHON" - "$LLM_PROVIDER" "$1" <<'PY'
 import io
 import json
 import sys
@@ -1483,8 +1536,8 @@ append_llm_analysis() {
         echo
     } > "$ANALYSIS_FILE"
 
-    if ! command -v python3 >/dev/null 2>&1; then
-        llm_skip "python3 명령을 찾을 수 없습니다."
+    if [ -z "$PYTHON" ]; then
+        llm_skip "Python 3.6 이상(python3 또는 /usr/libexec/platform-python)을 찾을 수 없습니다."
         return 0
     fi
 
@@ -1625,6 +1678,9 @@ CLI_REPORT_MODE="$REPORT_MODE"
 CLI_LLM_MODE="$LLM_MODE"
 load_config
 REPORT_MODE="$CLI_REPORT_MODE"
+
+# JSON 요약과 LLM 분석에 쓸 Python (없으면 빈 값: 해당 기능만 건너뜀)
+PYTHON=$(find_python || true)
 
 # 우선순위: 명령줄 옵션 > 환경변수 > conf 파일 > 스크립트 기본값
 [ -n "$ENV_VMLINUX_BASE" ] && VMLINUX_BASE="$ENV_VMLINUX_BASE"
