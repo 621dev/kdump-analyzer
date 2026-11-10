@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 import urllib.error
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -536,6 +537,26 @@ class PassphraseHintTest(unittest.TestCase):
         self.assertIn("ssh-add".encode(), out)
         self.assertEqual(webui.with_ssh_hint(server, 255, b"Connection timed out"), b"Connection timed out")
         self.assertEqual(webui.with_ssh_hint(server, 0, b"Permission denied (publickey)"), b"Permission denied (publickey)")
+
+    # 한국어 Windows의 ssh가 실제로 출력한 줄 ('알려진 호스트가 없습니다.'를 CP949로 쓴 바이트의 8진수 표기)
+    WIN_KO = (b"ssh: Could not resolve hostname db01.invalid: \\276\\313\\267\\301\\301\\370 "
+              b"\\310\\243\\275\\272\\306\\256\\260\\241 \\276\\370\\275\\300\\264\\317\\264\\331. \r\n")
+
+    def test_ssh_message_octal_restored(self):
+        with mock.patch.object(webui.locale, "getpreferredencoding", return_value="cp949"):
+            out = webui.with_ssh_hint(self.server(self.plain), 255, self.WIN_KO)
+            self.assertEqual(out.decode("utf-8").strip(),
+                             "ssh: Could not resolve hostname db01.invalid: 알려진 호스트가 없습니다.")
+            # UTF-8 바이트였으면 UTF-8로 읽습니다('한글').
+            self.assertEqual(webui.ssh_readable("ssh: x: \\355\\225\\234\\352\\270\\200"), "ssh: x: 한글")
+
+    def test_ssh_message_leaves_other_output(self):
+        with mock.patch.object(webui.locale, "getpreferredencoding", return_value="cp949"):
+            remote = "crash> rd \\276\\313 \\310\\243\nscp: open \\377\\377: x"
+            # 원격 명령의 출력 줄은 그대로, 어느 인코딩으로도 못 읽는 바이트도 그대로 둡니다.
+            self.assertEqual(webui.ssh_readable(remote), remote)
+            # 성공한 출력(종료 코드 0)은 손대지 않습니다.
+            self.assertEqual(webui.with_ssh_hint(self.server(self.plain), 0, self.WIN_KO), self.WIN_KO)
 
     def test_windows_prefers_windows_openssh(self):
         path = webui.ssh_tool("ssh")
