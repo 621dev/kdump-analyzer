@@ -369,12 +369,14 @@ table.list input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; 
 /* 버전·업데이트 화면의 서버 표: 카드가 좁아지면 표 대신 서버마다 한 덩어리로 쌓아 버튼이 카드 밖으로 넘치지 않게 합니다. */
 #srv-versions { container-type: inline-size; }
 @container (max-width: 760px) {
-  .srv-ver-table thead { display: none; }
-  .srv-ver-table, .srv-ver-table tbody { display: block; }
-  .srv-ver-table tr { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; padding: 12px 0; border-bottom: 1px solid var(--line); }
-  .srv-ver-table tr:last-child { border-bottom: none; }
-  .srv-ver-table td { display: block; padding: 0; border-bottom: none; }
-  .srv-ver-table td:first-child { flex: 1 1 100%; }
-  .srv-ver-table td:last-child { flex: 1 1 100%; margin-top: 6px; }
-  .srv-ver-table td:last-child .row-actions { justify-content: flex-start; }
+  /* table.list의 칸 테두리(table.list td)보다 우선하도록 table.list.srv-ver-table로 씁니다.
+     칸마다 테두리가 남으면 줄 길이가 칸 폭만큼씩이라 어긋나 보입니다. 구분선은 행에만 긋습니다. */
+  table.list.srv-ver-table thead { display: none; }
+  table.list.srv-ver-table, table.list.srv-ver-table tbody { display: block; }
+  table.list.srv-ver-table tr { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+  table.list.srv-ver-table tr:last-child { border-bottom: none; }
+  table.list.srv-ver-table td { display: block; padding: 0; border-bottom: none; }
+  table.list.srv-ver-table td:first-child { flex: 1 1 100%; }
+  table.list.srv-ver-table td:last-child { flex: 1 1 100%; margin-top: 6px; }
+  table.list.srv-ver-table td:last-child .row-actions { justify-content: flex-start; }
 }
