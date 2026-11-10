@@ -59,7 +59,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(APP_DIR)
 # 화면(app.js)과 서버가 주고받는 API의 판. API를 바꿀 때 app.js의 API_LEVEL과 함께 올립니다.
 # 업데이트 뒤 서버를 다시 시작하지 않으면 화면이 이 값의 차이로 알아채고 안내합니다.
-API_LEVEL = 9
+API_LEVEL = 10
 
 # 화면의 "다시 시작"은 감시 프로세스가 서버를 새 코드로 다시 띄우는 방식입니다.
 RESTART_EXIT = 75                     # 서버가 이 코드로 끝나면 감시 프로세스가 다시 띄웁니다
@@ -327,6 +327,48 @@ class Store:
         if not os.path.exists(path):
             raise ApiError(404, "파일을 찾을 수 없습니다: %s" % name)
         return path
+
+    def delete_results(self, server, names, busy=()):
+        """웹 UI에 저장된 리포트·분석 파일을 지웁니다. 삭제한 서버의 기록도 지울 수 있습니다.
+
+        - 리포트를 고르면 그 JSON 요약과, 그 리포트로 만든 LLM 분석도 함께 지웁니다.
+        - 분석을 고르면 그 분석 파일만 지웁니다.
+        - busy(진행 중인 작업이 쓰는 파일 이름)에 걸리면 아무것도 지우지 않습니다.
+        서버의 덤프와, 분석 서버에 남은 리포트(설치 실행의 logs)는 건드리지 않습니다.
+        """
+        if not isinstance(names, list) or not 1 <= len(names) <= 500:
+            raise ApiError(400, "지울 파일을 1~500개 골라 주세요.")
+        for name in names:
+            self.result_path(server, name)   # 이름 검사와 존재 확인
+        folder = self.report_dir(server)
+        targets = []
+        reports = [n for n in names if "-analysis-" not in n]
+        for name in names:
+            if name not in targets:
+                targets.append(name)
+        if reports:
+            for name in os.listdir(folder):
+                if "-analysis-" not in name or not FILE_RE.match(name) or name in targets:
+                    continue
+                source = parse_result_head(os.path.join(folder, name)).get("source_report", "")
+                if source and re.split(r"[\\/]", source)[-1] in reports:
+                    targets.append(name)
+        blocked = [n for n in targets if n in busy]
+        if blocked:
+            raise ApiError(409, "진행 중인 작업이 쓰고 있어 지울 수 없습니다: %s. 작업이 끝난 뒤 다시 시도해 주세요."
+                           % ", ".join(blocked))
+        deleted = []
+        with self.lock:
+            for name in targets:
+                full = os.path.join(folder, name)
+                extra = [summary_path(full)] if "-analysis-" not in name else []
+                for path in [full] + extra:
+                    try:
+                        os.remove(path)
+                    except FileNotFoundError:
+                        continue
+                deleted.append(name)
+        return deleted
 
 
 HEAD_KEYS = ("vmcore", "kernel", "generated", "provider", "model", "source_report")
@@ -2082,6 +2124,13 @@ class Jobs:
             return {j.vmcore for j in self.items.values()
                     if j.server == server_name and j.vmcore and j.status in ("queued", "running")}
 
+    def active_results(self, server_name):
+        """진행 중이거나 대기 중인 작업이 읽거나 쓰는 리포트·분석 파일 이름."""
+        with self.lock:
+            return {n for j in self.items.values()
+                    if j.server == server_name and j.status in ("queued", "running")
+                    for n in (j.report, j.analysis) if n}
+
     def run_report(self, job, llm):
         server = self.store.server(job.server)
         with self.server_slot(server["name"]).hold(job):
@@ -2916,6 +2965,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             server = query.get("server", [""])[0]
             store.server(server)
             return self._json(200, {"results": store.results(server)})
+        if parts == ["results", "delete"] and method == "POST":
+            body = self._body()
+            server = body.get("server", "")
+            if not NAME_RE.match(server or ""):
+                raise ApiError(400, "잘못된 서버 이름입니다.")
+            deleted = store.delete_results(server, body.get("names"), busy=app.jobs.active_results(server))
+            return self._json(200, {"deleted": deleted})
         if parts == ["history"] and method == "GET":
             server = query.get("server", [""])[0]
             if server and not NAME_RE.match(server):

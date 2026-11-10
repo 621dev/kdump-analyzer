@@ -128,6 +128,65 @@ class ExportTest(unittest.TestCase):
             self.store.export_data("db01", "../secrets/x.txt")
 
 
+class DeleteResultsTest(unittest.TestCase):
+    """리포트 삭제: 리포트를 지우면 JSON 요약과 그 리포트의 LLM 분석도 지우고, 다른 리포트는 남깁니다."""
+
+    REPORT = ExportTest.REPORT
+    tearDown = ExportTest.tearDown
+    add_analysis = ExportTest.add_analysis
+    OTHER = "kdump-report-20261109-110000-2.txt"
+
+    def setUp(self):  # ExportTest의 준비에 다른 리포트와 그 분석을 더합니다.
+        ExportTest.setUp(self)
+        self.add_analysis("kdump-analysis-20261109-100000-1.txt", "판정: 첫 분석", 1_000)
+        self.add_analysis("kdump-analysis-20261109-100000-1-2.txt", "판정: 다시 분석", 2_000)
+        with open(os.path.join(self.folder, self.OTHER), "w", encoding="utf-8") as f:
+            f.write(self.REPORT)
+        with open(os.path.join(self.folder, "kdump-analysis-20261109-110000-2.txt"), "w", encoding="utf-8") as f:
+            f.write("kdump llm analysis\nsource_report: /x/%s\n\n판정: 다른 덤프\n" % self.OTHER)
+
+    def files(self):
+        return sorted(os.listdir(self.folder))
+
+    def test_report_with_summary_and_analyses(self):
+        deleted = self.store.delete_results("db01", [self.report])
+        self.assertEqual(sorted(deleted), ["kdump-analysis-20261109-100000-1-2.txt",
+                                           "kdump-analysis-20261109-100000-1.txt", self.report])
+        self.assertEqual(self.files(), ["kdump-analysis-20261109-110000-2.txt", self.OTHER])
+        self.assertEqual([r["report"]["name"] for r in self.store.history("db01")], [self.OTHER])
+
+    def test_analysis_only(self):
+        self.store.delete_results("db01", ["kdump-analysis-20261109-100000-1-2.txt"])
+        self.assertIn(self.report, self.files())
+        self.assertIn("kdump-report-20261109-100000-1.json", self.files())
+        self.assertIn("kdump-analysis-20261109-100000-1.txt", self.files())
+        self.assertNotIn("kdump-analysis-20261109-100000-1-2.txt", self.files())
+
+    def test_busy_file_blocks_everything(self):
+        before = self.files()
+        with self.assertRaises(webui.ApiError) as ctx:
+            self.store.delete_results("db01", [self.report], busy={"kdump-analysis-20261109-100000-1.txt"})
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(self.files(), before)
+
+    def test_rejects_bad_names(self):
+        for names in ([], ["../secrets/api-key.txt"], ["kdump-report-none.txt"], "kdump-report-x.txt"):
+            with self.assertRaises(webui.ApiError):
+                self.store.delete_results("db01", names)
+        with self.assertRaises(webui.ApiError):
+            self.store.delete_results("../db01", [self.report])
+        self.assertIn(self.report, self.files())
+
+    def test_active_results(self):
+        jobs = webui.Jobs(self.store)
+        running = webui.Job("reanalyze", "db01", report=self.report)
+        done = webui.Job("reanalyze", "db01", report=self.OTHER)
+        done.status = "done"
+        other = webui.Job("reanalyze", "web01", report="kdump-report-x.txt")
+        jobs.items = {j.id: j for j in (running, done, other)}
+        self.assertEqual(jobs.active_results("db01"), {self.report})
+
+
 class AutoWatcherTest(unittest.TestCase):
     """새 덤프 자동 분석: 기준 기록, 새 덤프, 쓰는 중인 덤프, 덮어쓴 덤프, 끄기, 접속 실패, 확인 주기."""
 
