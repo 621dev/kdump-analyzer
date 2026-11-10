@@ -1,7 +1,7 @@
 "use strict";
 
 // 서버(kdump-webui.py)의 API_LEVEL과 같아야 합니다. 다르면 업데이트 뒤 서버를 다시 시작하지 않은 것입니다.
-const API_LEVEL = 9;
+const API_LEVEL = 10;
 
 // ---------------------------------------------------------------- 상태와 공통
 
@@ -683,6 +683,24 @@ function typePill(type, label) {
 }
 
 // 기록 하나 = 리포트 한 건 + 그 리포트로 만든 LLM 분석들(최신 순)
+// 웹 UI에 저장된 리포트·분석을 지웁니다. 리포트를 지우면 그 JSON 요약과 그 리포트로 만든 LLM 분석도 함께 지웁니다.
+async function deleteResults(serverName, names, what) {
+  if (!confirm(`${serverName}: ${what}\n\n웹 UI에 저장된 파일만 지우며 되돌릴 수 없습니다. 서버의 덤프는 그대로입니다.`)) return false;
+  try {
+    const r = await api("POST", "/api/results/delete", { server: serverName, names });
+    toast(`${r.deleted.length}개 파일을 지웠습니다.`);
+    return true;
+  } catch (e) {
+    toast(e.message);
+    return false;
+  }
+}
+
+function recordDeleteText(r) {
+  if (!r.report) return `원본 리포트가 없는 LLM 분석 ${r.analyses.length}건을 지웁니다.`;
+  return r.analyses.length ? `리포트와 이 리포트의 LLM 분석 ${r.analyses.length}건을 지웁니다.` : "리포트를 지웁니다.";
+}
+
 function recordList(records, showServer) {
   const list = h('<div class="records"></div>');
   for (const r of records) {
@@ -720,6 +738,7 @@ function recordList(records, showServer) {
         ${latest ? '<button class="btn small primary" data-act="analysis">분석 보기</button>' : ""}
         ${rep ? '<button class="btn small" data-act="report">리포트</button>' : ""}
         ${rep && known ? `<button class="btn small" data-act="llm">${latest ? "다시 분석" : "LLM 분석"}</button>` : ""}
+        <button class="btn small danger" data-act="delete" title="웹 UI에 저장된 이 리포트와 LLM 분석을 지웁니다">삭제</button>
       </div>
     </div>`);
     item.querySelectorAll("[data-act]").forEach(b => b.addEventListener("click", e => {
@@ -728,6 +747,10 @@ function recordList(records, showServer) {
       if (act === "analysis") openFile(r.server, latest.name);
       if (act === "report") openFile(r.server, rep.name);
       if (act === "llm") startJob({ kind: "reanalyze", server: r.server, report: rep.name });
+      if (act === "delete") {
+        const names = rep ? [rep.name] : r.analyses.map(a => a.name);
+        deleteResults(r.server, names, recordDeleteText(r)).then(ok => { if (ok) renderMain(); });
+      }
     }));
     item.querySelectorAll("[data-older]").forEach(b => b.addEventListener("click", e => {
       e.stopPropagation();
@@ -1384,6 +1407,16 @@ async function renderViewer(main, serverName) {
   const exportBtn = h('<button class="btn small" title="요약, LLM 분석, 원본 리포트를 HTML 파일 한 장으로 저장합니다">보고서로 내보내기</button>');
   exportBtn.addEventListener("click", () => exportReport(serverName, name));
   actions.append(exportBtn);
+  const delBtn = h(`<button class="btn small danger" title="웹 UI에 저장된 이 파일을 지웁니다">삭제</button>`);
+  delBtn.addEventListener("click", async () => {
+    const what = isAnalysis ? "이 LLM 분석을 지웁니다. 원본 리포트는 남습니다."
+      : "이 리포트와, 이 리포트로 만든 LLM 분석을 모두 지웁니다.";
+    if (!(await deleteResults(serverName, [name], what))) return;
+    state.view = null;
+    if (!fromHistory) state.tab = "results";
+    renderMain();
+  });
+  actions.append(delBtn);   // 삭제는 늘 맨 끝에 둡니다(아래 버튼은 그 앞에 넣음).
 
   if (isAnalysis) {
     const split = content.indexOf("\n\n");
@@ -1395,7 +1428,7 @@ async function renderViewer(main, serverName) {
     if (reportName) {
       const btn = h('<button class="btn small">원본 리포트 보기</button>');
       btn.addEventListener("click", () => openFile(serverName, reportName));
-      actions.append(btn);
+      actions.insertBefore(btn, delBtn);
     }
     const shortMeta = meta.split("\n").filter(l => !l.startsWith("source_report:") && !l.startsWith("kdump llm")).join("\n");
     card.append(h(`<div class="analysis-meta">${esc(shortMeta).replace(/\n/g, " · ")}</div>`));
@@ -1406,7 +1439,7 @@ async function renderViewer(main, serverName) {
   if (state.servers.some(s => s.name === serverName)) {
     const btn = h('<button class="btn small primary">LLM으로 분석</button>');
     btn.addEventListener("click", () => startJob({ kind: "reanalyze", server: serverName, report: name }));
-    actions.append(btn);
+    actions.insertBefore(btn, delBtn);
   }
 
   const parts = content.split(/^===== (.+?) =====$/m);
