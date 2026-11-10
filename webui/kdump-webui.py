@@ -699,7 +699,9 @@ def probe_method(server):
         out = out.strip().splitlines()[-1:] or [""]
         return out[0] if code == 0 else ""
     code, out = ssh_text(server, ["sh", "-c", with_install_fallback(
-                                  'if [ -x "$1" ]; then echo installed; '
+                                  # 원격 경로가 명령 이름(analyze-kdump)이면 등록된 위치로 풉니다.
+                                  'case "$1" in */*) t=$1 ;; *) t=$(command -v "$1" 2>/dev/null || printf %s "$1") ;; esac; '
+                                  'if [ -x "$t" ]; then echo installed; '
                                   'elif command -v crash >/dev/null 2>&1; then echo upload; '
                                   'else echo none; fi', 1), "sh", server["tool"]], timeout=30)
     out = out.strip().splitlines()[-1:] or [""]
@@ -711,7 +713,9 @@ def test_server(server):
         return win_test_server(server)
     code, out = ssh_text(server, ["sh", "-c", with_install_fallback("""
 echo "host=$(hostname)"; echo "user=$(id -un)"
-if [ -x "$1" ]; then echo "tool=$("$1" --version 2>/dev/null | grep '^analyze-kdump ' | head -n 1)"; [ -n "$("$1" --version 2>/dev/null | grep '^analyze-kdump ')" ] || echo "tool=installed (version unknown)"; else echo "tool="; fi
+# 원격 경로가 경로가 아닌 명령 이름(analyze-kdump)이면 등록된 위치로 풉니다.
+case "$1" in */*) t=$1 ;; *) t=$(command -v "$1" 2>/dev/null || printf %s "$1") ;; esac
+if [ -x "$t" ]; then echo "tool=$("$t" --version 2>/dev/null | grep '^analyze-kdump ' | head -n 1)"; [ -n "$("$t" --version 2>/dev/null | grep '^analyze-kdump ')" ] || echo "tool=installed (version unknown)"; else echo "tool="; fi
 # crash --version은 실행 중 /dev/mem을 열어 보다 Secure Boot lockdown 경고를 커널 로그에 남기므로 패키지 정보로 버전을 읽습니다.
 if command -v crash >/dev/null 2>&1; then v=$(rpm -q --qf '%{VERSION}-%{RELEASE}' crash 2>/dev/null) || v=$(dpkg-query -W -f='${Version}' crash 2>/dev/null) || v=; echo "crash=crash ${v:-installed}"; else echo "crash="; fi
 echo "vmcores=$(for f in "$2"/*/vmcore "$2"/*/vmcore.flat "$2"/*/dump.[0-9]*; do [ -f "$f" ] || continue; case "$f" in */vmcore) ;; *) [ -f "${f%/*}/vmcore" ] && continue ;; esac; echo "$f"; done | wc -l)"
