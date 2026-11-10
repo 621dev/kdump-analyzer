@@ -4,6 +4,16 @@
 GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리스)으로 받을 수 있습니다.
 1.18.3까지는 프로젝트 이름이 `kdump-tools`였습니다. 아래 기록의 링크는 GitHub이 새 주소로 연결합니다.
 
+## [1.24.1] - 2026-11-10
+
+### 고침
+- 서버 설정의 원격 analyze-kdump 경로가 경로가 아닌 명령 이름(`analyze-kdump`)이면, 설치돼 있어도 연결 테스트는 '없음', 분석 방식 자동 선택은 무설치 실행으로 판단하던 문제 (웹 UI, 터미널 메뉴) (#46)
+- 웹 UI: 좁은 화면에서 덤프 목록의 경로가 한 글자씩 세로로 늘어서던 문제. 버튼은 두 줄로 나뉘고, 아주 좁으면 표 안에서만 옆으로 스크롤합니다 (#48)
+
+### 바뀜
+- 웹 UI: 암호(passphrase)를 건 SSH 키가 ssh-agent에 등록돼 있지 않아 접속이 거부되면, `Permission denied` 대신 `ssh-add` 명령과 ssh-agent 서비스 켜기를 안내합니다(오류 메시지, 연결 테스트, 작업 로그) (#47)
+- 웹 UI: Windows에서는 Windows OpenSSH(`System32\OpenSSH`)의 `ssh`·`scp`를 먼저 씁니다. Git Bash에서 실행해도 Windows ssh-agent를 쓸 수 있습니다 (#47)
+
 ## [1.24.0] - 2026-11-10
 
 ### 추가
@@ -249,7 +259,8 @@ GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리�
 - 설치 스크립트(명령 등록)와 상황별 원격 분석 방식 (#3)
 - 분석 진행 표시와 메뉴의 이전 화면 이동 (#4)
 
-[1.24.0]: https://github.com/621dev/kdump-analyzer/compare/v1.23.1...main
+[1.24.1]: https://github.com/621dev/kdump-analyzer/compare/v1.24.0...main
+[1.24.0]: https://github.com/621dev/kdump-analyzer/compare/v1.23.1...v1.24.0
 [1.23.1]: https://github.com/621dev/kdump-analyzer/compare/v1.23.0...v1.23.1
 [1.23.0]: https://github.com/621dev/kdump-analyzer/compare/v1.22.0...v1.23.0
 [1.22.0]: https://github.com/621dev/kdump-analyzer/compare/v1.21.0...v1.22.0
