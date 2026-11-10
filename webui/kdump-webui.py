@@ -60,12 +60,14 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(APP_DIR)
 # 화면(app.js)과 서버가 주고받는 API의 판. API를 바꿀 때 app.js의 API_LEVEL과 함께 올립니다.
 # 업데이트 뒤 서버를 다시 시작하지 않으면 화면이 이 값의 차이로 알아채고 안내합니다.
-API_LEVEL = 10
+API_LEVEL = 11
 
 # 화면의 "다시 시작"은 감시 프로세스가 서버를 새 코드로 다시 띄우는 방식입니다.
 RESTART_EXIT = 75                     # 서버가 이 코드로 끝나면 감시 프로세스가 다시 띄웁니다
 ENV_WORKER = "KDUMP_WEBUI_WORKER"     # 감시 프로세스가 띄운 서버임을 표시
 ENV_TOKEN = "KDUMP_WEBUI_TOKEN"       # 다시 시작해도 같은 토큰(브라우저 쿠키 유지)
+AUTO_LOG = "auto-log.json"            # 새 덤프 자동 분석이 끝낸 작업 기록(데이터 폴더)
+AUTO_LOG_MAX = 200
 ENV_PORT = "KDUMP_WEBUI_PORT"         # 다시 시작해도 같은 포트
 STATIC_DIR = os.path.join(APP_DIR, "static")
 WIN_SCRIPT = os.path.join(os.path.dirname(APP_DIR), "winbin", "analyze-windump.ps1")
@@ -272,6 +274,9 @@ class Store:
                 records.append(self._record(srv, rep, grouped.pop(name, [])))
             for items in grouped.values():  # 원본 리포트가 지워진 분석
                 records.append(self._record(srv, None, items))
+        auto = self.auto_reports()
+        for record in records:
+            record["auto"] = bool(record["report"]) and (record["server"], record["report"]["name"]) in auto
         records.sort(key=lambda r: r["time"], reverse=True)
         return records
 
@@ -328,6 +333,43 @@ class Store:
         if not os.path.exists(path):
             raise ApiError(404, "파일을 찾을 수 없습니다: %s" % name)
         return path
+
+    def add_auto_log(self, entry):
+        """새 덤프 자동 분석이 끝낸 작업(성공·실패·취소)을 auto-log.json에 남깁니다. 최근 AUTO_LOG_MAX건만 둡니다."""
+        with self.lock:
+            log = self._load(AUTO_LOG, [])
+            if not isinstance(log, list):
+                log = []
+            log.append(entry)
+            self._save(AUTO_LOG, log[-AUTO_LOG_MAX:])
+
+    def auto_log(self, limit=50):
+        """최근 자동 분석 기록(최신 순). 리포트가 남아 있으면 장애 유형을 붙이고, 지워졌으면 표시합니다."""
+        log = self._load(AUTO_LOG, [])
+        if not isinstance(log, list):
+            return []
+        items = []
+        for entry in reversed(log[-AUTO_LOG_MAX:]):
+            if not isinstance(entry, dict) or not NAME_RE.match(str(entry.get("server", ""))):
+                continue
+            item = dict(entry)
+            folder = os.path.join(self.dir, "reports", item["server"])
+            for key in ("report", "analysis"):
+                name = item.get(key)
+                item[key + "_exists"] = bool(name and FILE_RE.match(name) and os.path.isfile(os.path.join(folder, name)))
+            if item["report_exists"]:
+                head = parse_result_head(os.path.join(folder, item["report"]))
+                item["type"], item["type_label"] = head.get("type", ""), head.get("type_label", "")
+            items.append(item)
+            if len(items) >= limit:
+                break
+        return items
+
+    def auto_reports(self):
+        """자동 분석이 만든 리포트 (서버, 파일 이름)."""
+        log = self._load(AUTO_LOG, [])
+        return {(e.get("server"), e.get("report")) for e in log if isinstance(e, dict) and e.get("report")} \
+            if isinstance(log, list) else set()
 
     def delete_results(self, server, names, busy=()):
         """웹 UI에 저장된 리포트·분석 파일을 지웁니다. 삭제한 서버의 기록도 지울 수 있습니다.
@@ -2068,6 +2110,14 @@ class Jobs:
             job.finished = time.time()
             if job.error:
                 job.log("오류: " + job.error)
+            if job.auto:
+                try:
+                    self.store.add_auto_log({
+                        "id": job.id, "server": job.server, "vmcore": job.vmcore, "kind": job.kind,
+                        "status": job.status, "started": job.started, "finished": job.finished,
+                        "report": job.report, "analysis": job.analysis, "error": job.error})
+                except Exception as error:  # noqa: BLE001 - 기록을 못 남겨도 작업 결과는 그대로 둡니다.
+                    print("자동 분석 기록을 남기지 못했습니다: %s" % error, file=sys.stderr)
 
     # ---- crash 리포트 생성
 
@@ -2847,6 +2897,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if parts == ["auto"] and method == "GET":
             return self._json(200, {"status": app.auto.snapshot(),
                                     "jobs": [j for j in app.jobs.recent() if j.get("auto")]})
+        if parts == ["auto", "log"] and method == "GET":
+            # 최근 자동 분석: 끝난 작업 기록(auto-log.json)과 지금 진행 중이거나 대기 중인 자동 작업
+            active = [j for j in app.jobs.recent() if j.get("auto") and j.get("status") in ("queued", "running")]
+            return self._json(200, {"log": store.auto_log(), "active": active})
         if parts == ["auto", "check"] and method == "POST":
             app.auto.tick(force=True)
             return self._json(200, {"status": app.auto.snapshot(),
