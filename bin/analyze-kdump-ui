@@ -330,7 +330,8 @@ method_label() {
 probe_method() {
     local out
     out=$(remote_run "$1" sh -c '
-        if [ -x "$1" ]; then echo installed
+        case "$1" in */*) t=$1 ;; *) t=$(command -v "$1" 2>/dev/null || printf %s "$1") ;; esac
+        if [ -x "$t" ]; then echo installed
         elif command -v crash >/dev/null 2>&1; then echo upload
         else echo fetch
         fi' sh "$(remote_tool "$1")" 2>/dev/null)
@@ -876,9 +877,11 @@ test_server() {
     ui_info "연결 테스트 중...\n\n$(server_label "$name")"
     out=$(remote_run "$name" sh -c '
         echo "접속: OK ($(hostname), $(id -un))"
-        if [ -x "$1" ]; then
-            v=$("$1" --version 2>/dev/null | grep "^analyze-kdump " | head -n 1)
-            echo "analyze-kdump: OK ($1, ${v:-버전 정보 없음: 이전 버전})"
+        # 원격 경로가 명령 이름(analyze-kdump)이면 등록된 위치로 풉니다.
+        case "$1" in */*) t=$1 ;; *) t=$(command -v "$1" 2>/dev/null || printf %s "$1") ;; esac
+        if [ -x "$t" ]; then
+            v=$("$t" --version 2>/dev/null | grep "^analyze-kdump " | head -n 1)
+            echo "analyze-kdump: OK ($t, ${v:-버전 정보 없음: 이전 버전})"
         else
             echo "analyze-kdump: 없음 ($1)"
         fi

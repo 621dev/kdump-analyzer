@@ -920,6 +920,31 @@ class FetchLatestTest(unittest.TestCase):
 
 @unittest.skipUnless(HAS_SH, "sh가 필요합니다")
 class ShellSnippetTest(unittest.TestCase):
+    def test_bare_tool_name_is_resolved(self):
+        # 서버 설정의 원격 경로가 경로가 아니라 명령 이름(analyze-kdump)이면 등록된 위치로 풀어 설치본으로 봅니다.
+        # (이전에는 [ -x analyze-kdump ]가 거짓이라 연결 테스트는 '없음', 자동 선택은 무설치 실행이 됐음)
+        with tempfile.TemporaryDirectory() as d:
+            tool = os.path.join(d, "analyze-kdump")
+            with open(tool, "w") as f:
+                f.write("#!/bin/sh\necho 'analyze-kdump 1.24.0 (commit abc1234), 설치 2026-11-10 09:00'\n")
+            os.chmod(tool, 0o755)
+            env = dict(os.environ, PATH=d + os.pathsep + os.environ["PATH"])
+            orig = webui.ssh_text
+
+            def run(server, argv, timeout=60):
+                r = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env)
+                return r.returncode, r.stdout
+            webui.ssh_text = run
+            try:
+                for name, expected in (("analyze-kdump", "analyze-kdump 1.24.0"), (tool, "analyze-kdump 1.24.0"),
+                                       ("no-such-tool", "")):
+                    server = dict(webui.DEFAULT_SERVER, name="db01", target="u@h", tool=name, crash_dir=d)
+                    info = webui.test_server(server)
+                    self.assertEqual(info.get("tool", "")[:len(expected)], expected, name)
+                    self.assertEqual(webui.probe_method(server) == "installed", bool(expected), name)
+            finally:
+                webui.ssh_text = orig
+
     def test_dump_list(self):
         with tempfile.TemporaryDirectory() as d:
             for rel in ("a/vmcore", "b/vmcore.flat", "c/vmcore.flat", "c/vmcore",
