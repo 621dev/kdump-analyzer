@@ -4,6 +4,14 @@
 GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리스)으로 받을 수 있습니다.
 1.18.3까지는 프로젝트 이름이 `kdump-tools`였습니다. 아래 기록의 링크는 GitHub이 새 주소로 연결합니다.
 
+## [1.24.2] - 2026-11-10
+
+### 고침
+- 웹 UI: 버전·업데이트 화면의 서버 표가 좁은 화면에서 카드 밖으로 넘치던 문제. 카드 폭이 좁으면 서버마다 한 덩어리로 쌓고 버튼은 아래 줄로 보냅니다 (#50)
+
+### 바뀜
+- 웹 UI는 노트북뿐 아니라 데스크톱이나 관리용 서버에서도 실행하므로, 화면·메시지·문서의 '노트북' 표현을 '웹 UI' 기준으로 바꿨습니다. 예: '노트북 버전 업그레이드' → '웹 UI 버전 업그레이드', '이 노트북의 kdump-analyzer' → '웹 UI의 kdump-analyzer' (#50)
+
 ## [1.24.1] - 2026-11-10
 
 ### 고침
@@ -259,7 +267,8 @@ GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리�
 - 설치 스크립트(명령 등록)와 상황별 원격 분석 방식 (#3)
 - 분석 진행 표시와 메뉴의 이전 화면 이동 (#4)
 
-[1.24.1]: https://github.com/621dev/kdump-analyzer/compare/v1.24.0...main
+[1.24.2]: https://github.com/621dev/kdump-analyzer/compare/v1.24.1...main
+[1.24.1]: https://github.com/621dev/kdump-analyzer/compare/v1.24.0...v1.24.1
 [1.24.0]: https://github.com/621dev/kdump-analyzer/compare/v1.23.1...v1.24.0
 [1.23.1]: https://github.com/621dev/kdump-analyzer/compare/v1.23.0...v1.23.1
 [1.23.0]: https://github.com/621dev/kdump-analyzer/compare/v1.22.0...v1.23.0
