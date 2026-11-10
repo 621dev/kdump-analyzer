@@ -12,9 +12,9 @@ GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리�
 - 오래된 커널의 `RIP: 0010:[<주소>] 함수+0x..` 형식에서 oops 문제 지점을 못 찾아 `dis -rl`을 건너뛰던 문제 (#54)
 
 ### 추가
-- RHEL 8: `python3`가 없으면 `/usr/libexec/platform-python`(Python 3.6)으로 LLM 분석과 JSON 요약을 합니다 (분석 서버, 터미널 메뉴, 설치 점검)
+- RHEL 8: `python3`가 없으면 `/usr/libexec/platform-python`(Python 3.6)으로 LLM 분석과 JSON 요약을 합니다 (분석 서버, 터미널 메뉴, 설치 점검) (#54)
 - 벤더 커널: Oracle UEK(`*uek*`)와 RT(`.rt`, `+rt`) 커널이면 `kernel-uek`·`kernel-rt` debuginfo를 안내·설치합니다. 커널 이름이 RHEL 계열이면 apt가 있는 서버에서도 RPM 명령을 안내합니다 (#54)
-- debuginfo 저장소 안내·설정: RHEL은 `subscription-manager`로 debug 저장소를 켜고, Oracle Linux는 oss.oracle.com debuginfo 저장소 파일을 만듭니다. `yum`만 있는 서버는 `yum-utils`의 `debuginfo-install`을 씁니다 (안내, 웹 UI 서버 준비)
+- debuginfo 저장소 안내·설정: RHEL은 `subscription-manager`로 debug 저장소를 켜고, Oracle Linux는 oss.oracle.com debuginfo 저장소 파일을 만듭니다. `yum`만 있는 서버는 `yum-utils`의 `debuginfo-install`을 씁니다 (안내, 웹 UI 서버 준비) (#54)
 
 ## [1.24.3] - 2026-11-10
 
