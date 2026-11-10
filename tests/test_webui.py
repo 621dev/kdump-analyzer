@@ -187,6 +187,66 @@ class DeleteResultsTest(unittest.TestCase):
         self.assertEqual(jobs.active_results("db01"), {self.report})
 
 
+class AutoLogTest(unittest.TestCase):
+    """자동 분석 기록: 자동 작업만 auto-log.json에 남고, 분석 기록에 '자동' 표시와 최근 목록을 만듭니다."""
+
+    REPORT = ExportTest.REPORT
+    setUp = ExportTest.setUp
+    tearDown = ExportTest.tearDown
+
+    def run_job(self, auto, status="done", report=None):
+        jobs = webui.Jobs(self.store)
+        job = webui.Job("report", "db01", vmcore="/var/crash/x/vmcore")
+        job.auto = auto
+
+        def target(j):
+            j.report = report
+            if status == "error":
+                raise webui.ApiError(502, "리포트를 만들지 못했습니다")
+        jobs._run(job, target)
+        return job
+
+    def test_only_auto_jobs_are_logged(self):
+        self.run_job(False, report=self.report)
+        self.assertEqual(self.store.auto_log(), [])
+        self.run_job(True, report=self.report)
+        self.run_job(True, status="error")
+        log = self.store.auto_log()
+        self.assertEqual([e["status"] for e in log], ["error", "done"])          # 최신 순
+        self.assertEqual(log[0]["error"], "리포트를 만들지 못했습니다")
+        self.assertFalse(log[0]["report_exists"])
+        self.assertTrue(log[1]["report_exists"])
+        self.assertEqual(log[1]["type"], "hung_task")                              # 리포트 머리에서 장애 유형
+
+    def test_history_marks_auto_report(self):
+        other = "kdump-report-20261109-110000-2.txt"
+        with open(os.path.join(self.folder, other), "w", encoding="utf-8") as f:
+            f.write(self.REPORT)
+        self.run_job(True, report=self.report)
+        marks = {r["report"]["name"]: r["auto"] for r in self.store.history("db01")}
+        self.assertEqual(marks, {self.report: True, other: False})
+
+    def test_deleted_report_and_cap(self):
+        self.run_job(True, report=self.report)
+        self.store.delete_results("db01", [self.report])
+        entry = self.store.auto_log()[0]
+        self.assertEqual(entry["status"], "done")
+        self.assertFalse(entry["report_exists"])                                    # 지운 리포트는 '삭제됨'으로
+        for i in range(webui.AUTO_LOG_MAX + 5):
+            self.store.add_auto_log({"server": "db01", "status": "done", "started": i})
+        with open(os.path.join(self.tmp.name, webui.AUTO_LOG), encoding="utf-8") as f:
+            self.assertEqual(len(json.load(f)), webui.AUTO_LOG_MAX)
+        self.assertEqual(len(self.store.auto_log(limit=7)), 7)
+
+    def test_broken_log_file(self):
+        with open(os.path.join(self.tmp.name, webui.AUTO_LOG), "w", encoding="utf-8") as f:
+            f.write('{"not": "a list"}')
+        self.assertEqual(self.store.auto_log(), [])
+        self.assertEqual(self.store.auto_reports(), set())
+        self.store.add_auto_log({"server": "../x", "status": "done"})              # 잘못된 서버 이름은 목록에서 뺌
+        self.assertEqual(self.store.auto_log(), [])
+
+
 class AutoWatcherTest(unittest.TestCase):
     """새 덤프 자동 분석: 기준 기록, 새 덤프, 쓰는 중인 덤프, 덮어쓴 덤프, 끄기, 접속 실패, 확인 주기."""
 

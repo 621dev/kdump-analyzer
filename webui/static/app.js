@@ -1,7 +1,7 @@
 "use strict";
 
 // 서버(kdump-webui.py)의 API_LEVEL과 같아야 합니다. 다르면 업데이트 뒤 서버를 다시 시작하지 않은 것입니다.
-const API_LEVEL = 10;
+const API_LEVEL = 11;
 
 // ---------------------------------------------------------------- 상태와 공통
 
@@ -16,6 +16,8 @@ const state = {
   tab: "vmcores",       // vmcores | results
   view: null,           // { server, name } 결과 파일 보기
   historyFilter: { server: "", text: "", kind: "all", type: "" },
+  autoRecentOpen: false,   // 분석 기록의 "최근 자동 분석" 펼침
+  autoRecentAll: false,    // 최근 자동 분석을 모두 보기
   health: {},           // 서버 이름 -> 연결 테스트 결과
   jobs: new Map(),      // 작업 id -> 작업
   apiMismatch: false,   // 화면과 서버의 API 판이 다름(서버 재시작 필요)
@@ -317,7 +319,7 @@ function renderMain() {
           <span>${esc(server.target)}:${esc(server.port)}</span>
           <span>분석 방식: ${esc(METHOD_LABEL[server.method] || server.method)}</span>
           <span>${server.sudo ? "sudo 사용" : "sudo 사용 안 함"}</span>
-          ${server.auto && server.auto !== "off" ? `<span class="auto-tag" title="${esc(autoTitle(server))}">자동 분석: ${esc(AUTO_LABEL[server.auto])}</span>` : ""}
+          ${server.auto && server.auto !== "off" ? `<button type="button" class="auto-tag" id="srv-auto" title="${esc(autoTitle(server))} · 누르면 최근 자동 분석을 봅니다">자동 분석: ${esc(AUTO_LABEL[server.auto])}</button>` : ""}
         </div>
         <div class="meta" id="health-line">${healthText}</div>
       </div>
@@ -330,6 +332,8 @@ function renderMain() {
   </div>`);
   main.append(card);
   $("#srv-test").addEventListener("click", () => testServer(server.name));
+  const autoBtn = card.querySelector("#srv-auto");
+  if (autoBtn) autoBtn.addEventListener("click", () => openAutoRecent(server.name));
   $("#srv-edit").addEventListener("click", () => openServerDialog(server));
   $("#srv-del").addEventListener("click", () => deleteServer(server.name));
 
@@ -724,6 +728,7 @@ function recordList(records, showServer) {
       <div class="record-body">
         <div class="record-top">
           ${showServer ? `<span class="tag server${known ? "" : " gone"}" title="${known ? "" : "삭제된 서버"}">${esc(r.server)}</span>` : ""}
+          ${r.auto ? `<span class="tag auto" title="새 덤프 자동 분석이 만든 리포트입니다">자동</span>` : ""}
           <span>${fmtTime(r.time)}</span>
           ${rep ? typePill(rep.type, rep.type_label) : ""}
           ${rep && rep.kernel ? `<span class="muted">${esc(rep.kernel)}</span>` : ""}
@@ -762,6 +767,82 @@ function recordList(records, showServer) {
   return list;
 }
 
+// 최근 자동 분석: 진행 중·대기 중인 자동 작업과, 끝난 자동 작업 기록(실패·취소 포함). 서버 필터를 따릅니다.
+const AUTO_RECENT_SHOWN = 10;
+const AUTO_KIND_LABEL = { report: "리포트", llm: "리포트 + LLM" };
+
+function drawAutoRecent(data, serverFilter) {
+  const box = $("#h-auto-list");
+  if (!box) return;
+  box.innerHTML = "";
+  if (!data) {
+    $("#h-auto-count").textContent = "";
+    box.append(h('<p class="muted">최근 자동 분석을 불러오지 못했습니다.</p>'));
+    return;
+  }
+  const match = e => !serverFilter || e.server === serverFilter;
+  const active = (data.active || []).filter(match);
+  const log = (data.log || []).filter(match);
+  const failed = log.filter(e => e.status === "error").length;
+  $("#h-auto-count").textContent = `${active.length ? `진행 ${active.length}건 · ` : ""}${log.length}건${failed ? ` · 실패 ${failed}건` : ""}`;
+  if (!active.length && !log.length) {
+    const on = state.servers.filter(s => s.auto && s.auto !== "off").map(s => s.name);
+    box.append(h(`<p class="muted">아직 자동 분석 기록이 없습니다. ${on.length
+      ? `자동 분석을 켠 서버(${esc(on.join(", "))})에 새 덤프가 생기면 여기에 남습니다.`
+      : "서버 설정에서 새 덤프 자동 분석을 켜면, 새 덤프를 분석한 결과가 여기에 남습니다."}</p>`));
+    return;
+  }
+  const list = h('<div class="auto-rows"></div>');
+  for (const j of active) {
+    list.append(h(`<div class="auto-row">
+      <span class="pill ${j.status === "running" ? "warn" : "muted"}">${j.status === "running" ? "진행 중" : "대기 중"}</span>
+      <span class="muted">${fmtTime(j.started)}</span>
+      <span class="tag server">${esc(j.server)}</span>
+      <span class="muted">${esc(AUTO_KIND_LABEL[j.kind] || j.kind)}</span>
+      <span class="path auto-path">${esc(j.vmcore || "")}</span>
+      <span class="muted auto-detail">${esc(j.phase || "")}</span>
+    </div>`));
+  }
+  const showAll = state.autoRecentAll;
+  log.slice(0, showAll ? log.length : AUTO_RECENT_SHOWN).forEach(e => {
+    let result;
+    if (e.status === "done") result = e.report_exists ? (typePill(e.type, e.type_label) || '<span class="pill ok">완료</span>')
+      : '<span class="pill muted" title="분석 기록에서 리포트를 지웠습니다">리포트 삭제됨</span>';
+    else if (e.status === "cancelled") result = '<span class="pill muted">취소됨</span>';
+    else result = '<span class="pill err">실패</span>';
+    const row = h(`<div class="auto-row">
+      ${result}
+      <span class="muted">${fmtTime(e.finished || e.started)}</span>
+      <span class="tag server${state.servers.some(s => s.name === e.server) ? "" : " gone"}">${esc(e.server)}</span>
+      <span class="muted">${esc(AUTO_KIND_LABEL[e.kind] || e.kind)}</span>
+      <span class="path auto-path">${esc(e.vmcore || "")}</span>
+      ${e.status === "error" && e.error ? `<span class="form-error auto-detail">${esc(e.error)}</span>` : ""}
+      ${e.status === "done" && e.kind === "llm" && e.report_exists && !e.analysis_exists
+        ? '<span class="muted auto-detail">LLM 분석 없음</span>' : ""}
+      <span class="auto-actions">
+        ${e.analysis_exists ? '<button class="btn small primary" data-act="analysis">분석 보기</button>' : ""}
+        ${e.report_exists ? '<button class="btn small" data-act="report">리포트</button>' : ""}
+      </span>
+    </div>`);
+    row.querySelectorAll("[data-act]").forEach(b => b.addEventListener("click", () =>
+      openFile(e.server, b.dataset.act === "analysis" ? e.analysis : e.report)));
+    list.append(row);
+  });
+  box.append(list);
+  if (log.length > AUTO_RECENT_SHOWN) {
+    const more = h(`<button class="linkish">${showAll ? "최근 " + AUTO_RECENT_SHOWN + "건만 보기" : `모두 보기 (${log.length}건)`}</button>`);
+    more.addEventListener("click", () => { state.autoRecentAll = !showAll; drawAutoRecent(data, serverFilter); });
+    box.append(more);
+  }
+}
+
+// 서버 머리글의 "자동 분석" 표시를 누르면 그 서버의 최근 자동 분석을 펼쳐 보여 줍니다.
+function openAutoRecent(serverName) {
+  state.historyFilter.server = serverName;
+  state.autoRecentOpen = true;
+  openHistory();
+}
+
 async function renderHistory(main) {
   const card = h(`<div class="card">
     <div class="card-head">
@@ -770,18 +851,26 @@ async function renderHistory(main) {
     <div class="history-tools">
       <select id="h-server"><option value="">모든 서버</option></select>
       <select id="h-kind">
-        <option value="all">전체</option><option value="analysis">LLM 분석 있음</option><option value="report">리포트만</option>
+        <option value="all">전체</option><option value="analysis">LLM 분석 있음</option><option value="report">리포트만</option><option value="auto">자동 분석만</option>
       </select>
       <select id="h-type"><option value="">모든 장애 유형</option></select>
       <input id="h-text" placeholder="판정, panic, 근거, vmcore, 커널 버전으로 검색">
     </div>
+    <details id="h-auto" class="auto-recent"${state.autoRecentOpen ? " open" : ""}>
+      <summary>최근 자동 분석 <span class="muted" id="h-auto-count"></span></summary>
+      <div id="h-auto-list"><p class="muted"><span class="spinner"></span> 불러오는 중...</p></div>
+    </details>
     <div id="h-summary" class="muted history-summary"></div>
     <div id="h-list"><p class="muted"><span class="spinner"></span> 불러오는 중...</p></div>
   </div>`);
   main.append(card);
-  let records;
+  card.querySelector("#h-auto").addEventListener("toggle", e => { state.autoRecentOpen = e.target.open; });
+  let records, autoLog = null;
   try {
-    records = (await api("GET", "/api/history")).records;
+    [records, autoLog] = await Promise.all([
+      api("GET", "/api/history").then(r => r.records),
+      api("GET", "/api/auto/log").catch(() => null),   // 최근 자동 분석은 없어도 기록은 보여 줍니다.
+    ]);
   } catch (e) {
     $("#h-list").innerHTML = `<p class="form-error">${esc(e.message)}</p>`;
     return;
@@ -806,6 +895,7 @@ async function renderHistory(main) {
       if (f.server && r.server !== f.server) return false;
       if (f.kind === "analysis" && !r.analyses.length) return false;
       if (f.kind === "report" && r.analyses.length) return false;
+      if (f.kind === "auto" && !r.auto) return false;
       if (f.type && !(r.report && r.report.type === f.type)) return false;
       if (!t) return true;
       const hay = [r.server, ...(r.analyses.map(a => `${a.verdict} ${a.provider} ${a.model}`)),
@@ -825,6 +915,7 @@ async function renderHistory(main) {
     } else {
       holder.append(recordList(shown, true));
     }
+    drawAutoRecent(autoLog, f.server);
   }
   draw();
   sel.addEventListener("change", () => { f.server = sel.value; draw(); });
@@ -1924,7 +2015,7 @@ function watchAuto() {
       if (added) { renderJobs(); pollJobs(); }
       const tag = document.querySelector(".auto-tag");
       const server = state.servers.find(s => s.name === state.selected);
-      if (tag && server) tag.title = autoTitle(server);
+      if (tag && server) tag.title = autoTitle(server) + " · 누르면 최근 자동 분석을 봅니다";
     } catch (_) { /* 다음 주기에 다시 시도 */ }
   };
   autoTimer = setInterval(tick, AUTO_POLL_MS);
