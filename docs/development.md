@@ -70,3 +70,5 @@ sync; sudo insmod kdump_fault.ko type=hungtask quiet=1
 2026-11 Ubuntu 26.04.1 LTS(커널 7.0.0-42, crash 9.0.1) VM에서도 SysRq-c로 만든 `dump.<시각>`을 리포트와 LLM으로 분석해 원인을 맞게 판정했습니다. crash가 이 커널의 패닉 시각은 읽지 못해(`DATE: 1970`) 리포트의 시각은 부팅 후 경과 시간으로 봐야 합니다.
 
 2026-11 Rocky Linux 9.8(커널 5.14.0-687) VM에서 위 8가지와 SysRq-c로 만든 vmcore 9건을 리포트와 LLM(Claude Code)으로 분석했습니다. 9건 모두 원인을 맞게 판정했습니다. `quiet=1`로 만든 hung task도 `foreach UN bt`와 "taint 모듈 관련 태스크" 섹션으로 잠금을 쥔 스레드까지 찾았습니다.
+
+2026-11 Oracle Linux 8.10(UEK 커널 5.15.0-206, crash 9.0.2) VM에서도 SysRq-c로 만든 vmcore를 확인했습니다. 최소 설치라 `python3`가 없는 상태에서 platform-python(3.6)으로 JSON 요약과 서버 LLM 분석(가짜 LLM CLI)이 동작했고, 웹 UI 서버 준비가 Oracle debuginfo 저장소를 추가해 `kernel-uek` 디버그 커널을 설치했습니다. 이 VM은 `kdumpctl reset-crashkernel`이 없어 `kdump-vm-test.sh setup` 대신 웹 UI의 서버 준비로 kdump를 준비했습니다.
