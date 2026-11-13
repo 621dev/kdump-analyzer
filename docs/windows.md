@@ -1,6 +1,6 @@
 # Windows 서버 (메모리 덤프)
 
-[README](../README.md) · [설치](install.md) · [사용법](usage.md) · [설정·LLM](configuration.md) · [웹 UI](webui.md) · [Windows](windows.md) · [터미널 메뉴](terminal-ui.md) · [개발·검증](development.md)
+[README](../README.md) · [설치](install.md) · [요구 사항·네트워크](requirements.md) · [사용법](usage.md) · [설정·LLM](configuration.md) · [웹 UI](webui.md) · [Windows](windows.md) · [터미널 메뉴](terminal-ui.md) · [개발·검증](development.md)
 
 웹 UI에서 서버를 추가할 때 **운영체제**를 **Windows**로 고르면, Windows 서버의 블루스크린 메모리 덤프(`MEMORY.DMP`, `Minidump\*.dmp`)를 Linux 서버와 같은 화면에서 분석합니다. 리포트와 JSON 요약을 Linux와 같은 형식으로 만들어 분석 기록, 요약 상자, LLM 분석을 그대로 씁니다.
 
