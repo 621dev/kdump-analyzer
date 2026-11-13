@@ -3498,7 +3498,18 @@ def supervise(args):
         remove_run_info(args.data_dir)
 
 
+def safe_console():
+    """콘솔·로그의 인코딩이 한글을 못 쓰면(예: cp1252, C 로케일의 서비스) print가 UnicodeEncodeError로 실패해
+    서버가 시작하지 못하거나 작업이 멈춥니다. 못 쓰는 글자는 \\uXXXX로 바꿔 출력하게 합니다."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def main():
+    safe_console()
     args = parse_args()
     if args.install_shortcut or args.remove_shortcut:
         return manage_shortcut(args)
