@@ -319,7 +319,7 @@ function renderMain() {
           <span>${esc(server.target)}:${esc(server.port)}</span>
           <span>분석 방식: ${esc(METHOD_LABEL[server.method] || server.method)}</span>
           <span>${server.sudo ? "sudo 사용" : "sudo 사용 안 함"}</span>
-          ${server.auto && server.auto !== "off" ? `<button type="button" class="auto-tag" id="srv-auto" title="${esc(autoTitle(server))} · 누르면 최근 자동 분석을 봅니다">자동 분석: ${esc(AUTO_LABEL[server.auto])}</button>` : ""}
+          ${server.auto && server.auto !== "off" ? `<button type="button" class="auto-tag" id="srv-auto" title="${esc(autoTitle(server))} · 누르면 최근 자동 분석을 봅니다">자동 분석: ${esc(AUTO_LABEL[server.auto])}</button><button type="button" class="linkish auto-check" id="srv-auto-check" title="확인 주기를 기다리지 않고 이 서버의 새 덤프를 지금 확인합니다">지금 확인</button>` : ""}
         </div>
         <div class="meta" id="health-line">${healthText}</div>
       </div>
@@ -334,6 +334,8 @@ function renderMain() {
   $("#srv-test").addEventListener("click", () => testServer(server.name));
   const autoBtn = card.querySelector("#srv-auto");
   if (autoBtn) autoBtn.addEventListener("click", () => openAutoRecent(server.name));
+  const checkBtn = card.querySelector("#srv-auto-check");
+  if (checkBtn) checkBtn.addEventListener("click", () => checkAutoNow(server.name, checkBtn));
   $("#srv-edit").addEventListener("click", () => openServerDialog(server));
   $("#srv-del").addEventListener("click", () => deleteServer(server.name));
 
@@ -1978,7 +1980,10 @@ function autoTitle(server) {
   if (!st) return "아직 확인하지 않았습니다. 웹 UI가 켜져 있는 동안 설정의 주기마다 확인합니다.";
   const when = new Date(st.checked * 1000).toLocaleTimeString();
   if (st.error) return `마지막 확인 ${when}: 실패 (${st.error})`;
-  if (st.baseline !== undefined) return `마지막 확인 ${when}: 기존 덤프 ${st.baseline}개를 기준으로 기록 (이후 새 덤프만 분석)`;
+  if (st.baseline !== undefined) {
+    const backlog = st.backlog ? `, 리포트 없는 기존 덤프 ${st.backlog}개 분석 시작${st.backlog_more ? ` (개수 제한으로 ${st.backlog_more}개는 건너뜀)` : ""}` : "";
+    return `마지막 확인 ${when}: 기존 덤프 ${st.baseline}개를 기준으로 기록${backlog} (이후 새 덤프만 분석)`;
+  }
   return `마지막 확인 ${when}: 새 덤프 ${st.found}개`;
 }
 
@@ -2002,23 +2007,45 @@ function watchAuto() {
   if (autoTimer) return;
   const tick = async () => {
     try {
-      const r = await api("GET", "/api/auto");
-      state.auto = r.status || {};
-      let added = 0;
-      for (const job of r.jobs || []) {
-        if (state.jobs.has(job.id) || !isActive(job)) continue;
-        state.jobs.set(job.id, job);
-        added++;
-        toast(`새 덤프를 찾아 자동 분석을 시작했습니다: ${job.server}`);
-        notifyDesktop(`새 덤프 발견: ${job.server}`, job.vmcore || "");
-      }
-      if (added) { renderJobs(); pollJobs(); }
-      const tag = document.querySelector(".auto-tag");
-      const server = state.servers.find(s => s.name === state.selected);
-      if (tag && server) tag.title = autoTitle(server) + " · 누르면 최근 자동 분석을 봅니다";
+      applyAutoResponse(await api("GET", "/api/auto"));
     } catch (_) { /* 다음 주기에 다시 시도 */ }
   };
   autoTimer = setInterval(tick, AUTO_POLL_MS);
+}
+
+// /api/auto, /api/auto/check 응답: 확인 상태를 반영하고, 새로 시작한 자동 작업을 작업 카드로 데려옵니다.
+function applyAutoResponse(r) {
+  state.auto = r.status || {};
+  let added = 0;
+  for (const job of r.jobs || []) {
+    if (state.jobs.has(job.id) || !isActive(job)) continue;
+    state.jobs.set(job.id, job);
+    added++;
+    toast(`자동 분석을 시작했습니다: ${job.server}`);
+    notifyDesktop(`자동 분석 시작: ${job.server}`, job.vmcore || "");
+  }
+  if (added) { renderJobs(); pollJobs(); }
+  const tag = document.querySelector(".auto-tag");
+  const server = state.servers.find(s => s.name === state.selected);
+  if (tag && server) tag.title = autoTitle(server) + " · 누르면 최근 자동 분석을 봅니다";
+  return added;
+}
+
+// "지금 확인": 확인 주기를 기다리지 않고 그 서버의 덤프 목록을 바로 확인합니다.
+async function checkAutoNow(serverName, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api("POST", "/api/auto/check", { server: serverName });
+    const added = applyAutoResponse(r);
+    const st = (state.auto || {})[serverName] || {};
+    if (st.error) toast(`${serverName}: 확인 실패 (${st.error})`);
+    else if (st.baseline !== undefined && !st.backlog) toast(`${serverName}: 기존 덤프 ${st.baseline}개를 기준으로 기록했습니다. 이후 새 덤프부터 분석합니다.`);
+    else if (!added) toast(`${serverName}: 새 덤프가 없습니다.`);
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 // ---------------------------------------------------------------- 시작
