@@ -148,7 +148,9 @@
       <div class="grid three">
         <label>crash 제한 시간(분) <span class="hint">(넘기면 중단, 1~1440)</span><input name="crash_timeout" type="number" min="1" max="1440"></label>
         <label>자동 분석 확인 주기(분) <span class="hint">(새 덤프 자동 분석을 켠 서버, 1~1440)</span><input name="auto_interval" type="number" min="1" max="1440"></label>
+        <label>리포트 보관 기간(일) <span class="hint">(0이면 지우지 않음, 0~3650)</span><input name="retention_days" type="number" min="0" max="3650"></label>
       </div>
+      <div class="retention-row"><span class="hint" id="retention-state"></span><button type="button" class="btn small" id="retention-run">지금 정리</button></div>
     </section>
     <p class="form-error" id="settings-error"></p>
     <div class="modal-actions">

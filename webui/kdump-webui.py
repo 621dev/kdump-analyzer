@@ -60,7 +60,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(APP_DIR)
 # 화면(app.js)과 서버가 주고받는 API의 판. API를 바꿀 때 app.js의 API_LEVEL과 함께 올립니다.
 # 업데이트 뒤 서버를 다시 시작하지 않으면 화면이 이 값의 차이로 알아채고 안내합니다.
-API_LEVEL = 11
+API_LEVEL = 12
 
 # 화면의 "다시 시작"은 감시 프로세스가 서버를 새 코드로 다시 띄우는 방식입니다.
 RESTART_EXIT = 75                     # 서버가 이 코드로 끝나면 감시 프로세스가 다시 띄웁니다
@@ -87,6 +87,7 @@ DEFAULT_SETTINGS = {
     # release: GitHub의 최신 릴리스(태그)로 업데이트, branch: update_branch의 최신 커밋으로 업데이트
     "update_channel": "release",
     "auto_interval": 10,   # 새 덤프 자동 분석: 서버를 확인하는 주기(분)
+    "retention_days": 0,   # 리포트 보관 기간(일). 0이면 지우지 않음
 }
 UPDATE_CHANNELS = ("release", "branch")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -370,6 +371,27 @@ class Store:
         log = self._load(AUTO_LOG, [])
         return {(e.get("server"), e.get("report")) for e in log if isinstance(e, dict) and e.get("report")} \
             if isinstance(log, list) else set()
+
+    def prune_results(self, days, busy_for=lambda server: set(), now=None):
+        """보관 기간(days일)이 지난 기록을 지웁니다. 기록의 나이는 리포트와 그 LLM 분석 중 가장 최근 파일로 봅니다
+        (오래된 리포트를 최근에 다시 분석했으면 남김). 진행 중인 작업이 쓰는 기록은 건너뜁니다.
+        결과: {"records": 지운 기록 수, "files": 지운 파일 수, "skipped": 건너뛴 기록 수}"""
+        result = {"records": 0, "files": 0, "skipped": 0}
+        if not days or days <= 0:
+            return result
+        cutoff = (now if now is not None else time.time()) - days * 86400
+        for record in self.history():
+            if record["time"] >= cutoff:
+                continue
+            names = [record["report"]["name"]] if record["report"] else [a["name"] for a in record["analyses"]]
+            try:
+                deleted = self.delete_results(record["server"], names, busy=busy_for(record["server"]))
+            except ApiError:
+                result["skipped"] += 1       # 진행 중인 작업이 쓰는 중이거나 그새 지워짐
+                continue
+            result["records"] += 1
+            result["files"] += len(deleted)
+        return result
 
     def delete_results(self, server, names, busy=()):
         """웹 UI에 저장된 리포트·분석 파일을 지웁니다. 삭제한 서버의 기록도 지울 수 있습니다.
@@ -2640,6 +2662,46 @@ class Jobs:
 
 # ---------------------------------------------------------------- HTTP
 
+class ResultJanitor:
+    """리포트 보관 기간: 설정의 retention_days가 지난 기록을 한 시간마다 지웁니다(0이면 아무것도 하지 않음)."""
+
+    FIRST = 120       # 웹 UI를 켜고 이만큼 뒤에 처음 정리합니다(초)
+    INTERVAL = 3600   # 그 뒤로 정리하는 간격(초)
+
+    def __init__(self, store, jobs):
+        self.store = store
+        self.jobs = jobs
+        self.last = None      # {"time", "records", "files", "skipped"} 또는 {"time", "error"}
+        self.stop = threading.Event()
+        self.lock = threading.Lock()
+
+    def start(self):
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        wait = self.FIRST
+        while not self.stop.wait(wait):
+            wait = self.INTERVAL
+            try:
+                self.run()
+            except Exception as error:  # noqa: BLE001 - 정리 스레드는 멈추지 않게 합니다.
+                print("리포트 보관 기간 정리 중 오류: %s" % error, file=sys.stderr)
+
+    def run(self):
+        try:
+            days = int(self.store.settings().get("retention_days") or 0)
+        except (TypeError, ValueError):
+            days = 0
+        with self.lock:   # 화면의 "지금 정리"와 한 시간 주기 정리가 겹치지 않게 합니다.
+            result = self.store.prune_results(days, busy_for=self.jobs.active_results)
+        result.update(time=time.time(), days=days)
+        self.last = result
+        if result["records"]:
+            print("보관 기간(%d일)이 지난 기록 %d건(파일 %d개)을 지웠습니다." % (days, result["records"], result["files"]),
+                  flush=True)
+        return result
+
+
 class AutoWatcher:
     """새 덤프 자동 분석: 자동 분석을 켠 서버의 덤프 목록을 주기적으로 읽어, 새로 생긴 덤프로 작업을 시작합니다.
 
@@ -2763,6 +2825,8 @@ class App:
             print("평문으로 저장돼 있던 비밀을 암호화했습니다: secrets/%s" % name)
         self.auto = AutoWatcher(store, self.jobs)
         self.auto.start()
+        self.janitor = ResultJanitor(store, self.jobs)
+        self.janitor.start()
 
     def check_latest(self):
         settings = self.store.settings()
@@ -2774,6 +2838,7 @@ class App:
         settings["api_key_saved"] = bool(settings.get("api_key_file") and os.path.exists(settings["api_key_file"]))
         settings["cli_token_saved"] = bool(settings.get("cli_token_file") and os.path.exists(settings["cli_token_file"]))
         settings["secret_protection"] = kdump_llm.secret_protection()
+        settings["retention_last"] = self.janitor.last   # 마지막 보관 기간 정리 결과(없으면 None)
         return settings
 
 
@@ -3079,15 +3144,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(200, store.export_data(query.get("server", [""])[0], query.get("name", [""])[0],
                                                      mask=query.get("mask", ["0"])[0] == "1"))
 
+        if parts == ["retention", "run"] and method == "POST":
+            # 설정의 보관 기간으로 지금 정리합니다(0이면 아무것도 지우지 않음).
+            return self._json(200, app.janitor.run())
         if parts == ["settings"] and method == "POST":
             body = self._body()
             if "provider" in body and body["provider"] not in kdump_llm.PROVIDERS:
                 raise ApiError(400, "알 수 없는 provider입니다.")
-            for key in ("max_report_chars", "max_tokens", "timeout", "crash_timeout", "auto_interval"):
+            for key in ("max_report_chars", "max_tokens", "timeout", "crash_timeout", "auto_interval", "retention_days"):
                 if key in body:
                     body[key] = int(body[key])
             if "auto_interval" in body and not 1 <= body["auto_interval"] <= 1440:
                 raise ApiError(400, "자동 분석 확인 주기는 1~1440분이어야 합니다.")
+            if "retention_days" in body and not 0 <= body["retention_days"] <= 3650:
+                raise ApiError(400, "리포트 보관 기간은 0~3650일이어야 합니다(0이면 지우지 않음).")
             if "crash_timeout" in body and not 1 <= body["crash_timeout"] <= 1440:
                 raise ApiError(400, "crash 제한 시간은 1~1440분이어야 합니다.")
             if "update_repo" in body and not REPO_RE.match(str(body["update_repo"])):
