@@ -161,7 +161,12 @@ class Store:
         return current
 
     def servers(self):
-        return self._load("servers.json", [])
+        servers = self._load("servers.json", [])
+        for server in servers:
+            # 1.27.0까지는 원격 경로를 비운 채 저장할 수 있었습니다. 읽을 때 기본 위치로 채웁니다.
+            if isinstance(server, dict) and not str(server.get("tool") or "").strip():
+                server["tool"] = WIN_TOOL if server.get("os") == "windows" else DEFAULT_TOOL
+        return servers
 
     def server(self, name):
         for server in self.servers():
@@ -184,6 +189,9 @@ class Store:
             raise ApiError(400, "자동 분석은 off, report, llm 중 하나여야 합니다.")
         if server.get("os") not in SERVER_OS:
             raise ApiError(400, "운영체제는 linux 또는 windows여야 합니다.")
+        # 원격 경로를 비워 두면 기본 설치 위치를 씁니다. 빈 값으로 저장되면 설치본이 있어도 '없음'으로 보이고
+        # 설치·업데이트가 "설치 위치를 알 수 없습니다"로 실패합니다.
+        server["tool"] = str(server.get("tool") or "").strip() or (WIN_TOOL if server["os"] == "windows" else DEFAULT_TOOL)
         if server["os"] == "windows":
             server["sudo"] = False  # Windows는 관리자 계정으로 접속합니다(sudo 없음).
             if not server["tool"].lower().endswith("\\bin\\analyze-windump.ps1"):

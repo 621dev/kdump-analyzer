@@ -6,6 +6,9 @@ GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리�
 
 ## [Unreleased]
 
+### 고침
+- 웹 UI: 서버 설정의 원격 analyze-kdump 경로(Windows는 분석 스크립트 경로)를 비워 저장하면 그대로 저장돼, 설치돼 있어도 '없음'으로 보이고 설치·업데이트가 "설치 위치를 알 수 없습니다"로 실패하던 문제. 비워 두면 기본 설치 위치를 씁니다. 예전에 빈 값으로 저장한 서버도 기본 위치로 읽습니다
+
 ### 바뀜
 - 문서: Oracle Linux 8.10(UEK 커널, crash 9.0.2, `python3` 없이 platform-python 3.6)을 README의 검증한 버전에 추가했습니다. 실제 VM의 SysRq 덤프로 리포트, JSON 요약, 웹 UI 서버 준비의 Oracle debuginfo 저장소·`kernel-uek` 디버그 커널 설치, vmlinux 설치 안내를 확인했습니다
 - 테스트 VM 스크립트(`tests/vm/kdump-vm-test.sh`)가 기본으로 받는 브랜치를 없어진 예전 브랜치에서 `main`으로 바꿨습니다

@@ -885,6 +885,21 @@ class WindowsServerTest(unittest.TestCase):
             with self.assertRaises(webui.ApiError):
                 store.save_server(dict(self.SERVER, os="solaris"))
 
+    def test_save_server_empty_tool_uses_default(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = webui.Store(d)
+            linux = store.save_server({"name": "db01", "target": "u@h", "tool": "  "})
+            self.assertEqual(linux["tool"], webui.DEFAULT_TOOL)
+            win = store.save_server(dict(self.SERVER, name="win01", tool=""))
+            self.assertEqual(win["tool"], webui.WIN_TOOL)
+            kept = store.save_server({"name": "db02", "target": "u@h", "tool": " analyze-kdump "})
+            self.assertEqual(kept["tool"], "analyze-kdump")                 # 명령 이름은 그대로(앞뒤 공백만 뺌)
+            # 예전 버전이 빈 값으로 저장한 서버도 읽을 때 기본 위치로 채웁니다.
+            with open(os.path.join(d, "servers.json"), "w", encoding="utf-8") as f:
+                json.dump([{"name": "old", "target": "u@h", "tool": ""},
+                           {"name": "oldwin", "target": "u@h", "tool": "", "os": "windows"}], f)
+            self.assertEqual([s["tool"] for s in store.servers()], [webui.DEFAULT_TOOL, webui.WIN_TOOL])
+
     def test_windows_summary_and_prompt(self):
         import json
         with tempfile.TemporaryDirectory() as d:
