@@ -29,7 +29,7 @@ Linux 커널 패닉 덤프(`vmcore`)와 Windows 블루스크린 메모리 덤프
 - **Oracle Linux 8.10 검증 범위:** SysRq 덤프로 리포트(장애 유형 판정), JSON 요약, 웹 UI 서버 준비의 Oracle debuginfo 저장소 추가와 `kernel-uek` 디버그 커널 설치, vmlinux 설치 안내를 확인했습니다. 서버 LLM 분석은 응답 처리까지 가짜 LLM CLI로 확인했습니다. RHEL·CentOS 7은 실제 서버에서 확인하지 않았습니다.
 - **아키텍처:** Linux는 x86_64와 aarch64 덤프를 알아보고, 덤프·vmlinux·분석 서버의 아키텍처가 다르면 실행 전에 알려 줍니다. 실제 검증은 x86_64에서 했습니다. Windows는 x64만 지원합니다.
 - **덤프 형식:** RHEL 계열 `vmcore`, Ubuntu·Debian `dump.<시각>`, SSH로 받은 flattened 덤프(`vmcore.flat`), Windows `MEMORY.DMP`·미니덤프를 분석합니다. SUSE의 덤프 위치도 알아보지만, 서버 준비(패키지 설치)는 `dnf`·`yum`·`apt-get`만 지원합니다.
-- **분석 서버에 필요한 것:** `bash`, `crash`, 덤프 커널에 맞는 `vmlinux`. LLM 분석과 JSON 요약에는 Python 3.6 이상(`python3`, 없으면 RHEL 8의 `/usr/libexec/platform-python`)과 `curl`, 메뉴 화면에는 `whiptail`이 필요합니다. 자세한 내용은 [요구 사항](docs/install.md#요구-사항)과 [Windows 서버](docs/windows.md)를 봅니다.
+- **분석 서버에 필요한 것:** `bash`, `crash`, 덤프 커널에 맞는 `vmlinux`. LLM 분석과 JSON 요약에는 Python 3.6 이상(`python3`, 없으면 RHEL 8의 `/usr/libexec/platform-python`)과 `curl`, 메뉴 화면에는 `whiptail`이 필요합니다. 자세한 내용은 [요구 사항](docs/install.md#요구-사항)과 [Windows 서버](docs/windows.md)를 봅니다. 허용해야 할 네트워크 접속은 [필요한 패키지와 네트워크](docs/requirements.md)에 모았습니다.
 
 ## 5분 시작 가이드
 
@@ -77,6 +77,7 @@ Windows에서는 `kdump-analyzer\windows\install-shortcut.cmd`를 한 번 실행
 | 문서 | 내용 |
 |---|---|
 | [설치와 업데이트](docs/install.md) | 요구 사항, 설치(`install.sh`), 설치 위치 옮기기, 삭제, 버전 확인과 업데이트, 디렉터리 구조 |
+| [필요한 패키지와 네트워크](docs/requirements.md) | 컴퓨터별로 설치할 패키지, 방화벽·프록시에서 허용할 주소와 포트, 인터넷이 없는 환경 |
 | [analyze-kdump 사용법](docs/usage.md) | 명령 옵션, 동작 순서, 종료 코드, 리포트 섹션, 장애 유형 판정, LLM 입력 축소와 마스킹, vmlinux 준비 |
 | [설정 파일과 LLM](docs/configuration.md) | `analyze-kdump.conf` 항목, LLM provider별 설정, API 키 관리, 구독 계정(Claude Code·Codex) 사용 |
 | [웹 UI](docs/webui.md) | 실행과 접속, Windows 아이콘, 화면별 기능, 원격 분석 방식, 서버 설치·업그레이드·삭제 |

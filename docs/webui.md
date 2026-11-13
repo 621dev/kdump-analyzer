@@ -1,6 +1,6 @@
 # 웹 UI
 
-[README](../README.md) · [설치](install.md) · [사용법](usage.md) · [설정·LLM](configuration.md) · [웹 UI](webui.md) · [Windows](windows.md) · [터미널 메뉴](terminal-ui.md) · [개발·검증](development.md)
+[README](../README.md) · [설치](install.md) · [요구 사항·네트워크](requirements.md) · [사용법](usage.md) · [설정·LLM](configuration.md) · [웹 UI](webui.md) · [Windows](windows.md) · [터미널 메뉴](terminal-ui.md) · [개발·검증](development.md)
 
 PC나 서버(Windows·macOS·Linux)에서 실행해 브라우저로 쓰는 화면입니다. 노트북, 데스크톱, 관리용 서버 등 분석할 서버에 SSH로 접속할 수 있는 컴퓨터면 됩니다. 서버 현장에서는 터미널 메뉴를, 평소 분석과 결과 확인은 웹 UI를 쓰는 식으로 함께 씁니다.
 

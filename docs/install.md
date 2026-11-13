@@ -1,6 +1,6 @@
 # 설치와 업데이트
 
-[README](../README.md) · [설치](install.md) · [사용법](usage.md) · [설정·LLM](configuration.md) · [웹 UI](webui.md) · [Windows](windows.md) · [터미널 메뉴](terminal-ui.md) · [개발·검증](development.md)
+[README](../README.md) · [설치](install.md) · [요구 사항·네트워크](requirements.md) · [사용법](usage.md) · [설정·LLM](configuration.md) · [웹 UI](webui.md) · [Windows](windows.md) · [터미널 메뉴](terminal-ui.md) · [개발·검증](development.md)
 
 서버에 analyze-kdump를 설치하고 업데이트하는 방법입니다.
 
@@ -12,6 +12,7 @@
 - `vmcore`의 커널 버전과 일치하는 `vmlinux`
 - LLM 분석과 JSON 요약을 쓸 경우 `curl`과 Python 3.6 이상. `python3`가 없으면 RHEL 8 최소 설치에도 있는 `/usr/libexec/platform-python`을 씁니다.
 - 분석 서버 메모리: `crash`가 커널 디버그 정보를 읽을 때 RHEL 9 커널 기준 약 1.5GB를 사용합니다. 메모리가 2GB 이하인 서버나 VM에서는 swap을 추가합니다. 메모리가 부족하면 `crash`가 OOM으로 강제 종료되고 종료 코드 `2`가 반환됩니다.
+- 컴퓨터별 패키지 목록과 방화벽·프록시에서 허용할 주소는 [필요한 패키지와 네트워크](requirements.md)에 모았습니다.
 
 RHEL 계열 시스템에서는 보통 `crash`와 `debuginfo-install`을 사용할 수 있어야 합니다.
 
