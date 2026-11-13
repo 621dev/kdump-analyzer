@@ -75,8 +75,8 @@
           <option value="llm">리포트 + LLM 분석</option>
         </select>
       </label>
-      <label class="check"><input type="checkbox" name="auto_backlog"> 자동 분석을 켤 때 리포트가 없는 기존 덤프도 분석 <span class="hint">(최근 것부터 최대 10개, 끄면 그때 있던 덤프는 건너뜀)</span></label>
-      <label class="check" id="label-sudo"><input type="checkbox" name="sudo" checked> 원격 명령을 sudo로 실행 <span class="hint">(비밀번호 없는 sudo 필요)</span></label>
+      <label class="check span-all sub-option"><input type="checkbox" name="auto_backlog"> 자동 분석을 켤 때 리포트가 없는 기존 덤프도 분석 <span class="hint">(최근 것부터 최대 10개, 끄면 그때 있던 덤프는 건너뜀)</span></label>
+      <label class="check span-all" id="label-sudo"><input type="checkbox" name="sudo" checked> 원격 명령을 sudo로 실행 <span class="hint">(비밀번호 없는 sudo 필요)</span></label>
       <p class="hint" id="windows-hint" hidden>Windows 서버는 OpenSSH 서버를 켜고 관리자 계정으로 SSH 키 접속이 되어야 합니다. 분석에는 Debugging Tools for Windows(cdb)가 필요합니다.</p>
     </div>
     <p class="form-error" id="server-error"></p>
