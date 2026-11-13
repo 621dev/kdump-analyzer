@@ -2697,8 +2697,12 @@ class ResultJanitor:
         result.update(time=time.time(), days=days)
         self.last = result
         if result["records"]:
-            print("보관 기간(%d일)이 지난 기록 %d건(파일 %d개)을 지웠습니다." % (days, result["records"], result["files"]),
-                  flush=True)
+            # 콘솔 인코딩이 한글을 못 쓰는 환경(예: cp1252)에서도 정리 결과는 돌려줘야 하므로 출력 실패는 무시합니다.
+            try:
+                print("보관 기간(%d일)이 지난 기록 %d건(파일 %d개)을 지웠습니다." % (days, result["records"], result["files"]),
+                      flush=True)
+            except (UnicodeEncodeError, OSError, ValueError):
+                pass
         return result
 
 
