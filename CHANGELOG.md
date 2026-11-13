@@ -4,6 +4,12 @@
 GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리스)으로 받을 수 있습니다.
 1.18.3까지는 프로젝트 이름이 `kdump-tools`였습니다. 아래 기록의 링크는 GitHub이 새 주소로 연결합니다.
 
+## [Unreleased]
+
+### 바뀜
+- 문서: Oracle Linux 8.10(UEK 커널, crash 9.0.2, `python3` 없이 platform-python 3.6)을 README의 검증한 버전에 추가했습니다. 실제 VM의 SysRq 덤프로 리포트, JSON 요약, 웹 UI 서버 준비의 Oracle debuginfo 저장소·`kernel-uek` 디버그 커널 설치, vmlinux 설치 안내를 확인했습니다
+- 테스트 VM 스크립트(`tests/vm/kdump-vm-test.sh`)가 기본으로 받는 브랜치를 없어진 예전 브랜치에서 `main`으로 바꿨습니다
+
 ## [1.27.0] - 2026-11-10
 
 ### 고침
