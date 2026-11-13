@@ -6,8 +6,10 @@ GitHub 릴리스가 있는 버전은 업데이트 기능(기본: 최신 릴리�
 
 ## [Unreleased]
 
-### 추가
-- 문서: [필요한 패키지와 네트워크](docs/requirements.md). 분석 서버(Linux·Windows)와 웹 UI 컴퓨터에 설치할 패키지, 연결 방향과 포트, 방화벽·프록시에서 허용할 주소(LLM API, GitHub, 배포판별 debuginfo 저장소, Microsoft 심볼 서버), 인터넷이 없는 환경에서 쓰는 방법을 한곳에 모았습니다
+## [1.28.2] - 2026-11-13
+
+### 문서
+- [필요한 패키지와 네트워크](docs/requirements.md). 분석 서버(Linux·Windows)와 웹 UI 컴퓨터에 설치할 패키지, 연결 방향과 포트, 방화벽·프록시에서 허용할 주소(LLM API, GitHub, 배포판별 debuginfo 저장소, Microsoft 심볼 서버), 인터넷이 없는 환경에서 쓰는 방법을 한곳에 모았습니다 (#69)
 
 ## [1.28.1] - 2026-11-13
 
