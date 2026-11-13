@@ -1,0 +1,33 @@
+# kdump-analyzer 웹 UI를 Linux 서버에서 상시 실행하는 systemd 서비스 (docs/webui.md "서버에서 상시 실행")
+#
+#   sudo cp webui/kdump-webui.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now kdump-webui
+#   sudo -u kdumpui python3 /opt/kdump-analyzer-webui/webui/kdump-webui.py --show-url --data-dir /var/lib/kdump-webui/data
+#
+# 127.0.0.1에서만 듣습니다. 다른 컴퓨터에서는 SSH 포트 전달로 접속합니다:
+#   ssh -L 8730:127.0.0.1:8730 <사용자>@<이 서버>
+# 경로, 계정, Python을 바꿨으면 아래 값도 맞춰 주세요. RHEL 8은 python3가 3.6이므로 python39를 설치하고
+# ExecStart의 /usr/bin/python3를 /usr/bin/python3.9로 바꿉니다(웹 UI는 Python 3.8 이상).
+
+[Unit]
+Description=kdump-analyzer web UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kdumpui
+Group=kdumpui
+WorkingDirectory=/opt/kdump-analyzer-webui
+ExecStart=/usr/bin/python3 /opt/kdump-analyzer-webui/webui/kdump-webui.py --service --port 8730 --data-dir /var/lib/kdump-webui/data
+# 화면의 "다시 시작"(업데이트 적용)은 종료 코드 75로 끝납니다. 어떤 이유로 끝나든 다시 띄웁니다.
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

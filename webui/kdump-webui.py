@@ -3150,7 +3150,72 @@ def parse_args():
                         help="Windows 바탕화면과 시작 메뉴에 아이콘 바로가기를 만듭니다")
     parser.add_argument("--remove-shortcut", action="store_true", help="--install-shortcut으로 만든 바로가기를 지웁니다")
     parser.add_argument("--shortcut-dir", help="바로가기를 만들 폴더(기본: 바탕화면과 시작 메뉴)")
+    parser.add_argument("--service", action="store_true",
+                        help="서버에서 상시 실행(systemd 등): --port 그대로, 토큰은 파일에 두고 다시 써서 주소가 바뀌지 않음. "
+                             "화면의 '다시 시작'은 종료 코드 %d로 끝내 서비스 관리자가 다시 띄움" % RESTART_EXIT)
+    parser.add_argument("--token-file", help="--service의 접속 토큰 파일(기본: <데이터 폴더>/service-token, 없으면 만듦)")
+    parser.add_argument("--show-url", action="store_true",
+                        help="--service로 실행 중인(또는 실행할) 웹 UI의 접속 주소를 토큰 파일에서 읽어 출력")
     return parser.parse_args()
+
+
+SERVICE_TOKEN = "service-token"
+TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+
+
+def service_token(args, create=True):
+    """--service의 접속 토큰. 파일에 있으면 그대로 쓰고, 없거나 형식이 틀리면 새로 만들어 소유자만 읽게 저장합니다."""
+    path = args.token_file or os.path.join(args.data_dir, SERVICE_TOKEN)
+    try:
+        with open(path, encoding="ascii") as f:
+            token = f.read().strip()
+        if TOKEN_RE.match(token):
+            return token, path
+    except (OSError, UnicodeDecodeError):
+        pass
+    if not create:
+        return None, path
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    token = secrets.token_urlsafe(24)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="ascii") as f:
+        f.write(token + "\n")
+    return token, path
+
+
+def service_url(port, token):
+    return "http://127.0.0.1:%d/?t=%s" % (port, token)
+
+
+def show_service_url(args):
+    token, path = service_token(args, create=False)
+    if not token:
+        sys.exit("토큰 파일이 없습니다: %s (--service로 한 번 실행하면 만듭니다)" % path)
+    print(service_url(args.port, token))
+
+
+def serve_service(args):
+    """systemd 같은 서비스 관리자 아래에서 실행합니다. 감시 프로세스·브라우저 없이 정한 포트에서만 듣고,
+    다시 시작이 필요하면 RESTART_EXIT로 끝냅니다(서비스의 Restart=always가 새 코드로 다시 띄움)."""
+    store = Store(args.data_dir)
+    token, path = service_token(args)
+    httpd = bind_exact_port(args.port)
+    app = App(store, args.port, token=token, supervised=True)
+    app.httpd = httpd
+    Handler.app = app
+    print("kdump-analyzer 웹 UI v%s (서비스 모드)" % version_text())
+    print("데이터: %s" % args.data_dir)
+    print("127.0.0.1:%d에서 듣습니다. 다른 컴퓨터에서는 SSH 포트 전달로 접속합니다:" % args.port)
+    print("  ssh -L %d:127.0.0.1:%d <사용자>@<이 서버>" % (args.port, args.port))
+    print("접속 주소는 토큰 파일(%s)로 만듭니다: --show-url" % path, flush=True)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    httpd.server_close()
+    if app.restart_requested:
+        print("다시 시작을 요청받아 종료합니다(코드 %d)." % RESTART_EXIT, flush=True)
+        os._exit(RESTART_EXIT)
 
 
 def bind_free_port(start):
@@ -3429,9 +3494,13 @@ def main():
     args = parse_args()
     if args.install_shortcut or args.remove_shortcut:
         return manage_shortcut(args)
+    if args.show_url:
+        return show_service_url(args)
     setup_log(args.data_dir)
     try:
-        if os.environ.get(ENV_WORKER) == "1":
+        if args.service:
+            serve_service(args)
+        elif os.environ.get(ENV_WORKER) == "1":
             serve(args, supervised=True)
         elif args.no_supervisor:
             serve(args)
