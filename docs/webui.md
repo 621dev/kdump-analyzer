@@ -18,7 +18,7 @@ python webui/kdump-webui.py
 - **접속:** 실행하면 브라우저가 열리고, 콘솔에 `http://127.0.0.1:8730/?t=<토큰>` 주소가 출력됩니다.
   - `127.0.0.1`에만 열리고, 이 토큰 주소로 들어온 브라우저만 쓸 수 있습니다. 토큰은 실행할 때마다 바뀝니다.
   - 다른 Host 이름이나 다른 사이트에서 온 요청은 거부합니다(DNS 리바인딩, CSRF 방지).
-- **옵션:** `--port`(기본 8730), `--data-dir`(기본 `~/.kdump-tools-web`), `--no-browser`, `--no-supervisor`
+- **옵션:** `--port`(기본 8730), `--data-dir`(기본 `~/.kdump-tools-web`), `--no-browser`, `--no-supervisor`, `--service`·`--token-file`·`--show-url`(아래 "서버에서 상시 실행")
 - **Windows에서 아이콘으로 실행:** 콘솔을 열지 않고 바탕화면 아이콘을 더블클릭해서 쓸 수 있습니다.
   - 한 번만 `windows\install-shortcut.cmd`를 더블클릭하거나 `python webui\kdump-webui.py --install-shortcut`을 실행하면 바탕화면과 시작 메뉴에 **kdump-analyzer 웹 UI** 아이콘이 생깁니다(`--shortcut-dir <폴더>`로 위치 지정, `--remove-shortcut`으로 삭제).
   - 아이콘은 `pythonw.exe`로 서버를 콘솔 창 없이 띄우고 브라우저를 엽니다. 이미 실행 중이면 새로 띄우지 않고 그 서버의 화면을 엽니다.
@@ -30,6 +30,47 @@ python webui/kdump-webui.py
   - 진행 중이거나 대기 중인 작업이 있으면 다시 시작하지 않습니다.
   - `--no-supervisor`로 실행하면 감시 프로세스 없이 예전처럼 한 프로세스로 돌며, 화면에서 다시 시작할 수 없습니다.
 - **저장 위치:** 서버 목록·설정·가져온 리포트와 분석은 데이터 디렉터리에 저장됩니다. API 키와 Claude Code 장기 토큰은 `secrets/`에 저장하고(Windows에서는 DPAPI로 암호화), 화면과 API 응답에는 내용을 보여주지 않습니다.
+
+### 서버에서 상시 실행 (systemd)
+
+새 덤프 자동 분석은 웹 UI가 켜져 있을 때만 동작합니다. 개인 PC 대신 관리용 Linux 서버에서 서비스로 돌리면 밤사이 생긴 덤프도 놓치지 않습니다.
+
+- **서비스 모드(`--service`):** systemd 같은 서비스 관리자 아래에서 실행하는 방식입니다.
+  - 정한 포트(`--port`)에서만 듣고, 감시 프로세스와 브라우저를 띄우지 않습니다.
+  - 접속 토큰을 데이터 폴더의 `service-token`(소유자만 읽기, `--token-file`로 위치 지정)에 두고 다시 써서, 서비스를 다시 시작해도 접속 주소가 바뀌지 않습니다. 토큰을 바꾸려면 파일을 지우고 서비스를 다시 시작합니다.
+  - 화면의 **웹 UI 다시 시작**(업데이트 적용)은 종료 코드 75로 끝내고, 서비스의 `Restart=always`가 새 코드로 다시 띄웁니다.
+- **접속:** 보안 설계는 그대로라 `127.0.0.1`에서만 듣습니다. 내 PC에서 SSH 포트 전달로 접속합니다.
+  ```bash
+  ssh -L 8730:127.0.0.1:8730 <사용자>@<관리 서버>
+  ```
+  그 뒤 내 PC 브라우저에서 `--show-url`이 알려 주는 `http://127.0.0.1:8730/?t=<토큰>`을 엽니다. 내 PC 쪽 포트도 8730으로 맞춰야 합니다(다른 포트는 Host 확인에서 거부).
+- **요구 사항:** Python 3.8 이상, `ssh`, `git`(화면에서 업데이트할 때). RHEL 8은 기본 `python3`가 3.6이므로 `dnf install python39`로 설치하고 서비스 파일의 Python 경로를 `/usr/bin/python3.9`로 바꿉니다.
+
+설치 순서 (관리 서버, root):
+
+```bash
+# 1) 전용 계정과 저장소 (화면에서 업데이트하려면 이 계정이 저장소를 쓸 수 있어야 합니다)
+useradd -r -m -d /var/lib/kdump-webui -s /sbin/nologin kdumpui
+git clone https://github.com/621dev/kdump-analyzer.git /opt/kdump-analyzer-webui
+chown -R kdumpui: /opt/kdump-analyzer-webui
+
+# 2) 분석 서버에 접속할 SSH 키 (암호 없는 키, 공개 키를 각 분석 서버에 등록)
+sudo -u kdumpui mkdir -p -m 700 /var/lib/kdump-webui/.ssh
+sudo -u kdumpui ssh-keygen -t ed25519 -N '' -f /var/lib/kdump-webui/.ssh/id_ed25519
+
+# 3) 서비스 등록과 시작
+cp /opt/kdump-analyzer-webui/webui/kdump-webui.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now kdump-webui
+
+# 4) 접속 주소 확인
+sudo -u kdumpui python3 /opt/kdump-analyzer-webui/webui/kdump-webui.py --show-url --data-dir /var/lib/kdump-webui/data
+```
+
+- 웹 UI에서 서버를 추가할 때 SSH 키 파일은 `/var/lib/kdump-webui/.ssh/id_ed25519`를 씁니다. 서비스에는 ssh-agent가 없으므로 암호(passphrase)를 건 키는 쓸 수 없습니다. 이 키 전용 계정을 분석 서버마다 만들고 필요한 sudo만 주는 것을 권합니다.
+- 로그: `journalctl -u kdump-webui`. 멈춤·시작: `systemctl stop|start kdump-webui`.
+- API 키·Claude Code 장기 토큰은 Linux에서는 암호화되지 않고 `secrets/`에 소유자만 읽게 저장됩니다. 전용 계정과 `UMask=0077`로 다른 계정이 읽지 못하게 합니다.
+- 데스크톱 알림은 웹 UI를 열어 둔 브라우저에서만 뜹니다. 화면을 열지 않아도 자동 분석 결과는 분석 기록과 **최근 자동 분석**에 남습니다.
 
 화면 구성:
 

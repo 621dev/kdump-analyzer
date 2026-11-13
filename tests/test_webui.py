@@ -941,6 +941,21 @@ class WindowsServerTest(unittest.TestCase):
             with self.assertRaises(webui.ApiError):
                 store.save_server(dict(self.SERVER, os="solaris"))
 
+    def test_save_server_empty_tool_uses_default(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = webui.Store(d)
+            linux = store.save_server({"name": "db01", "target": "u@h", "tool": "  "})
+            self.assertEqual(linux["tool"], webui.DEFAULT_TOOL)
+            win = store.save_server(dict(self.SERVER, name="win01", tool=""))
+            self.assertEqual(win["tool"], webui.WIN_TOOL)
+            kept = store.save_server({"name": "db02", "target": "u@h", "tool": " analyze-kdump "})
+            self.assertEqual(kept["tool"], "analyze-kdump")                 # 명령 이름은 그대로(앞뒤 공백만 뺌)
+            # 예전 버전이 빈 값으로 저장한 서버도 읽을 때 기본 위치로 채웁니다.
+            with open(os.path.join(d, "servers.json"), "w", encoding="utf-8") as f:
+                json.dump([{"name": "old", "target": "u@h", "tool": ""},
+                           {"name": "oldwin", "target": "u@h", "tool": "", "os": "windows"}], f)
+            self.assertEqual([s["tool"] for s in store.servers()], [webui.DEFAULT_TOOL, webui.WIN_TOOL])
+
     def test_windows_summary_and_prompt(self):
         import json
         with tempfile.TemporaryDirectory() as d:
@@ -1139,6 +1154,63 @@ class WindowsServerTest(unittest.TestCase):
 def json_loads(data):
     import json
     return json.loads(data.decode("utf-8"))
+
+
+class ServiceModeTest(unittest.TestCase):
+    """서버 상시 실행(--service): 토큰 파일을 다시 쓰고, 정한 포트에서 토큰 주소로 로그인됩니다."""
+
+    def args(self, d, **kw):
+        return type("Args", (), dict({"data_dir": d, "token_file": None, "port": 8730}, **kw))
+
+    def test_token_file_reused_and_private(self):
+        with tempfile.TemporaryDirectory() as d:
+            token, path = webui.service_token(self.args(d))
+            self.assertRegex(token, webui.TOKEN_RE)
+            self.assertEqual(path, os.path.join(d, webui.SERVICE_TOKEN))
+            self.assertEqual(webui.service_token(self.args(d))[0], token)       # 다시 시작해도 같은 토큰
+            if os.name == "posix":
+                self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            with open(path, "w", encoding="ascii") as f:
+                f.write("bad token!\n")                                          # 형식이 틀리면 새로 만듦
+            self.assertNotEqual(webui.service_token(self.args(d))[0], "bad token!")
+            other = os.path.join(d, "sub", "tok")
+            self.assertEqual(webui.service_token(self.args(d, token_file=other))[1], other)
+            self.assertEqual(webui.service_token(self.args(os.path.join(d, "none")), create=False)[0], None)
+
+    def test_service_process_serves_token_login(self):
+        with tempfile.TemporaryDirectory() as d:
+            probe = webui.socketserver.TCPServer(("127.0.0.1", 0), None)
+            port = probe.server_address[1]
+            probe.server_close()
+            proc = subprocess.Popen([sys.executable, os.path.join(WEBUI, "kdump-webui.py"), "--service",
+                                     "--port", str(port), "--data-dir", d],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            try:
+                deadline = time.time() + 20
+                token_path = os.path.join(d, webui.SERVICE_TOKEN)
+                while not os.path.exists(token_path) and time.time() < deadline:
+                    time.sleep(0.2)
+                url = subprocess.run([sys.executable, os.path.join(WEBUI, "kdump-webui.py"), "--show-url",
+                                      "--port", str(port), "--data-dir", d],
+                                     capture_output=True, text=True, timeout=20).stdout.strip()
+                self.assertTrue(url.startswith("http://127.0.0.1:%d/?t=" % port), url)
+                import http.client
+                status = None
+                while time.time() < deadline:
+                    try:
+                        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                        conn.request("GET", url.split(str(port), 1)[1])
+                        resp = conn.getresponse()
+                        status, cookie = resp.status, resp.getheader("Set-Cookie", "")
+                        conn.close()
+                        break
+                    except OSError:
+                        time.sleep(0.3)
+                self.assertEqual(status, 302)                                      # 토큰 주소 → 쿠키 발급 후 이동
+                self.assertIn("kt=" + url.split("?t=", 1)[1], cookie)
+            finally:
+                proc.kill()
+                proc.communicate(timeout=10)
 
 
 class FetchLatestTest(unittest.TestCase):
