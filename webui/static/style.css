@@ -213,6 +213,16 @@ dialog h3 { margin: 4px 0 10px; font-size: 14px; color: var(--muted); }
 label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; font-weight: 600; }
 label input, label select { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); font-weight: 400; }
 label.check { flex-direction: row; align-items: center; gap: 8px; font-weight: 500; }
+/* 한 줄에 놓인 칸들의 입력란 높이를 맞춥니다. 안내 문구(.hint)가 있거나 두 줄로 접혀 제목이 길어진 칸이 있어도,
+   입력란(마지막 요소)을 칸 아래쪽에 붙여 같은 줄의 입력란이 같은 높이에 놓이게 합니다. */
+.grid > label:not(.check) > :last-child { margin-top: auto; }
+/* 입력란 사이에 놓인 체크박스는 입력란 줄의 가운데에 맞춥니다. */
+.grid > label.check { align-self: end; min-height: 38px; }
+/* 선택 상자와 입력란의 높이를 같게 합니다(브라우저 기본값이 1px 다름). */
+label input:not([type="checkbox"]):not([type="radio"]), label select { min-height: 38px; }
+/* 양식에서 체크박스 옵션은 한 줄을 다 쓰게 합니다(반 칸에 넣으면 긴 설명이 여러 줄로 접혀 옆 칸과 어긋남). */
+.grid > label.check.span-all { grid-column: 1 / -1; align-self: start; min-height: 0; }
+.grid > label.check.sub-option { margin-top: -4px; padding-left: 2px; }
 label.radio-choice { align-items: flex-start; }
 label.radio-choice input { margin-top: 3px; padding: 0; }
 label.radio-choice .muted { font-weight: 400; }
