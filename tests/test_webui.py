@@ -248,6 +248,62 @@ class AutoLogTest(unittest.TestCase):
         self.assertEqual(self.store.auto_log(), [])
 
 
+class RetentionTest(unittest.TestCase):
+    """리포트 보관 기간: 가장 최근 파일이 기간을 넘긴 기록만 지우고, 진행 중인 작업의 기록은 건너뜁니다."""
+
+    DAY = 86400
+    NOW = time.time()          # 파일 시각을 지금 기준으로 맞춰, 실제 시각으로 도는 정리와도 같은 결과
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = webui.Store(self.tmp.name)
+        self.folder = self.store.report_dir("db01")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write(self, name, age_days, source=None):
+        path = os.path.join(self.folder, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("kdump llm analysis\nsource_report: /x/%s\n\n판정: x\n" % source if source else "kdump summary report\n")
+        t = self.NOW - age_days * self.DAY
+        os.utime(path, (t, t))
+
+    def setup_records(self):
+        self.write("kdump-report-old.txt", 40)                                     # 오래된 리포트만
+        with open(os.path.join(self.folder, "kdump-report-old.json"), "w") as f:
+            f.write("{}")
+        self.write("kdump-report-reanalyzed.txt", 40)                              # 오래됐지만 최근에 다시 분석
+        self.write("kdump-analysis-reanalyzed.txt", 2, source="kdump-report-reanalyzed.txt")
+        self.write("kdump-report-new.txt", 3)                                      # 최근 리포트
+        self.write("kdump-analysis-orphan.txt", 50, source="kdump-report-gone.txt")  # 원본 없는 오래된 분석
+
+    def test_prunes_only_expired_records(self):
+        self.setup_records()
+        result = self.store.prune_results(30, now=self.NOW)
+        self.assertEqual((result["records"], result["files"], result["skipped"]), (2, 2, 0))
+        self.assertEqual(sorted(os.listdir(self.folder)), ["kdump-analysis-reanalyzed.txt",
+                                                            "kdump-report-new.txt", "kdump-report-reanalyzed.txt"])
+
+    def test_off_and_busy(self):
+        self.setup_records()
+        before = sorted(os.listdir(self.folder))
+        self.assertEqual(self.store.prune_results(0, now=self.NOW)["records"], 0)  # 0이면 끔
+        self.assertEqual(sorted(os.listdir(self.folder)), before)
+        result = self.store.prune_results(30, busy_for=lambda s: {"kdump-report-old.txt"}, now=self.NOW)
+        self.assertEqual((result["records"], result["skipped"]), (1, 1))
+        self.assertIn("kdump-report-old.txt", os.listdir(self.folder))
+
+    def test_janitor_uses_setting(self):
+        self.setup_records()
+        janitor = webui.ResultJanitor(self.store, webui.Jobs(self.store))
+        self.assertEqual(janitor.run()["records"], 0)                              # 기본 0일: 지우지 않음
+        self.store.save_settings({"retention_days": 30})
+        # 30일: 오래된 리포트, 원본 없는 분석은 지우고, 다시 분석한 기록과 최근 기록은 남깁니다.
+        self.assertEqual(janitor.run()["records"], 2)
+        self.assertEqual(janitor.last["days"], 30)
+
+
 class AutoWatcherTest(unittest.TestCase):
     """새 덤프 자동 분석: 기준 기록, 새 덤프, 쓰는 중인 덤프, 덮어쓴 덤프, 끄기, 접속 실패, 확인 주기."""
 
