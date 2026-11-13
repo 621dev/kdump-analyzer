@@ -60,7 +60,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(APP_DIR)
 # 화면(app.js)과 서버가 주고받는 API의 판. API를 바꿀 때 app.js의 API_LEVEL과 함께 올립니다.
 # 업데이트 뒤 서버를 다시 시작하지 않으면 화면이 이 값의 차이로 알아채고 안내합니다.
-API_LEVEL = 11
+API_LEVEL = 12
 
 # 화면의 "다시 시작"은 감시 프로세스가 서버를 새 코드로 다시 띄우는 방식입니다.
 RESTART_EXIT = 75                     # 서버가 이 코드로 끝나면 감시 프로세스가 다시 띄웁니다
@@ -87,6 +87,7 @@ DEFAULT_SETTINGS = {
     # release: GitHub의 최신 릴리스(태그)로 업데이트, branch: update_branch의 최신 커밋으로 업데이트
     "update_channel": "release",
     "auto_interval": 10,   # 새 덤프 자동 분석: 서버를 확인하는 주기(분)
+    "retention_days": 0,   # 리포트 보관 기간(일). 0이면 지우지 않음
 }
 UPDATE_CHANNELS = ("release", "branch")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -163,7 +164,12 @@ class Store:
         return current
 
     def servers(self):
-        return self._load("servers.json", [])
+        servers = self._load("servers.json", [])
+        for server in servers:
+            # 1.27.0까지는 원격 경로를 비운 채 저장할 수 있었습니다. 읽을 때 기본 위치로 채웁니다.
+            if isinstance(server, dict) and not str(server.get("tool") or "").strip():
+                server["tool"] = WIN_TOOL if server.get("os") == "windows" else DEFAULT_TOOL
+        return servers
 
     def server(self, name):
         for server in self.servers():
@@ -187,6 +193,9 @@ class Store:
             raise ApiError(400, "자동 분석은 off, report, llm 중 하나여야 합니다.")
         if server.get("os") not in SERVER_OS:
             raise ApiError(400, "운영체제는 linux 또는 windows여야 합니다.")
+        # 원격 경로를 비워 두면 기본 설치 위치를 씁니다. 빈 값으로 저장되면 설치본이 있어도 '없음'으로 보이고
+        # 설치·업데이트가 "설치 위치를 알 수 없습니다"로 실패합니다.
+        server["tool"] = str(server.get("tool") or "").strip() or (WIN_TOOL if server["os"] == "windows" else DEFAULT_TOOL)
         if server["os"] == "windows":
             server["sudo"] = False  # Windows는 관리자 계정으로 접속합니다(sudo 없음).
             if not server["tool"].lower().endswith("\\bin\\analyze-windump.ps1"):
@@ -373,6 +382,27 @@ class Store:
         log = self._load(AUTO_LOG, [])
         return {(e.get("server"), e.get("report")) for e in log if isinstance(e, dict) and e.get("report")} \
             if isinstance(log, list) else set()
+
+    def prune_results(self, days, busy_for=lambda server: set(), now=None):
+        """보관 기간(days일)이 지난 기록을 지웁니다. 기록의 나이는 리포트와 그 LLM 분석 중 가장 최근 파일로 봅니다
+        (오래된 리포트를 최근에 다시 분석했으면 남김). 진행 중인 작업이 쓰는 기록은 건너뜁니다.
+        결과: {"records": 지운 기록 수, "files": 지운 파일 수, "skipped": 건너뛴 기록 수}"""
+        result = {"records": 0, "files": 0, "skipped": 0}
+        if not days or days <= 0:
+            return result
+        cutoff = (now if now is not None else time.time()) - days * 86400
+        for record in self.history():
+            if record["time"] >= cutoff:
+                continue
+            names = [record["report"]["name"]] if record["report"] else [a["name"] for a in record["analyses"]]
+            try:
+                deleted = self.delete_results(record["server"], names, busy=busy_for(record["server"]))
+            except ApiError:
+                result["skipped"] += 1       # 진행 중인 작업이 쓰는 중이거나 그새 지워짐
+                continue
+            result["records"] += 1
+            result["files"] += len(deleted)
+        return result
 
     def delete_results(self, server, names, busy=()):
         """웹 UI에 저장된 리포트·분석 파일을 지웁니다. 삭제한 서버의 기록도 지울 수 있습니다.
@@ -2643,6 +2673,50 @@ class Jobs:
 
 # ---------------------------------------------------------------- HTTP
 
+class ResultJanitor:
+    """리포트 보관 기간: 설정의 retention_days가 지난 기록을 한 시간마다 지웁니다(0이면 아무것도 하지 않음)."""
+
+    FIRST = 120       # 웹 UI를 켜고 이만큼 뒤에 처음 정리합니다(초)
+    INTERVAL = 3600   # 그 뒤로 정리하는 간격(초)
+
+    def __init__(self, store, jobs):
+        self.store = store
+        self.jobs = jobs
+        self.last = None      # {"time", "records", "files", "skipped"} 또는 {"time", "error"}
+        self.stop = threading.Event()
+        self.lock = threading.Lock()
+
+    def start(self):
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        wait = self.FIRST
+        while not self.stop.wait(wait):
+            wait = self.INTERVAL
+            try:
+                self.run()
+            except Exception as error:  # noqa: BLE001 - 정리 스레드는 멈추지 않게 합니다.
+                print("리포트 보관 기간 정리 중 오류: %s" % error, file=sys.stderr)
+
+    def run(self):
+        try:
+            days = int(self.store.settings().get("retention_days") or 0)
+        except (TypeError, ValueError):
+            days = 0
+        with self.lock:   # 화면의 "지금 정리"와 한 시간 주기 정리가 겹치지 않게 합니다.
+            result = self.store.prune_results(days, busy_for=self.jobs.active_results)
+        result.update(time=time.time(), days=days)
+        self.last = result
+        if result["records"]:
+            # 콘솔 인코딩이 한글을 못 쓰는 환경(예: cp1252)에서도 정리 결과는 돌려줘야 하므로 출력 실패는 무시합니다.
+            try:
+                print("보관 기간(%d일)이 지난 기록 %d건(파일 %d개)을 지웠습니다." % (days, result["records"], result["files"]),
+                      flush=True)
+            except (UnicodeEncodeError, OSError, ValueError):
+                pass
+        return result
+
+
 class AutoWatcher:
     """새 덤프 자동 분석: 자동 분석을 켠 서버의 덤프 목록을 주기적으로 읽어, 새로 생긴 덤프로 작업을 시작합니다.
 
@@ -2791,6 +2865,8 @@ class App:
             print("평문으로 저장돼 있던 비밀을 암호화했습니다: secrets/%s" % name)
         self.auto = AutoWatcher(store, self.jobs)
         self.auto.start()
+        self.janitor = ResultJanitor(store, self.jobs)
+        self.janitor.start()
 
     def check_latest(self):
         settings = self.store.settings()
@@ -2802,6 +2878,7 @@ class App:
         settings["api_key_saved"] = bool(settings.get("api_key_file") and os.path.exists(settings["api_key_file"]))
         settings["cli_token_saved"] = bool(settings.get("cli_token_file") and os.path.exists(settings["cli_token_file"]))
         settings["secret_protection"] = kdump_llm.secret_protection()
+        settings["retention_last"] = self.janitor.last   # 마지막 보관 기간 정리 결과(없으면 None)
         return settings
 
 
@@ -3111,15 +3188,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(200, store.export_data(query.get("server", [""])[0], query.get("name", [""])[0],
                                                      mask=query.get("mask", ["0"])[0] == "1"))
 
+        if parts == ["retention", "run"] and method == "POST":
+            # 설정의 보관 기간으로 지금 정리합니다(0이면 아무것도 지우지 않음).
+            return self._json(200, app.janitor.run())
         if parts == ["settings"] and method == "POST":
             body = self._body()
             if "provider" in body and body["provider"] not in kdump_llm.PROVIDERS:
                 raise ApiError(400, "알 수 없는 provider입니다.")
-            for key in ("max_report_chars", "max_tokens", "timeout", "crash_timeout", "auto_interval"):
+            for key in ("max_report_chars", "max_tokens", "timeout", "crash_timeout", "auto_interval", "retention_days"):
                 if key in body:
                     body[key] = int(body[key])
             if "auto_interval" in body and not 1 <= body["auto_interval"] <= 1440:
                 raise ApiError(400, "자동 분석 확인 주기는 1~1440분이어야 합니다.")
+            if "retention_days" in body and not 0 <= body["retention_days"] <= 3650:
+                raise ApiError(400, "리포트 보관 기간은 0~3650일이어야 합니다(0이면 지우지 않음).")
             if "crash_timeout" in body and not 1 <= body["crash_timeout"] <= 1440:
                 raise ApiError(400, "crash 제한 시간은 1~1440분이어야 합니다.")
             if "update_repo" in body and not REPO_RE.match(str(body["update_repo"])):
@@ -3182,7 +3264,72 @@ def parse_args():
                         help="Windows 바탕화면과 시작 메뉴에 아이콘 바로가기를 만듭니다")
     parser.add_argument("--remove-shortcut", action="store_true", help="--install-shortcut으로 만든 바로가기를 지웁니다")
     parser.add_argument("--shortcut-dir", help="바로가기를 만들 폴더(기본: 바탕화면과 시작 메뉴)")
+    parser.add_argument("--service", action="store_true",
+                        help="서버에서 상시 실행(systemd 등): --port 그대로, 토큰은 파일에 두고 다시 써서 주소가 바뀌지 않음. "
+                             "화면의 '다시 시작'은 종료 코드 %d로 끝내 서비스 관리자가 다시 띄움" % RESTART_EXIT)
+    parser.add_argument("--token-file", help="--service의 접속 토큰 파일(기본: <데이터 폴더>/service-token, 없으면 만듦)")
+    parser.add_argument("--show-url", action="store_true",
+                        help="--service로 실행 중인(또는 실행할) 웹 UI의 접속 주소를 토큰 파일에서 읽어 출력")
     return parser.parse_args()
+
+
+SERVICE_TOKEN = "service-token"
+TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+
+
+def service_token(args, create=True):
+    """--service의 접속 토큰. 파일에 있으면 그대로 쓰고, 없거나 형식이 틀리면 새로 만들어 소유자만 읽게 저장합니다."""
+    path = args.token_file or os.path.join(args.data_dir, SERVICE_TOKEN)
+    try:
+        with open(path, encoding="ascii") as f:
+            token = f.read().strip()
+        if TOKEN_RE.match(token):
+            return token, path
+    except (OSError, UnicodeDecodeError):
+        pass
+    if not create:
+        return None, path
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    token = secrets.token_urlsafe(24)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="ascii") as f:
+        f.write(token + "\n")
+    return token, path
+
+
+def service_url(port, token):
+    return "http://127.0.0.1:%d/?t=%s" % (port, token)
+
+
+def show_service_url(args):
+    token, path = service_token(args, create=False)
+    if not token:
+        sys.exit("토큰 파일이 없습니다: %s (--service로 한 번 실행하면 만듭니다)" % path)
+    print(service_url(args.port, token))
+
+
+def serve_service(args):
+    """systemd 같은 서비스 관리자 아래에서 실행합니다. 감시 프로세스·브라우저 없이 정한 포트에서만 듣고,
+    다시 시작이 필요하면 RESTART_EXIT로 끝냅니다(서비스의 Restart=always가 새 코드로 다시 띄움)."""
+    store = Store(args.data_dir)
+    token, path = service_token(args)
+    httpd = bind_exact_port(args.port)
+    app = App(store, args.port, token=token, supervised=True)
+    app.httpd = httpd
+    Handler.app = app
+    print("kdump-analyzer 웹 UI v%s (서비스 모드)" % version_text())
+    print("데이터: %s" % args.data_dir)
+    print("127.0.0.1:%d에서 듣습니다. 다른 컴퓨터에서는 SSH 포트 전달로 접속합니다:" % args.port)
+    print("  ssh -L %d:127.0.0.1:%d <사용자>@<이 서버>" % (args.port, args.port))
+    print("접속 주소는 토큰 파일(%s)로 만듭니다: --show-url" % path, flush=True)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    httpd.server_close()
+    if app.restart_requested:
+        print("다시 시작을 요청받아 종료합니다(코드 %d)." % RESTART_EXIT, flush=True)
+        os._exit(RESTART_EXIT)
 
 
 def bind_free_port(start):
@@ -3457,13 +3604,28 @@ def supervise(args):
         remove_run_info(args.data_dir)
 
 
+def safe_console():
+    """콘솔·로그의 인코딩이 한글을 못 쓰면(예: cp1252, C 로케일의 서비스) print가 UnicodeEncodeError로 실패해
+    서버가 시작하지 못하거나 작업이 멈춥니다. 못 쓰는 글자는 \\uXXXX로 바꿔 출력하게 합니다."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def main():
+    safe_console()
     args = parse_args()
     if args.install_shortcut or args.remove_shortcut:
         return manage_shortcut(args)
+    if args.show_url:
+        return show_service_url(args)
     setup_log(args.data_dir)
     try:
-        if os.environ.get(ENV_WORKER) == "1":
+        if args.service:
+            serve_service(args)
+        elif os.environ.get(ENV_WORKER) == "1":
             serve(args, supervised=True)
         elif args.no_supervisor:
             serve(args)

@@ -396,3 +396,7 @@ table.list input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; 
 .auto-row .auto-detail { flex-basis: 100%; font-size: 12.5px; margin: 0; order: 6; }
 .auto-row .auto-actions { display: flex; gap: 6px; margin-left: auto; order: 4; }
 .auto-recent .linkish { margin-top: 6px; }
+
+/* ---------------- 설정: 리포트 보관 기간 */
+.retention-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 8px; }
+.retention-row .hint { flex: 1 1 260px; min-width: 0; }

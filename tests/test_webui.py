@@ -248,6 +248,62 @@ class AutoLogTest(unittest.TestCase):
         self.assertEqual(self.store.auto_log(), [])
 
 
+class RetentionTest(unittest.TestCase):
+    """리포트 보관 기간: 가장 최근 파일이 기간을 넘긴 기록만 지우고, 진행 중인 작업의 기록은 건너뜁니다."""
+
+    DAY = 86400
+    NOW = time.time()          # 파일 시각을 지금 기준으로 맞춰, 실제 시각으로 도는 정리와도 같은 결과
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = webui.Store(self.tmp.name)
+        self.folder = self.store.report_dir("db01")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write(self, name, age_days, source=None):
+        path = os.path.join(self.folder, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("kdump llm analysis\nsource_report: /x/%s\n\n판정: x\n" % source if source else "kdump summary report\n")
+        t = self.NOW - age_days * self.DAY
+        os.utime(path, (t, t))
+
+    def setup_records(self):
+        self.write("kdump-report-old.txt", 40)                                     # 오래된 리포트만
+        with open(os.path.join(self.folder, "kdump-report-old.json"), "w") as f:
+            f.write("{}")
+        self.write("kdump-report-reanalyzed.txt", 40)                              # 오래됐지만 최근에 다시 분석
+        self.write("kdump-analysis-reanalyzed.txt", 2, source="kdump-report-reanalyzed.txt")
+        self.write("kdump-report-new.txt", 3)                                      # 최근 리포트
+        self.write("kdump-analysis-orphan.txt", 50, source="kdump-report-gone.txt")  # 원본 없는 오래된 분석
+
+    def test_prunes_only_expired_records(self):
+        self.setup_records()
+        result = self.store.prune_results(30, now=self.NOW)
+        self.assertEqual((result["records"], result["files"], result["skipped"]), (2, 2, 0))
+        self.assertEqual(sorted(os.listdir(self.folder)), ["kdump-analysis-reanalyzed.txt",
+                                                            "kdump-report-new.txt", "kdump-report-reanalyzed.txt"])
+
+    def test_off_and_busy(self):
+        self.setup_records()
+        before = sorted(os.listdir(self.folder))
+        self.assertEqual(self.store.prune_results(0, now=self.NOW)["records"], 0)  # 0이면 끔
+        self.assertEqual(sorted(os.listdir(self.folder)), before)
+        result = self.store.prune_results(30, busy_for=lambda s: {"kdump-report-old.txt"}, now=self.NOW)
+        self.assertEqual((result["records"], result["skipped"]), (1, 1))
+        self.assertIn("kdump-report-old.txt", os.listdir(self.folder))
+
+    def test_janitor_uses_setting(self):
+        self.setup_records()
+        janitor = webui.ResultJanitor(self.store, webui.Jobs(self.store))
+        self.assertEqual(janitor.run()["records"], 0)                              # 기본 0일: 지우지 않음
+        self.store.save_settings({"retention_days": 30})
+        # 30일: 오래된 리포트, 원본 없는 분석은 지우고, 다시 분석한 기록과 최근 기록은 남깁니다.
+        self.assertEqual(janitor.run()["records"], 2)
+        self.assertEqual(janitor.last["days"], 30)
+
+
 class AutoWatcherTest(unittest.TestCase):
     """새 덤프 자동 분석: 기준 기록, 새 덤프, 쓰는 중인 덤프, 덮어쓴 덤프, 끄기, 접속 실패, 확인 주기."""
 
@@ -928,6 +984,21 @@ class WindowsServerTest(unittest.TestCase):
             with self.assertRaises(webui.ApiError):
                 store.save_server(dict(self.SERVER, os="solaris"))
 
+    def test_save_server_empty_tool_uses_default(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = webui.Store(d)
+            linux = store.save_server({"name": "db01", "target": "u@h", "tool": "  "})
+            self.assertEqual(linux["tool"], webui.DEFAULT_TOOL)
+            win = store.save_server(dict(self.SERVER, name="win01", tool=""))
+            self.assertEqual(win["tool"], webui.WIN_TOOL)
+            kept = store.save_server({"name": "db02", "target": "u@h", "tool": " analyze-kdump "})
+            self.assertEqual(kept["tool"], "analyze-kdump")                 # 명령 이름은 그대로(앞뒤 공백만 뺌)
+            # 예전 버전이 빈 값으로 저장한 서버도 읽을 때 기본 위치로 채웁니다.
+            with open(os.path.join(d, "servers.json"), "w", encoding="utf-8") as f:
+                json.dump([{"name": "old", "target": "u@h", "tool": ""},
+                           {"name": "oldwin", "target": "u@h", "tool": "", "os": "windows"}], f)
+            self.assertEqual([s["tool"] for s in store.servers()], [webui.DEFAULT_TOOL, webui.WIN_TOOL])
+
     def test_windows_summary_and_prompt(self):
         import json
         with tempfile.TemporaryDirectory() as d:
@@ -1126,6 +1197,63 @@ class WindowsServerTest(unittest.TestCase):
 def json_loads(data):
     import json
     return json.loads(data.decode("utf-8"))
+
+
+class ServiceModeTest(unittest.TestCase):
+    """서버 상시 실행(--service): 토큰 파일을 다시 쓰고, 정한 포트에서 토큰 주소로 로그인됩니다."""
+
+    def args(self, d, **kw):
+        return type("Args", (), dict({"data_dir": d, "token_file": None, "port": 8730}, **kw))
+
+    def test_token_file_reused_and_private(self):
+        with tempfile.TemporaryDirectory() as d:
+            token, path = webui.service_token(self.args(d))
+            self.assertRegex(token, webui.TOKEN_RE)
+            self.assertEqual(path, os.path.join(d, webui.SERVICE_TOKEN))
+            self.assertEqual(webui.service_token(self.args(d))[0], token)       # 다시 시작해도 같은 토큰
+            if os.name == "posix":
+                self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            with open(path, "w", encoding="ascii") as f:
+                f.write("bad token!\n")                                          # 형식이 틀리면 새로 만듦
+            self.assertNotEqual(webui.service_token(self.args(d))[0], "bad token!")
+            other = os.path.join(d, "sub", "tok")
+            self.assertEqual(webui.service_token(self.args(d, token_file=other))[1], other)
+            self.assertEqual(webui.service_token(self.args(os.path.join(d, "none")), create=False)[0], None)
+
+    def test_service_process_serves_token_login(self):
+        with tempfile.TemporaryDirectory() as d:
+            probe = webui.socketserver.TCPServer(("127.0.0.1", 0), None)
+            port = probe.server_address[1]
+            probe.server_close()
+            proc = subprocess.Popen([sys.executable, os.path.join(WEBUI, "kdump-webui.py"), "--service",
+                                     "--port", str(port), "--data-dir", d],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            try:
+                deadline = time.time() + 20
+                token_path = os.path.join(d, webui.SERVICE_TOKEN)
+                while not os.path.exists(token_path) and time.time() < deadline:
+                    time.sleep(0.2)
+                url = subprocess.run([sys.executable, os.path.join(WEBUI, "kdump-webui.py"), "--show-url",
+                                      "--port", str(port), "--data-dir", d],
+                                     capture_output=True, text=True, timeout=20).stdout.strip()
+                self.assertTrue(url.startswith("http://127.0.0.1:%d/?t=" % port), url)
+                import http.client
+                status = None
+                while time.time() < deadline:
+                    try:
+                        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                        conn.request("GET", url.split(str(port), 1)[1])
+                        resp = conn.getresponse()
+                        status, cookie = resp.status, resp.getheader("Set-Cookie", "")
+                        conn.close()
+                        break
+                    except OSError:
+                        time.sleep(0.3)
+                self.assertEqual(status, 302)                                      # 토큰 주소 → 쿠키 발급 후 이동
+                self.assertIn("kt=" + url.split("?t=", 1)[1], cookie)
+            finally:
+                proc.kill()
+                proc.communicate(timeout=10)
 
 
 class FetchLatestTest(unittest.TestCase):

@@ -1,7 +1,7 @@
 "use strict";
 
 // 서버(kdump-webui.py)의 API_LEVEL과 같아야 합니다. 다르면 업데이트 뒤 서버를 다시 시작하지 않은 것입니다.
-const API_LEVEL = 11;
+const API_LEVEL = 12;
 
 // ---------------------------------------------------------------- 상태와 공통
 
@@ -1856,8 +1856,39 @@ function fillSettings() {
   $("#cli-token-input").value = "";
   $("#settings-error").textContent = "";
   $("#llm-test-result").textContent = "";
+  $("#retention-state").textContent = retentionText(s);
   syncProviderFields();
 }
+
+// 리포트 보관 기간: 웹 UI에 저장된 기록 중 기간이 지난 것을 한 시간마다 지웁니다.
+function retentionText(s) {
+  const days = Number(s.retention_days) || 0;
+  const head = days ? `리포트와 LLM 분석 중 가장 최근 파일이 ${days}일 지난 기록을 한 시간마다 지웁니다. 서버의 덤프는 지우지 않습니다.`
+    : "보관 기간이 0이라 기록을 자동으로 지우지 않습니다.";
+  const last = s.retention_last;
+  if (!last) return head;
+  return `${head} 마지막 정리 ${fmtTime(last.time)}: ${last.records ? `기록 ${last.records}건(파일 ${last.files}개) 지움` : "지운 기록 없음"}${
+    last.skipped ? `, 진행 중인 작업 때문에 ${last.skipped}건 건너뜀` : ""}`;
+}
+
+$("#retention-run").addEventListener("click", async () => {
+  const btn = $("#retention-run");
+  const days = Number($("#settings-form").elements.retention_days.value) || 0;
+  if (!days) { toast("보관 기간을 1일 이상으로 정해야 정리합니다."); return; }
+  if (!confirm(`리포트와 LLM 분석 중 가장 최근 파일이 ${days}일 지난 기록을 지금 지웁니다.\n\n웹 UI에 저장된 파일만 지우며 되돌릴 수 없습니다. 서버의 덤프는 그대로입니다.`)) return;
+  btn.disabled = true;
+  try {
+    await saveSettings(true);        // 입력한 보관 기간을 먼저 저장합니다.
+    const r = await api("POST", "/api/retention/run");
+    state.settings.retention_last = r;
+    $("#retention-state").textContent = retentionText(state.settings);
+    toast(r.records ? `기록 ${r.records}건(파일 ${r.files}개)을 지웠습니다.` : "보관 기간이 지난 기록이 없습니다.");
+  } catch (err) {
+    $("#settings-error").textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 function settingsPayload() {
   const form = $("#settings-form");
