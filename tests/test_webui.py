@@ -414,6 +414,49 @@ class AutoWatcherTest(unittest.TestCase):
         with self.assertRaises(webui.ApiError):
             self.store.save_server(dict(webui.DEFAULT_SERVER, name="db03", target="u@h", auto="always"))
 
+    def test_backlog_on_enable_analyzes_unreported_dumps(self):
+        # 기존 덤프 4개: a는 리포트가 있음, b는 지금 분석 중, d는 방금 쓰임(아직 쓰는 중일 수 있음)
+        self.dumps["db01"] = [{"path": "/var/crash/%s/vmcore" % k, "mtime": t, "size": 1}
+                              for k, t in (("a", 900_000), ("b", 910_000), ("c", 920_000), ("d", self.now - 10))]
+        with open(os.path.join(self.store.report_dir("db01"), "kdump-report-a.txt"), "w", encoding="utf-8") as f:
+            f.write("kdump summary report\nvmcore:    /var/crash/a/vmcore\n")
+        self.jobs.active = {"/var/crash/b/vmcore"}
+        self.store.save_server(dict(webui.DEFAULT_SERVER, name="db01", target="u@h", auto="llm", auto_backlog=True),
+                               original="db01")
+        self.w.tick()
+        self.assertEqual(self.jobs.started, [("db01", "/var/crash/c/vmcore", "llm", True)])
+        st = self.w.snapshot()["db01"]
+        self.assertEqual((st["baseline"], st["backlog"], st["backlog_more"]), (4, 1, 0))
+        self.now += 601
+        self.w.tick()
+        # 기준에 든 덤프는 다시 시작하지 않고, 켤 때 쓰이던 d는 다 써진 뒤 새 덤프로 분석합니다.
+        self.assertEqual(self.jobs.started[1:], [("db01", "/var/crash/d/vmcore", "llm", True)])
+
+    def test_backlog_limit_and_off(self):
+        self.dumps["db01"] = [{"path": "/var/crash/%02d/vmcore" % i, "mtime": 800_000 + i, "size": 1} for i in range(13)]
+        self.store.save_server(dict(webui.DEFAULT_SERVER, name="db01", target="u@h", auto="report", auto_backlog=True),
+                               original="db01")
+        self.w.tick()
+        started = [v for _, v, _, _ in self.jobs.started]
+        self.assertEqual(len(started), webui.AutoWatcher.BACKLOG_MAX)
+        self.assertEqual(started[-1], "/var/crash/12/vmcore")     # 최근 것부터 고르고, 오래된 것부터 대기열에
+        self.assertNotIn("/var/crash/02/vmcore", started)
+        self.assertEqual(self.w.snapshot()["db01"]["backlog_more"], 3)
+        # 옵션을 끄고 다시 켜면(기본) 기존 덤프는 건너뜁니다.
+        self.store.save_server(dict(webui.DEFAULT_SERVER, name="db01", target="u@h", auto="off"), original="db01")
+        self.w.tick(force=True)
+        self.jobs.started.clear()
+        self.store.save_server(dict(webui.DEFAULT_SERVER, name="db01", target="u@h", auto="report"), original="db01")
+        self.w.tick(force=True)
+        self.assertEqual(self.jobs.started, [])
+
+    def test_check_now_only_one_server(self):
+        self.store.save_server(dict(webui.DEFAULT_SERVER, name="db02", target="u@h2", auto="report"), original="db02")
+        self.w.tick()
+        self.listed.clear()
+        self.w.tick(force=True, only="db02")                      # "지금 확인": 그 서버만, 주기와 상관없이
+        self.assertEqual(self.listed, ["db02"])
+
 
 class SecretTest(unittest.TestCase):
     """API 키·토큰 저장: Windows는 DPAPI로 암호화, 다른 운영체제는 파일 권한. 예전 평문은 시작할 때 암호화."""

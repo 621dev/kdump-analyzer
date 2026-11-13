@@ -105,6 +105,8 @@ DEFAULT_SERVER = {
     "tool": DEFAULT_TOOL, "crash_dir": "/var/crash", "method": "auto", "os": "linux",
     # 새 덤프 자동 분석: off | report(리포트) | llm(리포트 + LLM 분석)
     "auto": "off",
+    # 자동 분석을 켤 때(첫 확인) 리포트가 없는 기존 덤프도 분석할지. 끄면 그때 있던 덤프는 기준으로만 기록합니다.
+    "auto_backlog": False,
 }
 AUTO_MODES = ("off", "report", "llm")
 
@@ -180,6 +182,7 @@ class Store:
         server.update({k: values[k] for k in DEFAULT_SERVER if k in values})
         server["port"] = int(server.get("port") or 22)
         server["sudo"] = bool(server.get("sudo"))
+        server["auto_backlog"] = bool(server.get("auto_backlog"))
         if not NAME_RE.match(server["name"] or ""):
             raise ApiError(400, "서버 이름은 영문, 숫자, . _ - 만 쓸 수 있습니다.")
         if not valid_ssh_target(server["target"]):
@@ -2725,6 +2728,19 @@ class AutoWatcher:
 
     TICK = 30        # 확인할 서버가 있는지 보는 간격(초)
     SETTLE = 60      # 수정 시각이 이보다 최근인 덤프는 아직 쓰는 중일 수 있어 미룹니다(초)
+    BACKLOG_MAX = 10 # 켤 때 분석하는 기존 덤프의 최대 개수(덤프 하나에 몇 분씩 걸려 한꺼번에 돌리지 않음)
+
+    def start_backlog(self, server, current, now):
+        """웹 UI에 리포트가 없는 기존 덤프로 자동 분석 작업을 시작합니다. (시작한 수, 개수 제한으로 남긴 수)"""
+        name = server["name"]
+        analyzed = {r["report"].get("vmcore") for r in self.store.history(name) if r["report"]}
+        active = self.jobs.active_vmcores(name)
+        todo = [path for path, mtime in sorted(current.items(), key=lambda kv: kv[1], reverse=True)
+                if path not in analyzed and path not in active and now - mtime >= self.SETTLE]
+        kind = "llm" if server.get("auto") == "llm" else "report"
+        for path in reversed(todo[:self.BACKLOG_MAX]):   # 오래된 것부터 대기열에 넣습니다.
+            self.jobs.start_report(name, path, kind, auto=True)
+        return min(len(todo), self.BACKLOG_MAX), max(0, len(todo) - self.BACKLOG_MAX)
 
     def __init__(self, store, jobs, list_dumps=None, now=time.time):
         self.store = store
@@ -2732,7 +2748,8 @@ class AutoWatcher:
         self.list_dumps = list_dumps or list_vmcores
         self.now = now
         self.lock = threading.Lock()
-        self.status = {}     # 서버 이름 -> {"checked", "next", "error", "found", "baseline"}
+        self.status = {}     # 서버 이름 -> {"checked", "next", "error", "found", "baseline", "backlog", "backlog_more"}
+        self.tick_lock = threading.Lock()
         self.stop = threading.Event()
 
     def start(self):
@@ -2752,8 +2769,13 @@ class AutoWatcher:
             minutes = DEFAULT_SETTINGS["auto_interval"]
         return max(1, min(minutes, 1440)) * 60
 
-    def tick(self, force=False):
-        """확인할 때가 된 서버를 확인합니다. force면 시각과 상관없이 모두 확인합니다."""
+    def tick(self, force=False, only=None):
+        """확인할 때가 된 서버를 확인합니다. force면 시각과 상관없이 확인합니다(only를 주면 그 서버만).
+        감시 스레드와 화면의 "지금 확인"이 겹쳐 같은 덤프를 두 번 시작하지 않도록 한 번에 하나만 돕니다."""
+        with self.tick_lock:
+            self._tick(force, only)
+
+    def _tick(self, force, only):
         servers = [s for s in self.store.servers() if s.get("auto", "off") != "off"]
         names = {s["name"] for s in servers}
         seen = self.store._load("auto-seen.json", {})
@@ -2769,6 +2791,8 @@ class AutoWatcher:
             del seen[n]
         for server in servers:
             st = self.status.get(server["name"], {})
+            if only and server["name"] != only:
+                continue
             if not force and st.get("next", 0) > now:
                 continue
             changed |= self.check(server, seen, now)
@@ -2789,9 +2813,13 @@ class AutoWatcher:
         known = seen.get(name)
         current = {i["path"]: i["mtime"] for i in items}
         if known is None:
-            # 처음: 지금 있는 덤프를 기준으로 삼습니다.
-            seen[name] = {"since": now, "dumps": current}
+            # 처음: 지금 있는 덤프를 기준으로 삼습니다. 방금 쓰이고 있는 덤프(SETTLE초 이내)는 켠 뒤에 생긴
+            # 새 덤프일 수 있어 기준에서 빼고, 다음 확인 때 새 덤프로 분석합니다.
+            seen[name] = {"since": now, "dumps": {p: m for p, m in current.items() if now - m >= self.SETTLE}}
             st["baseline"] = len(current)
+            if server.get("auto_backlog"):
+                # 켤 때 리포트가 없는 기존 덤프도 분석합니다(최근 것부터 BACKLOG_MAX개).
+                st["backlog"], st["backlog_more"] = self.start_backlog(server, current, now)
             with self.lock:
                 self.status[name] = st
             return True
@@ -2979,7 +3007,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             active = [j for j in app.jobs.recent() if j.get("auto") and j.get("status") in ("queued", "running")]
             return self._json(200, {"log": store.auto_log(), "active": active})
         if parts == ["auto", "check"] and method == "POST":
-            app.auto.tick(force=True)
+            # 화면의 "지금 확인": 주기를 기다리지 않고 확인합니다. server를 주면 그 서버만 확인합니다.
+            only = (self._body() or {}).get("server") or None
+            if only:
+                store.server(only)
+            app.auto.tick(force=True, only=only)
             return self._json(200, {"status": app.auto.snapshot(),
                                     "jobs": [j for j in app.jobs.recent() if j.get("auto")]})
         if parts == ["shutdown"] and method == "POST":
